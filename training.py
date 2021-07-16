@@ -16,11 +16,11 @@ from PIL import Image
 
 # Flag for data augmentation
 augment = False
-EVT_SIZE_X = 21
-EVT_SIZE_Y = 21
-ERR_SIZE = 10
-ERR_RANGE_MIN = -0.0025
-ERR_RANGE_MAX = 0.0025
+PIXEL_SIZE = 0.005
+EVT_SIZE = 41                  # size of event grid (in X and Y)
+ERR_SIZE = 84                 # size of error grid (in X and Y)
+PIXEL_ERR_RANGE_MIN = -0.0025  # in-pixel error range minimum
+PIXEL_ERR_RANGE_MAX = 0.0025   # in-pixel error range maximum
 
 # Modified from medicaltorch.transforms: https://github.com/perone/medicaltorch/blob/master/medicaltorch/transforms.py
 def rotate3D(data,axis=0):
@@ -89,15 +89,15 @@ def sum_neighbors(arr,ind,remove = False):
 
 
 class EMDataset(Dataset):
-    def __init__(self, dframe, noise_mean=0, noise_sigma=0, nstart=0, nend=0, pixel_width=0.005, add_noise=False, augment=False):
+    def __init__(self, dframe, noise_mean=0, noise_sigma=0, nstart=0, nend=0, add_noise=False, add_shift=0, augment=False):
 
         # Save some inputs for later use.
         self.dframe = dframe
         self.augment = augment
         self.noise_mean = noise_mean
         self.noise_sigma = noise_sigma
-        self.pixel_width = pixel_width
         self.add_noise = add_noise
+        self.add_shift = add_shift
 
         # Open the dataframe.
         self.df_data = pd.read_pickle(dframe)
@@ -122,13 +122,12 @@ class EMDataset(Dataset):
         evt = self.events[idx]
 
         # Prepare the event.
-        #evt_arr = np.zeros([EVT_SIZE_X,EVT_SIZE_Y])
         evt_arr = np.zeros([101,101])
         df_evt = self.df_data[self.df_data.event == evt]
         for row,col,counts in zip(df_evt['row'].values,df_evt['col'].values,df_evt['counts'].values):
             evt_arr[row,col] += counts
 
-        evt_arr = evt_arr[50-int((EVT_SIZE_Y-1)/2):50+int((EVT_SIZE_Y-1)/2)+1,50-int((EVT_SIZE_X-1)/2):50+int((EVT_SIZE_X-1)/2)+1]
+        evt_arr = evt_arr[50-int((EVT_SIZE-1)/2):50+int((EVT_SIZE-1)/2)+1,50-int((EVT_SIZE-1)/2):50+int((EVT_SIZE-1)/2)+1]
 
         # Normalize to value of greatest magnitude = 1.
         #evt_arr /= 10000 #np.max(np.abs(evt_arr))
@@ -136,75 +135,34 @@ class EMDataset(Dataset):
         x_shift = 0.
         y_shift = 0.
 
-        if(self.add_noise):
+        # Add the shift, if specified.
+        if(self.add_shift > 0):
 
-            max_before_noise = np.unravel_index(evt_arr.argmax(),evt_arr.shape)
+            x_shift = np.random.randint(-self.add_shift,self.add_shift)
+            y_shift = np.random.randint(-self.add_shift,self.add_shift)
 
-            # Add the noise.
-            evt_arr = gaussnoise(evt_arr, mean=self.noise_mean, stdev=self.noise_sigma)
-
-            # Make a copy of the array that we can safely modify.
-            evt_arr_temp = np.copy(evt_arr)
-
-            # ------------------------------------------------------------------------
-            # Determine the new maximum, as the largest 3x3 sum around a maximum pixel.
-            # 1. Find the initial maximum and compute sum of surrounding 3x3 region
-            # 2. Remove 3x3 region summed in step 1 from consideration for being maximum pixel
-            # 3. Find a new maximum and compute the 3x3 sum about this new maximum
-            # 4. Remove 3x3 region summed in step 2 from consideration for being maximum pixel
-            # 5. If the 3x3 region sum from step 3 is greater than that of the initial maximum from step 1, replace the initial maximum with the new maximum
-            # 6. Repeat steps 3-5 until the new maximum is <= 0 or the region sum is less than the initial region sum
-
-            # Get the initial maximum and neighbor sum, removing these neighbors from consideration for the next maximum.
-            max_init   = np.unravel_index(evt_arr_temp.argmax(),evt_arr.shape)
-            nbsum_init = sum_neighbors(evt_arr_temp,max_init,remove=True)
-            found = False
-            while(not found):
-
-                # Get the next maximum.
-                max_current   = np.unravel_index(evt_arr_temp.argmax(),evt_arr.shape)
-                nbsum_current = sum_neighbors(evt_arr,max_current,remove=False)        # note: the sum should be from the original (unmodified) array
-
-                # A maximum of less than or equal to zero means we are done, and we should keep the previous maximum.
-                if(evt_arr[max_current] <= 0):
-                    found = True
-
-                # If the current neighbor sum is greater than that of the initial maximum, replace the initial maximum with the current one.
-                elif(nbsum_current > nbsum_init):
-                    sum_neighbors(evt_arr_temp,max_current,remove=True)  # remove the neighbors of the current maximum
-
-                    # Replace the initial maximum and its neighbor sum.
-                    #print("Replacing init maximum at",max_init,"with max_current",max_current)
-                    max_init = max_current
-                    nbsum_init = nbsum_current
-
-                # Otherwise keep the current initial maximum.
-                else:
-                    found = True
-            # ------------------------------------------------------------------------
-
-            # Calculate the shift.
-            x_shift = (max_init[1] - max_before_noise[1])
-            y_shift = (max_init[0] - max_before_noise[0])
-
-            # Shift to the new maximum.
             evt_arr = np.roll(evt_arr,x_shift,axis=1)
             evt_arr = np.roll(evt_arr,y_shift,axis=0)
 
+        # Add Gaussian noise.
+        if(self.add_noise):
+            evt_arr = gaussnoise(evt_arr, mean=self.noise_mean, stdev=self.noise_sigma)
+
         # Add the relative incident positions to the shifts.
-        err = [self.pixel_width*x_shift + df_evt.xinc.values[0], self.pixel_width*y_shift + df_evt.yinc.values[0]]
+        err = [PIXEL_SIZE*x_shift + df_evt.xinc.values[0], PIXEL_SIZE*y_shift + df_evt.yinc.values[0]]
 
         # Construct the error matrix.
-        #err_mat = np.zeros([ERR_SIZE,ERR_SIZE])
-        xbin = int(ERR_SIZE*(err[0] - ERR_RANGE_MIN)/(ERR_RANGE_MAX - ERR_RANGE_MIN))
+        SHIFTED_ERR_RANGE_MIN = PIXEL_ERR_RANGE_MIN - self.add_shift*PIXEL_SIZE
+        SHIFTED_ERR_RANGE_MAX = PIXEL_ERR_RANGE_MAX + self.add_shift*PIXEL_SIZE
+
+        xbin = int(ERR_SIZE*(err[0] - SHIFTED_ERR_RANGE_MIN)/(SHIFTED_ERR_RANGE_MAX - SHIFTED_ERR_RANGE_MIN))
         xbin = max(xbin,0)
         xbin = min(xbin,ERR_SIZE-1)
 
-        ybin = int(ERR_SIZE*(err[1] - ERR_RANGE_MIN)/(ERR_RANGE_MAX - ERR_RANGE_MIN))
+        ybin = int(ERR_SIZE*(err[1] - SHIFTED_ERR_RANGE_MIN)/(SHIFTED_ERR_RANGE_MAX - SHIFTED_ERR_RANGE_MIN))
         ybin = max(ybin,0)
         ybin = min(ybin,ERR_SIZE-1)
 
-        #err_mat[ybin,xbin] = 1
         err_ind = (ybin*ERR_SIZE) + xbin
 
         return evt_arr,err,err_ind
@@ -295,3 +253,60 @@ def val(model, epoch, val_loader):
     print("---EPOCH AVG VAL LOSS:",np.mean(losses_epoch),"ACCURACY:",np.mean(accuracies_epoch))
     with open("val.txt", "a") as fval:
         fval.write("{} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(accuracies_epoch)))
+
+
+# OLD CODE
+# if(self.add_noise):
+#
+#     max_before_noise = np.unravel_index(evt_arr.argmax(),evt_arr.shape)
+#
+#     # Add the noise.
+#     evt_arr = gaussnoise(evt_arr, mean=self.noise_mean, stdev=self.noise_sigma)
+#
+#     # Make a copy of the array that we can safely modify.
+#     evt_arr_temp = np.copy(evt_arr)
+#
+#     # ------------------------------------------------------------------------
+#     # Determine the new maximum, as the largest 3x3 sum around a maximum pixel.
+#     # 1. Find the initial maximum and compute sum of surrounding 3x3 region
+#     # 2. Remove 3x3 region summed in step 1 from consideration for being maximum pixel
+#     # 3. Find a new maximum and compute the 3x3 sum about this new maximum
+#     # 4. Remove 3x3 region summed in step 2 from consideration for being maximum pixel
+#     # 5. If the 3x3 region sum from step 3 is greater than that of the initial maximum from step 1, replace the initial maximum with the new maximum
+#     # 6. Repeat steps 3-5 until the new maximum is <= 0 or the region sum is less than the initial region sum
+#
+#     # Get the initial maximum and neighbor sum, removing these neighbors from consideration for the next maximum.
+#     max_init   = np.unravel_index(evt_arr_temp.argmax(),evt_arr.shape)
+#     nbsum_init = sum_neighbors(evt_arr_temp,max_init,remove=True)
+#     found = False
+#     while(not found):
+#
+#         # Get the next maximum.
+#         max_current   = np.unravel_index(evt_arr_temp.argmax(),evt_arr.shape)
+#         nbsum_current = sum_neighbors(evt_arr,max_current,remove=False)        # note: the sum should be from the original (unmodified) array
+#
+#         # A maximum of less than or equal to zero means we are done, and we should keep the previous maximum.
+#         if(evt_arr[max_current] <= 0):
+#             found = True
+#
+#         # If the current neighbor sum is greater than that of the initial maximum, replace the initial maximum with the current one.
+#         elif(nbsum_current > nbsum_init):
+#             sum_neighbors(evt_arr_temp,max_current,remove=True)  # remove the neighbors of the current maximum
+#
+#             # Replace the initial maximum and its neighbor sum.
+#             #print("Replacing init maximum at",max_init,"with max_current",max_current)
+#             max_init = max_current
+#             nbsum_init = nbsum_current
+#
+#         # Otherwise keep the current initial maximum.
+#         else:
+#             found = True
+#     # ------------------------------------------------------------------------
+#
+#     # Calculate the shift.
+#     x_shift = (max_init[1] - max_before_noise[1])
+#     y_shift = (max_init[0] - max_before_noise[0])
+#
+#     # Shift to the new maximum.
+#     evt_arr = np.roll(evt_arr,x_shift,axis=1)
+#     evt_arr = np.roll(evt_arr,y_shift,axis=0)

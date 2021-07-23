@@ -23,6 +23,23 @@ distribution must actually correspond to events with much larger error using the
 perhaps there is still a slight asymmetry in favor of the 3x3 centroid for
 low error differences, but the NN still seems to give similar performance.
 
+We note that the above comparison was somewhat unfair - the NN was essentially
+restricted to predicting within the central pixel (some predictions fell outside
+of this because the incident location was taken to be the mean of the 2D Gaussian,
+which may have been outside the 10x10 grid for events near the edge) while the
+3x3 method was not told that the central pixel was correct. If we now:
+
+- demand for the 3x3 method that the central pixel is always correctly chosen
+- use the point of maximum predicted probability within the 10x10 grid for the NN (not the mean of the Gaussian fit)
+
+Here are the errors:
+
+![](fig/20210724/EM_NN_errors_NN_vs_3x3_centralpixel.png)
+
+and the error differences
+
+![](fig/20210724/EM_NN_error_differences_NN_vs_3x3_centralpixel.png)
+
 ## 23 JUL 2021
 
 The net was trained further with a prediction grid of 126x126 with learning rates of 1e-3, 1e-4 (first jump in loss) and 1e-5 (2nd jump in loss):

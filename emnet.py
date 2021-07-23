@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 netdebug = False
 xdim = ydim = 41
-err_size = 126
+err_size = 10
 chi = 16
 
 class FCNet(nn.Module):

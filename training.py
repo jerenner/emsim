@@ -18,7 +18,7 @@ from PIL import Image
 augment = False
 PIXEL_SIZE = 0.005
 EVT_SIZE = 41                  # size of event grid (in X and Y)
-ERR_SIZE = 126                 # size of error grid (in X and Y)
+ERR_SIZE = 10                 # size of error grid (in X and Y)
 PIXEL_ERR_RANGE_MIN = -0.0025  # in-pixel error range minimum
 PIXEL_ERR_RANGE_MAX = 0.0025   # in-pixel error range maximum
 

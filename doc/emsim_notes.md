@@ -1,5 +1,28 @@
 # EMSim Notes
 
+## 24 JUL 2021
+
+Training a net with a 10x10 prediction grid and no displacement of the
+central pixel seems to give better results for the neural net. Here we trained
+with learning rate 1e-3 for 73 epochs and then 1e-4 for the rest:
+
+![](fig/20210724/EM_NN_training_10grid.png)
+
+Here are the errors in the determined positions (note that in the case of the 3x3
+centroid method, the pixel of electron incidence was still assumed to be the one with the most charge, and not the central pixel):
+
+![](fig/20210724/EM_NN_errors_NN_vs_3x3.png)
+
+![](fig/20210724/EM_NN_errors_NN_vs_3x3_zoom.png)
+
+Here it looks like the NN gives similar performance for well-identified events. In fact, some of these events in the longer shoulder of the NN
+distribution must actually correspond to events with much larger error using the 3x3 method. Looking at the error differences,
+
+![](fig/20210724/EM_NN_error_differences_NN_vs_3x3.png)
+
+perhaps there is still a slight asymmetry in favor of the 3x3 centroid for
+low error differences, but the NN still seems to give similar performance.
+
 ## 23 JUL 2021
 
 The net was trained further with a prediction grid of 126x126 with learning rates of 1e-3, 1e-4 (first jump in loss) and 1e-5 (2nd jump in loss):

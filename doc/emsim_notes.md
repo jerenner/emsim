@@ -36,6 +36,9 @@ Here are the errors:
 
 ![](fig/20210724/EM_NN_errors_NN_vs_3x3_centralpixel.png)
 
+`Mean 3x3 error -- 0.0011584349887750222`<br>
+`Mean NN error --- 0.0011583734270575604`
+
 and the error differences
 
 ![](fig/20210724/EM_NN_error_differences_NN_vs_3x3_centralpixel.png)

@@ -1,5 +1,19 @@
 # EMSim Notes
 
+## 23 JUL 2021
+
+The net was trained further with a prediction grid of 126x126 with learning rates of 1e-3, 1e-4 (first jump in loss) and 1e-5 (2nd jump in loss):
+
+![](fig/20210723/EM_NN_training_126grid_continued.png)
+
+It looks like most additional gains were made with the 1e-4 learning rate. Looking
+at an individual event (using the model after the training with the 1e-4 learning rate):
+
+![](fig/20210723/EM_NN_evt81000_126grid_1.png)
+
+It looks like the uncertainty of the net prediction is still high, and we can also
+see the structure of the 21x21 event pixels on the 126x126 prediction grid.
+
 ## 22 JUL 2021
 
 The net should be able to match the standard method at low error. Maybe there is a way to weight the loss toward easier clusters, but I would think that already the net is getting more exposure to easier events as there are more of them. Looking at the NN error minus the 3x3 (0 threshold) error, it looks like when the error difference is less than 2 pixels, the NN is more likely to give greater error (the difference is positive):

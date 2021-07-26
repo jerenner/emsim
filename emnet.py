@@ -6,17 +6,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 netdebug = False
-xdim = ydim = 41
-err_size = 10
+EVT_SIZE = 41     # size of event grid (in X and Y)
+ERR_SIZE = 10     # size of prediction grid (in X and Y)
+PIXEL_SIZE = 0.005
+PIXEL_ERR_RANGE_MIN = -0.0025  # in-pixel error range minimum
+PIXEL_ERR_RANGE_MAX = 0.0025   # in-pixel error range maximum
 chi = 16
 
 class FCNet(nn.Module):
 
     def __init__(self):
         super(FCNet, self).__init__()
-        self.fc1 = nn.Linear(xdim*ydim, 256)
+        self.fc1 = nn.Linear(EVT_SIZE*EVT_SIZE, 256)
         self.fc2 = nn.Linear(1024, 256)
-        self.fc3 = nn.Linear(256, err_size*err_size)
+        self.fc3 = nn.Linear(256, ERR_SIZE*ERR_SIZE)
         self.drop1 = nn.Dropout(p=0.5)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
@@ -57,7 +60,7 @@ class basicCNN(nn.Module):
         self.pool2 = nn.MaxPool2d(2, 2)
         self.pool3 = nn.MaxPool2d(3, 3)
         self.pool4 = nn.MaxPool2d(4, 4)
-        self.fc = nn.Linear(chi*4, err_size*err_size)
+        self.fc = nn.Linear(chi*4, ERR_SIZE*ERR_SIZE)
         self.drop1 = nn.Dropout(p=0.5)
 
         for m in self.modules():

@@ -14,13 +14,10 @@ from torch.utils.data import Dataset
 from torch.autograd import Variable
 from PIL import Image
 
+import emnet
+
 # Flag for data augmentation
 augment = False
-PIXEL_SIZE = 0.005
-EVT_SIZE = 41                  # size of event grid (in X and Y)
-ERR_SIZE = 10                 # size of error grid (in X and Y)
-PIXEL_ERR_RANGE_MIN = -0.0025  # in-pixel error range minimum
-PIXEL_ERR_RANGE_MAX = 0.0025   # in-pixel error range maximum
 
 # Modified from medicaltorch.transforms: https://github.com/perone/medicaltorch/blob/master/medicaltorch/transforms.py
 def rotate3D(data,axis=0):
@@ -39,53 +36,8 @@ def rotate3D(data,axis=0):
 
 # Add a random gaussian noise to the data.
 def gaussnoise(data, mean=0.0, stdev=0.05):
-
     dnoise = data + np.random.normal(loc=mean,scale=stdev,size=data.shape)
     return dnoise
-
-# Sum the 3x3 square within the array containing the specified index and its neighbors.
-# Set all neighbors included in the sum to 0 if the remove option is set.
-def sum_neighbors(arr,ind,remove = False):
-
-    # Start with the central pixel.
-    sum = arr[ind]
-    if(remove): arr[ind] = 0
-
-    # Determine which neighbors exist.
-    left_neighbor  = (ind[1]-1) >= 0
-    right_neighbor = (ind[1]+1) < arr.shape[0]
-    upper_neighbor = (ind[0]-1) >= 0
-    lower_neighbor = (ind[0]+1) < arr.shape[1]
-
-    # Add the 4 side-neighboring pixels to the sum.
-    if(left_neighbor):
-        sum += arr[ind[0],ind[1]-1]
-        if(remove): arr[ind[0],ind[1]-1] = 0
-    if(right_neighbor):
-        sum += arr[ind[0],ind[1]+1]
-        if(remove): arr[ind[0],ind[1]+1] = 0
-    if(upper_neighbor):
-        sum += arr[ind[0]-1,ind[1]]
-        if(remove): arr[ind[0]-1,ind[1]] = 0
-    if(lower_neighbor):
-        sum += arr[ind[0]+1,ind[1]]
-        if(remove): arr[ind[0]+1,ind[1]] = 0
-
-    # Add the 4 diagonal neighbors to the sum.
-    if(left_neighbor and upper_neighbor):
-        sum += arr[ind[0]-1,ind[1]-1]
-        if(remove): arr[ind[0]-1,ind[1]-1] = 0
-    if(right_neighbor and upper_neighbor):
-        sum += arr[ind[0]-1,ind[1]+1]
-        if(remove): arr[ind[0]-1,ind[1]+1] = 0
-    if(left_neighbor and lower_neighbor):
-        sum += arr[ind[0]+1,ind[1]-1]
-        if(remove): arr[ind[0]+1,ind[1]-1] = 0
-    if(right_neighbor and lower_neighbor):
-        sum += arr[ind[0]+1,ind[1]+1]
-        if(remove): arr[ind[0]+1,ind[1]+1] = 0
-
-    return sum
 
 
 class EMDataset(Dataset):
@@ -127,7 +79,7 @@ class EMDataset(Dataset):
         for row,col,counts in zip(df_evt['row'].values,df_evt['col'].values,df_evt['counts'].values):
             evt_arr[row,col] += counts
 
-        evt_arr = evt_arr[50-int((EVT_SIZE-1)/2):50+int((EVT_SIZE-1)/2)+1,50-int((EVT_SIZE-1)/2):50+int((EVT_SIZE-1)/2)+1]
+        evt_arr = evt_arr[50-int((emnet.EVT_SIZE-1)/2):50+int((emnet.EVT_SIZE-1)/2)+1,50-int((emnet.EVT_SIZE-1)/2):50+int((emnet.EVT_SIZE-1)/2)+1]
 
         # Normalize to value of greatest magnitude = 1.
         #evt_arr /= 10000 #np.max(np.abs(evt_arr))
@@ -149,21 +101,21 @@ class EMDataset(Dataset):
             evt_arr = gaussnoise(evt_arr, mean=self.noise_mean, stdev=self.noise_sigma)
 
         # Add the relative incident positions to the shifts.
-        err = [PIXEL_SIZE*x_shift + df_evt.xinc.values[0], PIXEL_SIZE*y_shift + df_evt.yinc.values[0]]
+        err = [emnet.PIXEL_SIZE*x_shift + df_evt.xinc.values[0], emnet.PIXEL_SIZE*y_shift + df_evt.yinc.values[0]]
 
         # Construct the error matrix.
-        SHIFTED_ERR_RANGE_MIN = PIXEL_ERR_RANGE_MIN - self.add_shift*PIXEL_SIZE
-        SHIFTED_ERR_RANGE_MAX = PIXEL_ERR_RANGE_MAX + self.add_shift*PIXEL_SIZE
+        SHIFTED_ERR_RANGE_MIN = emnet.PIXEL_ERR_RANGE_MIN - self.add_shift*emnet.PIXEL_SIZE
+        SHIFTED_ERR_RANGE_MAX = emnet.PIXEL_ERR_RANGE_MAX + self.add_shift*emnet.PIXEL_SIZE
 
-        xbin = int(ERR_SIZE*(err[0] - SHIFTED_ERR_RANGE_MIN)/(SHIFTED_ERR_RANGE_MAX - SHIFTED_ERR_RANGE_MIN))
+        xbin = int(emnet.ERR_SIZE*(err[0] - SHIFTED_ERR_RANGE_MIN)/(SHIFTED_ERR_RANGE_MAX - SHIFTED_ERR_RANGE_MIN))
         xbin = max(xbin,0)
-        xbin = min(xbin,ERR_SIZE-1)
+        xbin = min(xbin,emnet.ERR_SIZE-1)
 
-        ybin = int(ERR_SIZE*(err[1] - SHIFTED_ERR_RANGE_MIN)/(SHIFTED_ERR_RANGE_MAX - SHIFTED_ERR_RANGE_MIN))
+        ybin = int(emnet.ERR_SIZE*(err[1] - SHIFTED_ERR_RANGE_MIN)/(SHIFTED_ERR_RANGE_MAX - SHIFTED_ERR_RANGE_MIN))
         ybin = max(ybin,0)
-        ybin = min(ybin,ERR_SIZE-1)
+        ybin = min(ybin,emnet.ERR_SIZE-1)
 
-        err_ind = (ybin*ERR_SIZE) + xbin
+        err_ind = (ybin*emnet.ERR_SIZE) + xbin
 
         return evt_arr,err,err_ind
 
@@ -190,6 +142,61 @@ def my_collate(batch):
     target = torch.tensor(np.array(target)).long()
 
     return (data, target)
+
+
+class EMFrameDataset(Dataset):
+    def __init__(self, emdset, nframes=100, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0):
+
+        # Save some inputs for later use.
+        self.emdset = emdset
+        self.nframes = nframes
+        self.frame_size = frame_size
+        self.nelec_mean = nelec_mean
+        self.nelec_sigma = nelec_sigma
+        self.noise_mean = noise_mean
+        self.noise_sigma = noise_sigma
+
+    def __len__(self):
+        return nframes
+
+    def __getitem__(self, idx):
+
+        # Create a random event (index does nothing, though could possibly be used as seed).
+        frame = np.zeros([self.frame_size,self.frame_size])
+        frame_truth = np.zeros(frame.shape)
+
+        # Determine the number of electrons.
+        nelec = int(np.random.normal(loc=self.nelec_mean,scale=self.nelec_sigma))
+
+        # Add all electrons to the event.
+        for iel in range(nelec):
+
+            # Pick a random location in the frame for the electron.
+            eloc = np.unravel_index(np.random.randint(frame.size),frame.shape)
+
+            # Pick a random event from the EM dataset.
+            ievt = np.random.randint(len(self.emdset))
+            evt_item = self.emdset[ievt]
+            evt_arr = evt_item[0]
+
+            # Add the electron to the frame.
+            delta = int((emnet.EVT_SIZE-1)/2)  # the extent of the event from the central pixel
+            ileft = max(eloc[0]-delta,0); delta_ileft = eloc[0] - ileft
+            jleft = max(eloc[1]-delta,0); delta_jleft = eloc[1] - jleft
+
+            iright = min(eloc[0]+delta+1,frame.shape[0]); delta_iright = iright - eloc[0]
+            jright = min(eloc[1]+delta+1,frame.shape[1]); delta_jright = jright - eloc[1]
+
+            frame[ileft:iright,jleft:jright] += evt_arr[delta-delta_ileft:delta+delta_iright,delta-delta_jleft:delta+delta_jright]
+
+            # Add the electron to the truth array.
+            frame_truth[eloc] = 1
+
+        # Add the noise.
+        if(self.noise_sigma > 0):
+            frame = gaussnoise(frame, mean=self.noise_mean, stdev=self.noise_sigma)
+
+        return frame,frame_truth
 
 
 def train(model, epoch, train_loader, optimizer):
@@ -255,7 +262,53 @@ def val(model, epoch, val_loader):
         fval.write("{} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(accuracies_epoch)))
 
 
+# ------------------------------------------------------------------------------
 # OLD CODE
+
+# Sum the 3x3 square within the array containing the specified index and its neighbors.
+# Set all neighbors included in the sum to 0 if the remove option is set.
+def sum_neighbors(arr,ind,remove = False):
+
+    # Start with the central pixel.
+    sum = arr[ind]
+    if(remove): arr[ind] = 0
+
+    # Determine which neighbors exist.
+    left_neighbor  = (ind[1]-1) >= 0
+    right_neighbor = (ind[1]+1) < arr.shape[0]
+    upper_neighbor = (ind[0]-1) >= 0
+    lower_neighbor = (ind[0]+1) < arr.shape[1]
+
+    # Add the 4 side-neighboring pixels to the sum.
+    if(left_neighbor):
+        sum += arr[ind[0],ind[1]-1]
+        if(remove): arr[ind[0],ind[1]-1] = 0
+    if(right_neighbor):
+        sum += arr[ind[0],ind[1]+1]
+        if(remove): arr[ind[0],ind[1]+1] = 0
+    if(upper_neighbor):
+        sum += arr[ind[0]-1,ind[1]]
+        if(remove): arr[ind[0]-1,ind[1]] = 0
+    if(lower_neighbor):
+        sum += arr[ind[0]+1,ind[1]]
+        if(remove): arr[ind[0]+1,ind[1]] = 0
+
+    # Add the 4 diagonal neighbors to the sum.
+    if(left_neighbor and upper_neighbor):
+        sum += arr[ind[0]-1,ind[1]-1]
+        if(remove): arr[ind[0]-1,ind[1]-1] = 0
+    if(right_neighbor and upper_neighbor):
+        sum += arr[ind[0]-1,ind[1]+1]
+        if(remove): arr[ind[0]-1,ind[1]+1] = 0
+    if(left_neighbor and lower_neighbor):
+        sum += arr[ind[0]+1,ind[1]-1]
+        if(remove): arr[ind[0]+1,ind[1]-1] = 0
+    if(right_neighbor and lower_neighbor):
+        sum += arr[ind[0]+1,ind[1]+1]
+        if(remove): arr[ind[0]+1,ind[1]+1] = 0
+
+    return sum
+
 # if(self.add_noise):
 #
 #     max_before_noise = np.unravel_index(evt_arr.argmax(),evt_arr.shape)

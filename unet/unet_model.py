@@ -1,4 +1,7 @@
-""" Full assembly of the parts to form the complete network """
+"""
+FROM: https://github.com/milesial/Pytorch-UNet
+Full assembly of the parts to form the complete network
+"""
 
 import torch.nn.functional as F
 

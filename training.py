@@ -144,8 +144,32 @@ def my_collate(batch):
     return (data, target)
 
 
+def my_collate_unet(batch):
+
+    data,target = [], []
+    for item in batch:
+        d,t = item[0], item[1]
+
+        # Apply a random transformation.
+        if(augment):
+            d = rotate3D(d)
+        #
+        # # Pad all 0s to get a time dimension of tdim.
+        # d = np.pad(d, [(0,ch_dim-d.shape[0]),(0,0),(0,0)])
+
+        #print("final shapes are",d.shape,t.shape)
+        data.append(d)
+        target.append(t)
+
+    #print("Max in batch is",np.max(data))
+    data = torch.tensor(data).float().unsqueeze(1)
+    target = torch.tensor(target).float().unsqueeze(1)
+
+    return (data, target)
+
+
 class EMFrameDataset(Dataset):
-    def __init__(self, emdset, nframes=100, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0):
+    def __init__(self, emdset, nframes=1000, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0):
 
         # Save some inputs for later use.
         self.emdset = emdset
@@ -157,7 +181,7 @@ class EMFrameDataset(Dataset):
         self.noise_sigma = noise_sigma
 
     def __len__(self):
-        return nframes
+        return self.nframes
 
     def __getitem__(self, idx):
 
@@ -197,6 +221,42 @@ class EMFrameDataset(Dataset):
             frame = gaussnoise(frame, mean=self.noise_mean, stdev=self.noise_sigma)
 
         return frame,frame_truth
+
+
+def train_unet(model, epoch, train_loader, optimizer):
+
+    losses_epoch = []; accuracies_epoch = []
+    for batch_idx, (data, target) in enumerate(train_loader):
+
+        data, target = data.cuda(), target.cuda()
+        data, target = Variable(data), Variable(target)
+
+        #print("Target is",target)
+
+        output_score = model(data)
+        m = nn.BCEWithLogitsLoss()
+        loss = m(output_score,target)
+
+        optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_value_(model.parameters(), 0.1)
+        optimizer.step()
+
+        maxvals = (output_score > 0.9)
+        correctvals = (maxvals == target)
+        accuracy = correctvals.sum().float() / float(target.nelement())
+
+        if batch_idx % 1 == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\t score_max: {:.6f}\t score_min: {:.6f}; Accuracy {:.3f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                100. * batch_idx / len(train_loader), loss.data.item(), output_score.data.max(), output_score.data.min(), accuracy.data.item()))
+
+        losses_epoch.append(loss.data.item())
+        accuracies_epoch.append(accuracy.data.item())
+
+    print("---EPOCH AVG TRAIN LOSS:",np.mean(losses_epoch),"ACCURACY:",np.mean(accuracies_epoch))
+    with open("train.txt", "a") as ftrain:
+        ftrain.write("{} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(accuracies_epoch)))
 
 
 def train(model, epoch, train_loader, optimizer):

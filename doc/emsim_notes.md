@@ -1,5 +1,26 @@
 # EMSim Notes
 
+## 2 AUG 2021: electron counting ROC curve for Unet vs. classical threshold approach
+
+Here is the [ROC curve](https://en.wikipedia.org/wiki/Receiver_operating_characteristic) for the electron counting averaged over 100 frames:
+- with Unet, thresholds [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+- a basic threshold approach in which all pixels above a given threshold were considered "counts", for thresholds [  0,  20,  40,  60,  80, 100, 120, 140, 160, 180]
+
+The frames were generated in the same configuration as discussed in the note on 28 JUL 2021 (50x50 frames with 22 +/- 0.5 electrons per frame and a noise
+sigma of 20 counts).
+
+![](fig/20210802/roc_curve_ec.png)
+
+Zooming in on the relevant region:
+
+![](fig/20210802/roc_curve_ec_zoom.png)
+
+Some notes:
+- In order to be considered a true positive, the counted pixel must coincide exactly with the corresponding true pixel. In many cases a count may be predicted in the correct general area of a true electron, but may be assigned to a neighboring pixel, in which case it would not be considered a true positive.
+- Even with relatively low confidence thresholds (0.05) Unet does not seem to get beyond the 60-70% true positive range
+- A false positive rate of 0.0088 gives a number of false positives equal to the mean of the number of true electron counts (22.0)
+
+
 ## 28 JUL 2021: electron counting with UNet
 
 An initial training of UNet ([https://github.com/milesial/Pytorch-UNet](https://github.com/milesial/Pytorch-UNet)) has been performed for counting electrons using
@@ -18,11 +39,11 @@ A few initial examples (note changing the threshold only affects the final count
 shown in the title of the plot on the far right):
 
 **Threshold 0.9**
-![](fig/20210728/EM_NN_UNet_50x50_0.png)
-![](fig/20210728/EM_NN_UNet_50x50_1.png)
-![](fig/20210728/EM_NN_UNet_50x50_2.png)
+![](fig/20210728/EM_NN_UNet_50x50_0pt9_0.png)
+![](fig/20210728/EM_NN_UNet_50x50_0pt9_1.png)
+![](fig/20210728/EM_NN_UNet_50x50_0pt9_2.png)
 
-**Threshold 0.4**
+**Threshold 0.1**
 ![](fig/20210728/EM_NN_UNet_50x50_0pt1_0.png)
 ![](fig/20210728/EM_NN_UNet_50x50_0pt1_1.png)
 ![](fig/20210728/EM_NN_UNet_50x50_0pt1_2.png)

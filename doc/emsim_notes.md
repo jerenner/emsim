@@ -13,9 +13,11 @@ Making the same plot using a large MC-constructed event with a similar number of
 Zooming in on the area near the noise:
 
 **Data distribution, zoomed to the lowest noise values**
+
 ![](fig/20210815/counts_data_stack_1_zoom.png)
 
 **MC distribution, zoomed to the lowest noise values**
+
 ![](fig/20210815/counts_MC_zoom.png)
 
 The idea is now to attempt to make the MC events more similar to the real data. Fitting the noise peak in data:

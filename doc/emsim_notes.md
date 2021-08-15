@@ -1,5 +1,37 @@
 # EMSim Notes
 
+## 15 AUG 2021: training UNet on data-like MC
+
+Reading the first 5670x4092 unsigned integers from the data file "stack 1.dat" gives the following distribution of pixel counts:
+
+![](fig/20210815/counts_data_stack_1.png)
+
+Making the same plot using a large MC-constructed event with a similar number of pixels (4855x4855), an electron occupancy similar to the frames from the smaller 4dstem dataset (22 electrons for a 50x50 region), and a noise sigma of 20:
+
+![](fig/20210815/counts_MC.png)
+
+Zooming in on the area near the noise:
+
+**Data distribution, zoomed to the lowest noise values**
+![](fig/20210815/counts_data_stack_1_zoom.png)
+
+**MC distribution, zoomed to the lowest noise values**
+![](fig/20210815/counts_MC_zoom.png)
+
+The idea is now to attempt to make the MC events more similar to the real data. Fitting the noise peak in data:
+
+![](fig/20210815/fit_noise_peak_data.png)
+
+Now using a noise distribution with mean 683 and sigma 11.2 and applying a scale factor of 1/12 to the data distribution gives:
+
+![](fig/20210815/data_and_MC_distributions.png)
+
+Training UNet on MC (50x50 events) with the above noise distribution and making the ROC curve of true positive vs. false positive gives for the net and a constant threshold:
+
+![](fig/20210815/true_positive_vs_false_positive.png)
+
+The idea now would be to use this net to count real data. Is it possible to apply a net trained on 50x50 frames to a much larger frame?
+
 ## 2 AUG 2021: electron counting ROC curve for Unet vs. classical threshold approach
 
 Here is the [ROC curve](https://en.wikipedia.org/wiki/Receiver_operating_characteristic) for the electron counting averaged over 100 frames:

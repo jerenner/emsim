@@ -1,5 +1,20 @@
 # EMSim Notes
 
+## 18 AUG 2021: initial evaluation of UNet on data
+
+The results of an initial evaluation of real data with the UNet trained on data-matched MC seems to give sensible results.
+- Initially, it was attempted to run the entire 5760x4092 image through the UNet (trained on smaller 50x50 images) at once.
+- The full image was too large to process on an 8 GB GPU (ran out of memory), as was a 2880x2046 quarter-image.
+- However, an eighth-image 1440x1023 was able to run and produce a corresponding 1440x1023 output (see examples below).
+- So far, the potential effects of training on smaller images and evaluating a larger image have not been studied.
+
+Here are some examples of two 50x50 subsets of an evaluated 1440x1023 eighth-image:
+
+![](fig/20210818/data_eval_100_to_150.png)
+
+![](fig/20210818/data_eval_200_to_250.png)
+
+
 ## 15 AUG 2021: training UNet on data-like MC
 
 Reading the first 5670x4092 unsigned integers from the data file "stack 1.dat" gives the following distribution of pixel counts:

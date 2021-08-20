@@ -1,6 +1,7 @@
 # EMSim Notes
 
 ## 18 AUG 2021: initial evaluation of UNet on data
+*Correction made 20 AUG 2021: The 5760x4092 image should have in fact been read as 4092x5760, and this caused strange effects in the data which have since been corrected in the example images shown below.*
 
 The results of an initial evaluation of real data with the UNet trained on data-matched MC seems to give sensible results.
 - Initially, it was attempted to run the entire 5760x4092 image through the UNet (trained on smaller 50x50 images) at once.
@@ -10,9 +11,9 @@ The results of an initial evaluation of real data with the UNet trained on data-
 
 Here are some examples of two 50x50 subsets of an evaluated 1440x1023 eighth-image:
 
-![](fig/20210818/data_eval_100_to_150.png)
+![](fig/20210818/data_eval_example1.png)
 
-![](fig/20210818/data_eval_200_to_250.png)
+![](fig/20210818/data_eval_example2.png)
 
 
 ## 15 AUG 2021: training UNet on data-like MC

@@ -1,5 +1,36 @@
 # EMSim Notes
 
+## 20 AUG 2021: idea for fitting the data "edge"
+
+One potential way we can determine the line and perhaps measure the "fuzziness" of the edge for data taken with distinct light/dark regions is by finding the line that maximizes a loss function consisting of 4 components:
+
+- L1 (+ contribution): the number of 0's in the dark region
+- L2 (- contribution): the number of 1's in the dark region
+- L3 (+ contribution): the number of 1's in the light region
+- L4 (- contribution): the number of 0's in the light region
+
+The loss is then:
+
+L = L1 - w*L2 + w*L3 - L4
+
+where w is a weight factor equal to (the number of 0's in the image) / (the number of 1's in the image) and serves to give 1's and 0's an equal "weight" in the loss. Without this weight the maximal loss may occur by simply placing the line such that the entire image is in the dark region (the 0's dominate).
+
+Assuming the x-axis (columns) increases to the right and the y-axis (rows) increases downwards, the dark region lies above the line in the following plots and the light region lies below the line (r = m*c + b, for row r, column c, and parameters m and b). Starting from an initial guess:
+
+![](fig/20210820/edge_initial_guess.png)
+
+a minimization of -L gives:
+
+![](fig/20210820/edge_fit.png)
+
+(m = -7.11, b = 26980.75)
+
+From here one could possibly measure the "fuzziness" of the line by plotting the relative loss obtained varying one or both parameters near the solution. For example, for parameter m:
+
+![](fig/20210820/m_vs_L.png)
+
+A well-determined line will likely show steeper variation in the loss over the same range near the solution, though this will have to be confirmed.
+
 ## 18 AUG 2021: initial evaluation of UNet on data
 *Correction made 20 AUG 2021: The 5760x4092 image should have in fact been read as 4092x5760, and this caused strange effects in the data which have since been corrected in the example images shown below.*
 

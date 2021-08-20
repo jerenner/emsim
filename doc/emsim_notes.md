@@ -11,7 +11,7 @@ One potential way we can determine the line and perhaps measure the "fuzziness" 
 
 The loss is then:
 
-L = L1 - w*L2 + w*L3 - L4
+L = L1 - w\*L2 + w\*L3 - L4
 
 where w is a weight factor equal to (the number of 0's in the image) / (the number of 1's in the image) and serves to give 1's and 0's an equal "weight" in the loss. Without this weight the maximal loss may occur by simply placing the line such that the entire image is in the dark region (the 0's dominate).
 
@@ -19,7 +19,7 @@ Assuming the x-axis (columns) increases to the right and the y-axis (rows) incre
 
 ![](fig/20210820/edge_initial_guess.png)
 
-a minimization of -L gives:
+a minimization of -L using `scipy.optimize.minimize` with the 'Nelder-Mead' method gives:
 
 ![](fig/20210820/edge_fit.png)
 

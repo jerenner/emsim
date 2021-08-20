@@ -15,7 +15,7 @@ L = L1 - w\*L2 + w\*L3 - L4
 
 where w is a weight factor equal to (the number of 0's in the image) / (the number of 1's in the image) and serves to give 1's and 0's an equal "weight" in the loss. Without this weight the maximal loss may occur by simply placing the line such that the entire image is in the dark region (the 0's dominate).
 
-Assuming the x-axis (columns) increases to the right and the y-axis (rows) increases downwards, the dark region lies above the line in the following plots and the light region lies below the line (r = m*c + b, for row r, column c, and parameters m and b). Starting from an initial guess:
+Assuming the x-axis (columns) increases to the right and the y-axis (rows) increases downwards, the dark region lies above the line in the following plots and the light region lies below the line (r = m*c + b, for row r, column c, and parameters m and b). We set all pixels below some noise threshold to 0 and consider all others to be a count (1), and starting from an initial guess for the line:
 
 ![](fig/20210820/edge_initial_guess.png)
 

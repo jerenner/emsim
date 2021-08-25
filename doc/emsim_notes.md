@@ -1,5 +1,38 @@
 # EMSim Notes
 
+## 25 AUG 2021: MC edge events
+
+To further develop the ideas behind fitting and interpreting the edges, MC events prepared to match data (as described in the notes from 15 AUG 2021) were generated, though with the condition that all electrons for which the incidence pixel fell under some specified line were not placed.
+
+- 10000 such frames of size 50x50 were generated, and each one was counted using a classical threshold and UNet. The thresholds (0.14 for UNet, and 825 for the classical threshold) were chosen to admit approx. 80% of electrons in each case.
+- The 10000 counted frames were summed in 4 cases:
+  1. before counting (the raw pixel values themselves were summed)
+  2. true counts
+  3. classical threshold counts
+  4. UNet counts
+- Each summed 50x50 array was then "normalized" by dividing each pixel by the maximum value.
+- The edge was determined for each normalized array in a procedure similar to that described in the notes from 20 AUG 2021, with some differences:
+  - as for 10000 frames, the "occupancy" of the summed frame was high (few blank spaces on the side of the line containing counts), no pre-determined weights were appled to L2 and L3 (w = 1)
+  - each value determined to be "0" (less than some specified threshold) was counted in the appropriate sums (L1 and L4) as a value equal to 1 - [the pixel value at that point], and each value determined to be "1" (greater than some specified threshold) was counted in the appropriate sums (L2 and L3) as a value equal to [the pixel value at that point]
+
+Using an input line with m = -2.0 and b = 80.0, the edges determined for the summed frames, the true counts, the UNet counts, and the classical counts are shown below along with the noise thresholds used and parameters (m and b) determined by the minimization procedure in each case:
+
+![](fig/20210825/edge_fits.png)
+
+Note that thresholds of 0.35 were used in the case of the counting methods. Because the raw frame pixels were not noise-suppressed with some counting method, all of the pixel values were "near" the maximum value, and a specific threshold of 0.988 was chosen by eye. For a reasonable threshold, it does not appear to be too difficult to determine the correct line parameters.
+
+Looking at a plot of the average pixel value vs. distance from the fit line in each case:
+
+![](fig/20210825/line_sharpness.png)
+
+Here one can see the two regions with a step-function-like decrease in average pixel value along the line. (One can see that 0.35 was approximately 1/2 the average value of the "light side" pixel value in the true and UNet cases, and therefore this value was chosen as the noise threshold in the line fit procedure.) In principle these curves could be fit to determine more quantitatively the blurriness of the lines. By eye, one can see that the line gets progressively blurred when going from true counting, to UNet-based counting, and finally to classical threshold-based counting, and this is evident in both the step-function plot and the distributions showing the fit lines above.
+
+From this one can conclude:
+- while in the best case, we will know the line equation for real data, it is possible to reasonably fit a line with the proper choice of background threshold (it seems reasonable to use 1/2 of the "step" value; one may have to perform a rough fit first to determine what this value should be)
+- given a sensible line fit, the quality of the reconstruction could most likely be quantified by examining the profile of mean pixel value vs. distance from the line
+
+Now the question is: what would the step-function curve look like for real data when counted with UNet, and would it be better than the curve above for counting MC events?
+
 ## 20 AUG 2021: idea for fitting the data "edge"
 
 One potential way we can determine the line and perhaps measure the "fuzziness" of the edge for data taken with distinct light/dark regions is by finding the line that maximizes a loss function consisting of 4 components:

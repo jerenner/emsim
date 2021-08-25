@@ -169,7 +169,7 @@ def my_collate_unet(batch):
 
 
 class EMFrameDataset(Dataset):
-    def __init__(self, emdset, nframes=1000, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0):
+    def __init__(self, emdset, nframes=1000, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0, m_line=None, b_line=None):
 
         # Save some inputs for later use.
         self.emdset = emdset
@@ -179,6 +179,13 @@ class EMFrameDataset(Dataset):
         self.nelec_sigma = nelec_sigma
         self.noise_mean = noise_mean
         self.noise_sigma = noise_sigma
+        self.m_line = m_line
+        self.b_line = b_line
+
+        # Get the row and column indices.
+        indices = np.indices((frame_size,frame_size))
+        self.irows = indices[0]
+        self.icols = indices[1]
 
     def __len__(self):
         return self.nframes
@@ -197,6 +204,15 @@ class EMFrameDataset(Dataset):
 
             # Pick a random location in the frame for the electron.
             eloc = np.unravel_index(np.random.randint(frame.size),frame.shape)
+
+            # If we have specified an edge, check whether we should throw the electron.
+            if((self.m_line is not None and self.b_line is not None)):
+
+                # Do not throw the electron in the dark region.
+                irow = self.irows[eloc]
+                icol = self.icols[eloc]
+                if(irow < self.m_line*icol + self.b_line):
+                    continue
 
             # Pick a random event from the EM dataset.
             ievt = np.random.randint(len(self.emdset))

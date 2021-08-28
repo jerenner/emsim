@@ -163,13 +163,13 @@ def my_collate_unet(batch):
 
     #print("Max in batch is",np.max(data))
     data = torch.tensor(data).float().unsqueeze(1)
-    target = torch.tensor(target).float().unsqueeze(1)
+    target = torch.tensor(target).float() #.unsqueeze(1)
 
     return (data, target)
 
 
 class EMFrameDataset(Dataset):
-    def __init__(self, emdset, nframes=1000, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0, m_line=None, b_line=None):
+    def __init__(self, emdset, nframes=1000, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0, m_line=None, b_line=None, th_classical = 825, lside = -1):
 
         # Save some inputs for later use.
         self.emdset = emdset
@@ -181,6 +181,8 @@ class EMFrameDataset(Dataset):
         self.noise_sigma = noise_sigma
         self.m_line = m_line
         self.b_line = b_line
+        self.th_classical = th_classical
+        self.lside = lside
 
         # Get the row and column indices.
         indices = np.indices((frame_size,frame_size))
@@ -199,6 +201,12 @@ class EMFrameDataset(Dataset):
         # Determine the number of electrons.
         nelec = int(np.random.normal(loc=self.nelec_mean,scale=self.nelec_sigma))
 
+        # Determine the location of the light region, below (= 0), or above (= 1) the line.
+        if(self.lside >= 0):
+            light_region = self.lside
+        else:
+            light_region = np.random.randint(2)
+
         # Add all electrons to the event.
         for iel in range(nelec):
 
@@ -211,7 +219,7 @@ class EMFrameDataset(Dataset):
                 # Do not throw the electron in the dark region.
                 irow = self.irows[eloc]
                 icol = self.icols[eloc]
-                if(irow < self.m_line*icol + self.b_line):
+                if(((light_region == 0) and (irow < self.m_line*icol + self.b_line)) or ((light_region == 1) and (irow > self.m_line*icol + self.b_line))):
                     continue
 
             # Pick a random event from the EM dataset.
@@ -236,7 +244,45 @@ class EMFrameDataset(Dataset):
         if(self.noise_sigma > 0):
             frame = gaussnoise(frame, mean=self.noise_mean, stdev=self.noise_sigma)
 
-        return frame,frame_truth
+        # Create the threshold-based "truth".
+        th_truth = (frame > self.th_classical)
+
+        # Create the edge truth.
+        if(light_region == 0):
+            edge_truth = self.irows >= self.m_line*self.icols + self.b_line
+        else:
+            edge_truth = self.irows <= self.m_line*self.icols + self.b_line
+
+        # Compute the distance matrix.
+        dist = (self.m_line*self.icols - self.irows + self.b_line) / (self.m_line**2 + 1)
+
+        # Store all the truth matrices in a single matrix.
+        all_truth = []
+        all_truth.append(frame_truth)
+        all_truth.append(th_truth)
+        all_truth.append(edge_truth)
+        all_truth.append(dist)
+        all_truth = np.array(all_truth)
+
+        return frame,all_truth
+
+
+def loss_edge(output, target, sigma_dist = 1, w_edge = 100):
+    output = output.squeeze(1)
+    #print("target shape is",target.shape,"; output shape is",output.shape)
+
+    th_truth = target[:,1,:,:]
+    edge_truth = target[:,2,:,:]
+    dist = target[:,3,:,:]
+
+    final_target = th_truth # * edge_truth
+
+    bce_loss = torch.nn.BCEWithLogitsLoss(reduce=False)
+    sigmoid = torch.nn.Sigmoid()
+    #loss = torch.mean(torch.exp(-(dist)**2/(2*sigma_dist**2))*(bce_loss(output,th_truth) + w_edge*sigmoid(output)*(1-edge_truth)))
+    #loss = torch.mean(torch.exp(-(dist)**2/(2*sigma_dist**2))*(bce_loss(output,final_target)))
+    loss = torch.mean(bce_loss(output,final_target))
+    return loss
 
 
 def train_unet(model, epoch, train_loader, optimizer):
@@ -250,17 +296,18 @@ def train_unet(model, epoch, train_loader, optimizer):
         #print("Target is",target)
 
         output_score = model(data)
-        m = nn.BCEWithLogitsLoss()
-        loss = m(output_score,target)
+        #m = nn.BCEWithLogitsLoss()
+        #loss = m(output_score,target)
+        loss = loss_edge(output_score,target)
 
         optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_value_(model.parameters(), 0.1)
         optimizer.step()
 
-        maxvals = (output_score > 0.9)
-        correctvals = (maxvals == target)
-        accuracy = correctvals.sum().float() / float(target.nelement())
+        maxvals = (output_score[:,0,:,:] > 0.9)
+        correctvals = (maxvals == target[:,0,:,:])
+        accuracy = correctvals.sum().float() / float(target[:,0,:,:].nelement())
 
         if batch_idx % 1 == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\t score_max: {:.6f}\t score_min: {:.6f}; Accuracy {:.3f}'.format(

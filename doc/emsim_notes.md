@@ -1,5 +1,49 @@
 # EMSim Notes
 
+## 28 AUG 2021: possible strategy for data-based training
+
+We have been considering how to use "edge" data to train a neural network, either to improve an already-trained (on MC) network or to
+
+One potential solution was to change the loss layer of an MC-trained network, and perform a "refinement" step with a new loss that penalized counting within the "dark" region and allowed counting in the "light region". The problem with this is that the loss must also consider what is actually being counted: we cannot tell the net to only count in one region without telling the net how to count. Such a loss would result in an optimal solution of a "blank" frame - if in one region no counting should be performed, and in another region it doesn't matter, but there is no reward for actually specifying a count anywhere, an easy zero-loss solution would be to not count at all.
+
+So now we consider the following strategy: count using some "classical" algorithm and teach the net to do the same, however prohibit counting in the dark region. Therefore we use the same UNet with the same (binary cross-entropy) loss we had been using previously, but construct the "labels" as the result of some classical counting algorithm, for example the single-threshold. This can all be done directly on data, and we can add the additional information provided by the edge by performing an AND of the classical label with the "light" edge, as follows:
+
+![](fig/20210828/combined_truth.png)
+
+This event had 2 electrons thrown on the light side of the edge, however it looks like at least one event produced significant activity on the dark side. The classical algorithm finds electrons on both sides of the edge, but as we know that no count on the dark side should be possible, we can modify the truth to reflect this. Let's look at what effect this has on the net.
+
+**UNet trained on the classical threshold**
+
+First we just try to train UNet to reproduce the classical algorithm. Training for 200 epochs to a loss of about 6e-4 gives the following ROC curve:
+
+![](fig/20210828/ROC_classical.png)
+
+Note that the leftmost band of UNet points (true positive rate about 0.6 to 0.8) spans NN thresholds of about 0.997700 to about 0.999995, so the network does not "naturally" operate in this regime. Its performance is not strikingly different compared to that of the actual algorithm in the regime of true positive rate 0.84 - 0.89 which corresponds to the majority of NN threshold values (0.03 - 0.97).
+
+Now generating 20x20 edge events and performing the fits:
+
+![](fig/20210828/edge_fits_classical.png)
+
+Note we used m = -2.0, b = 30.0 in the generation of the events. This gives rise to the edge plot:
+
+![](fig/20210828/edge_plot_classical.png)
+
+**UNet trained on the classical threshold + edge info**
+
+Now we repeat the procedure, but ANDing the edge truth with the classical threshold truth, and using the result to train the network. After 200 epochs, we have a loss of about 1.9e-3, and the following ROC curve:
+
+![](fig/20210828/ROC_edge.png)
+
+And edge fits (for NN threshold of 0.6 this time, corresponding to about an 85% true positive rate):
+
+![](fig/20210828/edge_fits_edge.png)
+
+And edge plot:
+
+![](fig/20210828/edge_plot_edge.png)
+
+It's possible that we're actually getting some improvement by adding the additional edge information, though it's uncertain whether this is due to actual use of this information or differences in the training procedure itself.
+
 ## 25 AUG 2021: MC edge events
 
 To further develop the ideas behind fitting and interpreting the edges, MC events prepared to match data (as described in the notes from 15 AUG 2021) were generated, though with the condition that all electrons for which the incidence pixel fell under some specified line were not placed.

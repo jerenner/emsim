@@ -1,5 +1,31 @@
 # EMSim Notes
 
+## 04 SEP 2021: attempts to train on edge events
+
+**Adaptive truth**
+
+Here we attempt the following:
+- assume a single-threshold (= 825) truth
+- use a loss including the usual binary cross-entropy + a penalty equal to the absolute distance from the line multiplied by the pixel value for all pixels in the dark region
+- weight events with a Gaussian (sigma = 1 pixel) in the distance from the line
+- slowly adapt the truth to be more and more like the output of the net (`truth = (1-f)*original_truth + f*output`, where `f = epoch/500` for 500 training epochs)
+
+The loss and accuracy (note accuracy is computed with respect to the *correct* truth):
+
+![](fig/20210904/training_adaptive_truth.png)
+
+The ROC curve (note NN thresholds between 0.0001 and 0.9995 are covered):
+
+![](fig/20210904/ROC_adaptive_truth.png)
+
+The line fits:
+
+![](fig/20210904/lines_adaptive_truth.png)
+
+The edge plot:
+
+![](fig/20210904/edge_adaptive_truth.png)
+
 ## 28 AUG 2021: possible strategy for data-based training
 
 We have been considering how to use "edge" data to train a neural network, either to improve an already-trained (on MC) network or to

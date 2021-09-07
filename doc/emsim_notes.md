@@ -1,5 +1,27 @@
 # EMSim Notes
 
+## 07 SEP 2021: further attempts to train on edge events
+
+Here we consider another scenario in which no assumption is made about how to reconstruct a single electron, but the information about the edge is used to penalize reconstruction in the dark region.
+
+- only single-electron events were generated. That is, all events were guaranteed to have exactly one count in the light region.
+- the loss contained:
+  - the penalty term (equal to the absolute distance from the line multipled by the predictred pixel value, summed over all pixels in the dark region)
+  - a term equal to |(the sum of all predicted pixel values) - 1|, essentially attempting to restrict the output distribution to a "single count"
+- events were weighted with a Gaussian (sigma = 1 pixel) in the distance from the line
+
+The training loss (again accuracy is computed with respect to the *correct* truth):
+
+![](fig/20210907/training_edge.png)
+
+In the end the resulting reconstructed events did not make sense and favored pixels near the line:
+
+![](fig/20210907/evt_example0.png)
+
+![](fig/20210907/evt_example1.png)
+
+![](fig/20210907/evt_example2.png)
+
 ## 04 SEP 2021: attempts to train on edge events
 
 **Adaptive truth**

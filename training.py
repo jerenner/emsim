@@ -199,7 +199,7 @@ class EMFrameDataset(Dataset):
         frame_truth = np.zeros(frame.shape)
 
         # Determine the number of electrons.
-        nelec = int(np.random.normal(loc=self.nelec_mean,scale=self.nelec_sigma))
+        nelec = 1 #int(np.random.normal(loc=self.nelec_mean,scale=self.nelec_sigma))
 
         # Determine the location of the light region, below (= 0), or above (= 1) the line.
         if(self.lside >= 0):
@@ -208,7 +208,9 @@ class EMFrameDataset(Dataset):
             light_region = np.random.randint(2)
 
         # Add all electrons to the event.
-        for iel in range(nelec):
+        iel = 0
+        while(iel < nelec):
+        #for iel in range(nelec):
 
             # Pick a random location in the frame for the electron.
             eloc = np.unravel_index(np.random.randint(frame.size),frame.shape)
@@ -221,6 +223,9 @@ class EMFrameDataset(Dataset):
                 icol = self.icols[eloc]
                 if(((light_region == 0) and (irow < self.m_line*icol + self.b_line)) or ((light_region == 1) and (irow > self.m_line*icol + self.b_line))):
                     continue
+
+            # Throw an electron.
+            iel += 1
 
             # Pick a random event from the EM dataset.
             ievt = np.random.randint(len(self.emdset))
@@ -244,17 +249,22 @@ class EMFrameDataset(Dataset):
         if(self.noise_sigma > 0):
             frame = gaussnoise(frame, mean=self.noise_mean, stdev=self.noise_sigma)
 
-        # Create the threshold-based "truth".
-        th_truth = (frame > self.th_classical)
+        # Compute the distance matrix.
+        dist = (self.m_line*self.icols - self.irows + self.b_line) / (self.m_line**2 + 1)
 
         # Create the edge truth.
         if(light_region == 0):
+            #dist[self.irows <= self.m_line*self.icols + self.b_line] = 0
             edge_truth = self.irows >= self.m_line*self.icols + self.b_line
         else:
+            #dist[self.irows >= self.m_line*self.icols + self.b_line] = 0
             edge_truth = self.irows <= self.m_line*self.icols + self.b_line
 
-        # Compute the distance matrix.
-        dist = (self.m_line*self.icols - self.irows + self.b_line) / (self.m_line**2 + 1)
+        # Create the threshold-based "truth".
+        #th_truth = (frame > self.th_classical)
+        edge_frame = frame #* edge_truth
+        th_truth = np.zeros(edge_frame.shape)
+        th_truth[np.unravel_index(np.argmax(edge_frame),edge_truth.shape)] = 1
 
         # Store all the truth matrices in a single matrix.
         all_truth = []
@@ -267,7 +277,7 @@ class EMFrameDataset(Dataset):
         return frame,all_truth
 
 
-def loss_edge(output, target, sigma_dist = 1, w_edge = 100):
+def loss_edge(output, target, epoch = 0, sigma_dist = 1, w_edge = 100):
     output = output.squeeze(1)
     #print("target shape is",target.shape,"; output shape is",output.shape)
 
@@ -275,17 +285,56 @@ def loss_edge(output, target, sigma_dist = 1, w_edge = 100):
     edge_truth = target[:,2,:,:]
     dist = target[:,3,:,:]
 
-    final_target = th_truth # * edge_truth
-
-    bce_loss = torch.nn.BCEWithLogitsLoss(reduce=False)
+    # Define some Torch functions.
     sigmoid = torch.nn.Sigmoid()
+    bce_loss = torch.nn.BCEWithLogitsLoss(reduce=False)
+
+    # Modify the truth according to the epoch.
+    # frac = min(epoch/500., 1.)
+    # final_target = (1-frac)*th_truth + frac*sigmoid(output)
+
+    final_target = th_truth
+
+    # Compute the weights (tensor of shape [batchsize]).
+    wts     = torch.sum(torch.exp(-(dist)**2/(2*sigma_dist**2))*th_truth,axis=(1,2))
+    wt_norm = torch.sum(th_truth,axis=(1,2))
+    wt_norm[wt_norm == 0] = 1
+    wts /= wt_norm
+    #wts[wts == 0] = 0.1
+
+    # Zero-out the distance on the light side.
+    dist_mod = torch.abs(dist*(edge_truth-1))
+
+    # Compute the loss.
+    #wts = torch.sum(torch.exp(-(dist)**2/(2*sigma_dist**2))*output,axis=0)
     #loss = torch.mean(torch.exp(-(dist)**2/(2*sigma_dist**2))*(bce_loss(output,th_truth) + w_edge*sigmoid(output)*(1-edge_truth)))
     #loss = torch.mean(torch.exp(-(dist)**2/(2*sigma_dist**2))*(bce_loss(output,final_target)))
-    loss = torch.mean(bce_loss(output,final_target))
-    return loss
+
+    # --------------------------------------------------------------------------
+    # BCE loss.
+    loss_total = torch.sum(bce_loss(output,final_target),axis=(1,2))
+    # --------------------------------------------------------------------------
+
+    # --------------------------------------------------------------------------
+    # Constrained loss (tensor of shape [batchsize])
+    # loss_bce = torch.sum(bce_loss(output,final_target),axis=(1,2))
+    # loss_sum_constraint = torch.abs(torch.sum(sigmoid(output),axis=(1,2)) - 1)
+    # loss_edge_penalty = w_edge*torch.sum(sigmoid(output)*dist_mod,axis=(1,2))
+    #
+    # #loss_total = loss_bce + loss_edge_penalty
+    # loss_total = loss_edge_penalty + loss_sum_constraint
+    # print("-- BCE loss: {}".format(loss_bce))
+    # print("-- edge loss: {}".format(loss_edge_penalty))
+    # print("-- sum-constraint loss: {}".format(loss_sum_constraint))
+    # --------------------------------------------------------------------------
+
+    # Weight the loss.
+    #loss_weighted = torch.mean(wts*loss_total)
+    loss_weighted = torch.mean(loss_total)
+    return loss_weighted
 
 
-def train_unet(model, epoch, train_loader, optimizer):
+def train_unet(model, epoch, train_loader, optimizer, sigma_dist = 2):
 
     losses_epoch = []; accuracies_epoch = []
     for batch_idx, (data, target) in enumerate(train_loader):
@@ -295,10 +344,14 @@ def train_unet(model, epoch, train_loader, optimizer):
 
         #print("Target is",target)
 
+        # Compute the final target.
+        # final_target = th_truth * edge_truth
+        # final_target = final_target.unsqueeze(1)
+
         output_score = model(data)
-        #m = nn.BCEWithLogitsLoss()
-        #loss = m(output_score,target)
-        loss = loss_edge(output_score,target)
+        #m = nn.BCEWithLogitsLoss(weight=wts)
+        #loss = m(output_score,final_target)
+        loss = loss_edge(output_score,target,epoch,w_edge = 1.0)
 
         optimizer.zero_grad()
         loss.backward()

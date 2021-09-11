@@ -1,5 +1,47 @@
 # EMSim Notes
 
+## 11 SEP 2021: another attempt at using edge information
+
+Changing the strategy a bit:
+
+- again using only single-electron events (all events have exactly one count in the light region) on a 20x20 grid
+- the truth was constructed by a "classical" algorithm, taking the maximum pixel as the electron count. However, before determining the maximum pixel, the "edge" was applied: all sensor input in the dark region was set to 0. Therefore, the "true" count could never be determined
+- the usual binary cross-entropy loss was used. Therefore the effects of the edge were completely accounted for in the construction of the truth and not in the calculation of the loss.
+
+Below are some key results. Note that the UNet threshold chosen in each case was meant to give about the same true positive rate as the classical algorithm (1 count at the simple maximum). It remains to be studied whether or not this was the best choice.
+
+**Training**
+
+![](fig/20210911/training_edge_argmax_noweights.png)
+
+**Edge fits**
+
+![](fig/20210911/edge_fit_noweights.png)
+
+**Edge plot**
+
+![](fig/20210911/edge_plot_noweights.png)
+
+Note that performing the same training without incorporating the edge information into the truth (also training for 500 epochs) does seem to give a result similar to the classical method (no improvement).
+
+**Edge fits (no edge used in truth)**
+
+![](fig/20210911/noedge_fit_noweights.png)
+
+**Edge plot (no edge used in truth)**
+
+![](fig/20210911/noedge_plot.png)
+
+Note: Event weighting (favoring events near the edge) seemed to bias reconstruction of the events towards the edge.
+
+**Edge fits with event weighting**
+
+![](fig/20210911/edge_fit.png)
+
+**Edge plot with event weighting**
+
+![](fig/20210911/edge_plot.png)
+
 ## 07 SEP 2021: further attempts to train on edge events
 
 Here we consider another scenario in which no assumption is made about how to reconstruct a single electron, but the information about the edge is used to penalize reconstruction in the dark region.

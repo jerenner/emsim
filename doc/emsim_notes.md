@@ -1,5 +1,34 @@
 # EMSim Notes
 
+## 17 SEP 2021: single-electron reconstruction problem, training on NERSC
+
+Here we trained a basic CNN, on 21x21 events for which the central pixel was known to be the correct pixel, to reconstruct the exact incident electron location. The idea was to compare the NN results to a 3x3 centroid method. The CNN reconstructed a softmax distribution over a 10x10 error grid covering the central pixel. The distribution is then fit to a 2D Gaussian, and the mean of that Gaussian is taken to be the predicted location.
+
+**Loss curves**
+
+The accuracy shows whether the pixel in the 10x10 error grid in which the true incident location fell coincided with the maximum of the softmax distribution predicted by the NN on that grid.
+
+![](fig/20210917/training.png)
+
+**Errors for 10k events**
+
+Here are the errors in the predicted incident location for all 10k events.
+
+![](fig/20210917/errors_all.png)
+
+In the above, the mean NN error was **0.00152 mm** and the mean 3x3 centroid error was **0.0629 mm**.
+
+If we consider *only events for which the 3x3 centroid reconstructed to an error < 0.005 mm* (653 events):
+
+![](fig/20210917/errors_3x3_lt_5microns.png)
+
+In the above, the mean NN error was **0.00150 mm** and the mean 3x3 centroid error was **0.00188 mm**.
+
+So it looks like overall the NN performs significantly better, however there are a few events that were better-reconstructed by the 3x3 centroid method. Zooming in on the above (3x3 error < 0.005 mm) histogram to the < 0.005 mm region (653 events in the 3x3 centroid error histogram, 636 events in the NN error histogram):
+
+![](fig/20210917/errors_3x3_lt_5microns_zoom.png)
+
+
 ## 17 SEP 2021: s-curve comparisons
 
 Here we compare the s-curves over 100k single-electron MC events for the following cases. Note that because the NN methods are not forced to count, the total number of events counted may be less than 100k. In the construction of the s-curve, we normalize so that the maximum count value in the summed image of all counts is equal to 1.

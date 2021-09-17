@@ -224,7 +224,7 @@ def fit_sigmas(prob_dist,x,y,x0,y0,sigma_x0,sigma_y0,err_pixel_size):
 
     try:
         popt, pcov = curve_fit(mult_gaussFun_Fit, (x, y), prob_dist.ravel(), p0=initial_guess, bounds=bounds)
-    except (RuntimeError):
+    except (RuntimeError, ValueError):
         print("Error in fit; using initial guess")
         return initial_guess,None
 

@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 netdebug = False
-EVT_SIZE = 41     # size of event grid (in X and Y)
+EVT_SIZE = 21     # size of event grid (in X and Y)
 ERR_SIZE = 10     # size of prediction grid (in X and Y)
 PIXEL_SIZE = 0.005
 PIXEL_ERR_RANGE_MIN = -0.0025  # in-pixel error range minimum
@@ -58,8 +58,8 @@ class basicCNN(nn.Module):
         self.conv3 = nn.Conv2d(chi*2, chi*4, 2, padding=0)
         self.bn3   = nn.BatchNorm2d(chi*4)
         self.pool2 = nn.MaxPool2d(2, 2)
-        self.pool3 = nn.MaxPool2d(3, 3)
-        self.pool4 = nn.MaxPool2d(4, 4)
+        self.pool3 = nn.MaxPool2d(2, 2)
+        self.pool4 = nn.MaxPool2d(3, 3)
         self.fc = nn.Linear(chi*4, ERR_SIZE*ERR_SIZE)
         self.drop1 = nn.Dropout(p=0.5)
 

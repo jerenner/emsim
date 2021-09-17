@@ -1,5 +1,27 @@
 # EMSim Notes
 
+## 17 SEP 2021: s-curve comparisons
+
+Here we compare the s-curves over 100k single-electron MC events for the following cases. Note that because the NN methods are not forced to count, the total number of events counted may be less than 100k. In the construction of the s-curve, we normalize so that the maximum count value in the summed image of all counts is equal to 1.
+
+- **classical** (100k counts): counting done by the classical method of choosing the maximum pixel value
+- **UNet, no edge, epoch 500** (NN threshold = 0.88, yielding 85534 counts): UNet was trained to learn the classical algorithm with no edge information
+- **UNet + edge, epoch 11** (NN threshold = 0.8, yielding 85135 counts): UNet was trained to learn the classical algorithm with the edge restriction, but we are only considering training up to epoch 11
+- **UNet + edge, epoch 500** (NN threshold = 0.8, yielding 84882 counts): UNet was trained to learn the classical algorithm with the edge restrictions for 500 epochs
+- **true** (100k counts): the true counts
+
+**Full plot**
+
+![](fig/20210917/scurve_all.png)
+
+**Zoom, light side**
+
+![](fig/20210917/scurve_all_zoom_upper.png)
+
+**Zoom, dark side**
+
+![](fig/20210917/scurve_all_zoom_lower.png)
+
 ## 11 SEP 2021: another attempt at using edge information
 
 Changing the strategy a bit:

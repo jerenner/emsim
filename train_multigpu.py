@@ -45,7 +45,7 @@ val_loader = DataLoader(dataset_val, batch_size=1000, shuffle=True, collate_fn=t
 # Define the model.
 #model = emnet.FCNet()
 model = emnet.basicCNN()
-model = torch.nn.DataParallel(model, device_ids=[0])
+#model = torch.nn.DataParallel(model, device_ids=[0])
 model.cuda()
 
 optimizer = optim.Adam(model.parameters(), lr=lrate, betas=(0.9, 0.999), eps=1e-6, weight_decay=0.01, amsgrad=True)

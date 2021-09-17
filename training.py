@@ -262,7 +262,7 @@ class EMFrameDataset(Dataset):
 
         # Create the threshold-based "truth".
         #th_truth = (frame > self.th_classical)
-        edge_frame = frame #* edge_truth
+        edge_frame = frame * edge_truth
         th_truth = np.zeros(edge_frame.shape)
         th_truth[np.unravel_index(np.argmax(edge_frame),edge_truth.shape)] = 1
 
@@ -374,6 +374,8 @@ def train_unet(model, epoch, train_loader, optimizer, sigma_dist = 2):
     with open("train.txt", "a") as ftrain:
         ftrain.write("{} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(accuracies_epoch)))
 
+    return np.mean(losses_epoch)
+
 
 def train(model, epoch, train_loader, optimizer):
 
@@ -436,6 +438,8 @@ def val(model, epoch, val_loader):
     print("---EPOCH AVG VAL LOSS:",np.mean(losses_epoch),"ACCURACY:",np.mean(accuracies_epoch))
     with open("val.txt", "a") as fval:
         fval.write("{} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(accuracies_epoch)))
+
+    return np.mean(losses_epoch)
 
 
 # ------------------------------------------------------------------------------

@@ -108,7 +108,7 @@ def compute_key_quantities(evt_arr,threshold=40):
     # Get the pixels above threshold and their corresponding arguments in the array.
     pixels_above_threshold = evt_arr[evt_arr > threshold]
     args_above_threshold = np.argwhere(evt_arr > threshold)
-    arg_max = (20,20) #np.unravel_index(np.argmax(evt_arr),evt_arr.shape)
+    arg_max = np.unravel_index(np.argmax(evt_arr),evt_arr.shape)
     xmax = coords_pixels_all[0][arg_max]*emnet.PIXEL_SIZE
     ymax = coords_pixels_all[1][arg_max]*emnet.PIXEL_SIZE
     #print("xmax",xmax,"ymax",ymax)
@@ -243,9 +243,10 @@ def construct_evt_dataframe(dset,evts,model,threshold=40):
     """
 
     # Key quantities based on dataset shift.
-    SHIFTED_ERR_RANGE_MIN = emnet.PIXEL_ERR_RANGE_MIN - dset.add_shift*emnet.PIXEL_SIZE
-    SHIFTED_ERR_RANGE_MAX = emnet.PIXEL_ERR_RANGE_MAX + dset.add_shift*emnet.PIXEL_SIZE
-    ERR_PIXEL_SIZE = emnet.PIXEL_SIZE*(2*dset.add_shift+1)/emnet.ERR_SIZE
+    SHIFTED_ERR_RANGE_MIN = emnet.PIXEL_ERR_RANGE_MIN # - dset.add_shift*emnet.PIXEL_SIZE
+    SHIFTED_ERR_RANGE_MAX = emnet.PIXEL_ERR_RANGE_MAX # + dset.add_shift*emnet.PIXEL_SIZE
+    #ERR_PIXEL_SIZE = emnet.PIXEL_SIZE*(2*dset.add_shift+1)/emnet.ERR_SIZE
+    ERR_PIXEL_SIZE = (emnet.PIXEL_ERR_RANGE_MAX - emnet.PIXEL_ERR_RANGE_MIN)/emnet.ERR_SIZE
 
     # Get the x and y coordinates of the 2D error prediction grid, in mm.
     x_errgrid = np.arange(0,emnet.ERR_SIZE)*ERR_PIXEL_SIZE + SHIFTED_ERR_RANGE_MIN + ERR_PIXEL_SIZE/2

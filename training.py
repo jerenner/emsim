@@ -79,22 +79,32 @@ class EMDataset(Dataset):
         for row,col,counts in zip(df_evt['row'].values,df_evt['col'].values,df_evt['counts'].values):
             evt_arr[row,col] += counts
 
-        evt_arr = evt_arr[50-int((emnet.EVT_SIZE-1)/2):50+int((emnet.EVT_SIZE-1)/2)+1,50-int((emnet.EVT_SIZE-1)/2):50+int((emnet.EVT_SIZE-1)/2)+1]
+        # Use an 11x11 event+noise to determine the maximum pixel.
+        evt_small = evt_arr[50-int((11-1)/2):50+int((11-1)/2)+1,50-int((11-1)/2):50+int((11-1)/2)+1]
+        if(self.add_noise):
+            evt_small = gaussnoise(evt_small, mean=self.noise_mean, stdev=self.noise_sigma)
+        yx_shift = np.unravel_index(np.argmax(evt_small),evt_small.shape)
+        y_shift = yx_shift[0] - 5
+        x_shift = yx_shift[1] - 5
+        #print("Argmax was {}".format(yx_shift))
+        #print("Found x-shift = {}, y-shift = {}".format(x_shift,y_shift))
+
+        # Extract the specified event size from the larger event, centered on the maximum pixel.
+        evt_arr = evt_arr[50+y_shift-int((emnet.EVT_SIZE-1)/2):50+y_shift+int((emnet.EVT_SIZE-1)/2)+1,50+x_shift-int((emnet.EVT_SIZE-1)/2):50+x_shift+int((emnet.EVT_SIZE-1)/2)+1]
 
         # Normalize to value of greatest magnitude = 1.
         #evt_arr /= 10000 #np.max(np.abs(evt_arr))
 
-        x_shift = 0.
-        y_shift = 0.
-
-        # Add the shift, if specified.
-        if(self.add_shift > 0):
-
-            x_shift = np.random.randint(-self.add_shift,self.add_shift)
-            y_shift = np.random.randint(-self.add_shift,self.add_shift)
-
-            evt_arr = np.roll(evt_arr,x_shift,axis=1)
-            evt_arr = np.roll(evt_arr,y_shift,axis=0)
+        # Add a manual shift, if specified.
+        # x_shift = 0.
+        # y_shift = 0.
+        # if(self.add_shift > 0):
+        #
+        #     x_shift = np.random.randint(-self.add_shift,self.add_shift)
+        #     y_shift = np.random.randint(-self.add_shift,self.add_shift)
+        #
+        #     evt_arr = np.roll(evt_arr,x_shift,axis=1)
+        #     evt_arr = np.roll(evt_arr,y_shift,axis=0)
 
         # Add Gaussian noise.
         if(self.add_noise):

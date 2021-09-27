@@ -29,7 +29,7 @@ If we consider *only events reconstructed to an error < 0.005 mm* (7115 events f
 
 ![](fig/20210927/err_zoom_run_11x11_chi32_60.png)
 
-In the above, the mean NN error was **0.00112 mm** and the mean 3x3 centroid error was **0.00115 mm**.
+In the above, the mean NN error was **0.00112 mm** and the mean 3x3 centroid error was **0.00115 mm**. Note that the Gaussian fit to the softmax distribution providing the mean reconstructed location is failing ~2-4% of the time, in which case the reconstructed location corresponds to the center of the pixel with the maximum probability in the softmax distribution.
 
 ## 17 SEP 2021: single-electron reconstruction problem, training on NERSC
 

@@ -1,5 +1,36 @@
 # EMSim Notes
 
+## 27 SEP 2021: 3x3 single-electron reconstruction, training on NERSC
+
+The basic CNN was modified:
+- the event was centered on the maximum pixel chosen from the original event with noise, restricted to an 11x11 square
+- a final 11x11 input single-electron event was constructed about the chosen center from the original 101x101 MC event
+- a softmax output was used on a 60x60 prediction grid which spanned 3x3 input pixels (a 5 micrometer / 20 = 0.25 micrometer resolution)
+
+**Loss curves**
+
+The accuracy shows whether the pixel in the 60x60 error grid in which the true incident location fell coincided with the maximum of the softmax distribution predicted by the NN on that grid.
+
+![](fig/20210927/training_run_11x11_chi32_60.png)
+
+**An example event**
+
+![](fig/20210927/evt80388_run_11x11_chi32_60.png)
+
+**Errors for 10k events**
+
+Here are the errors in the predicted incident location for all 10k events.
+
+![](fig/20210927/err_run_11x11_chi32_60.png)
+
+In the above, the mean NN error was **0.00408 mm** and the mean 3x3 centroid error was **0.00648 mm**.
+
+If we consider *only events reconstructed to an error < 0.005 mm* (7115 events for the 3x3 method, 7459 events for the NN method):
+
+![](fig/20210927/err_zoom_run_11x11_chi32_60.png)
+
+In the above, the mean NN error was **0.00112 mm** and the mean 3x3 centroid error was **0.00115 mm**.
+
 ## 17 SEP 2021: single-electron reconstruction problem, training on NERSC
 
 Here we trained a basic CNN, on 21x21 events for which the central pixel was known to be the correct pixel, to reconstruct the exact incident electron location. The idea was to compare the NN results to a 3x3 centroid method. The CNN reconstructed a softmax distribution over a 10x10 error grid covering the central pixel. The distribution is then fit to a 2D Gaussian, and the mean of that Gaussian is taken to be the predicted location.

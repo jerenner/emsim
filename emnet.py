@@ -7,11 +7,11 @@ import torch.nn.functional as F
 
 netdebug = False
 EVT_SIZE = 11     # size of event grid (in X and Y)
-ERR_SIZE = 15     # size of prediction grid (in X and Y)
+ERR_SIZE = 60     # size of prediction grid (in X and Y)
 PIXEL_SIZE = 0.005
 PIXEL_ERR_RANGE_MIN = -0.0075  # error range minimum
 PIXEL_ERR_RANGE_MAX = 0.0075   # error range maximum
-chi = 16
+chi = 32
 
 class FCNet(nn.Module):
 

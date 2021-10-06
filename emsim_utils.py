@@ -285,8 +285,8 @@ def construct_evt_dataframe(dset,evts,model,threshold=40):
         # Compute the sigmas of the distribution.
         sigma_x0_NN, sigma_y0_NN = compute_sigmas(prob,ERR_PIXEL_SIZE,SHIFTED_ERR_RANGE_MIN)
         popt, pcov = fit_sigmas(prob,x_errgrid,y_errgrid,xpred,ypred,sigma_x0_NN,sigma_y0_NN,ERR_PIXEL_SIZE)
-        xpred = popt[1]
-        ypred = popt[2]
+        #xpred = popt[1]
+        #ypred = popt[2]
         sigma_x_NN = popt[3]**0.5
         sigma_y_NN = popt[4]**0.5
 

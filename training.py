@@ -421,6 +421,8 @@ def train(model, epoch, train_loader, optimizer):
     with open("train.txt", "a") as ftrain:
         ftrain.write("{} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(accuracies_epoch)))
 
+    return np.mean(losses_epoch)
+
 def val(model, epoch, val_loader):
 
     losses_epoch = []; accuracies_epoch = []

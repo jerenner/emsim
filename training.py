@@ -41,7 +41,7 @@ def gaussnoise(data, mean=0.0, stdev=0.05):
 
 
 class EMDataset(Dataset):
-    def __init__(self, dframe, noise_mean=0, noise_sigma=0, nstart=0, nend=0, add_noise=False, add_shift=0, augment=False):
+    def __init__(self, dframe, noise_mean=0, noise_sigma=0, nstart=0, nend=0, add_noise=False, add_shift=-1, augment=False):
 
         # Save some inputs for later use.
         self.dframe = dframe
@@ -79,15 +79,20 @@ class EMDataset(Dataset):
         for row,col,counts in zip(df_evt['row'].values,df_evt['col'].values,df_evt['counts'].values):
             evt_arr[row,col] += counts
 
-        # Use an 11x11 event+noise to determine the maximum pixel.
-        evt_small = evt_arr[50-int((11-1)/2):50+int((11-1)/2)+1,50-int((11-1)/2):50+int((11-1)/2)+1]
-        if(self.add_noise):
-            evt_small = gaussnoise(evt_small, mean=self.noise_mean, stdev=self.noise_sigma)
-        yx_shift = np.unravel_index(np.argmax(evt_small),evt_small.shape)
-        y_shift = yx_shift[0] - 5
-        x_shift = yx_shift[1] - 5
-        #print("Argmax was {}".format(yx_shift))
-        #print("Found x-shift = {}, y-shift = {}".format(x_shift,y_shift))
+        # Use an 11x11 event+noise to determine the maximum pixel if no manual shift specified.
+        if(self.add_shift < 0):
+
+            evt_small = evt_arr[50-int((11-1)/2):50+int((11-1)/2)+1,50-int((11-1)/2):50+int((11-1)/2)+1]
+            if(self.add_noise):
+                evt_small = gaussnoise(evt_small, mean=self.noise_mean, stdev=self.noise_sigma)
+            yx_shift = np.unravel_index(np.argmax(evt_small),evt_small.shape)
+            y_shift = yx_shift[0] - 5
+            x_shift = yx_shift[1] - 5
+            #print("Argmax was {}".format(yx_shift))
+            #print("Found x-shift = {}, y-shift = {}".format(x_shift,y_shift))
+        else:
+            x_shift = 0
+            y_shift = 0
 
         # Extract the specified event size from the larger event, centered on the maximum pixel.
         evt_arr = evt_arr[50+y_shift-int((emnet.EVT_SIZE-1)/2):50+y_shift+int((emnet.EVT_SIZE-1)/2)+1,50+x_shift-int((emnet.EVT_SIZE-1)/2):50+x_shift+int((emnet.EVT_SIZE-1)/2)+1]
@@ -96,15 +101,13 @@ class EMDataset(Dataset):
         #evt_arr /= 10000 #np.max(np.abs(evt_arr))
 
         # Add a manual shift, if specified.
-        # x_shift = 0.
-        # y_shift = 0.
-        # if(self.add_shift > 0):
-        #
-        #     x_shift = np.random.randint(-self.add_shift,self.add_shift)
-        #     y_shift = np.random.randint(-self.add_shift,self.add_shift)
-        #
-        #     evt_arr = np.roll(evt_arr,x_shift,axis=1)
-        #     evt_arr = np.roll(evt_arr,y_shift,axis=0)
+        if(self.add_shift > 0):
+
+            x_shift = np.random.randint(-self.add_shift,self.add_shift)
+            y_shift = np.random.randint(-self.add_shift,self.add_shift)
+
+            evt_arr = np.roll(evt_arr,x_shift,axis=1)
+            evt_arr = np.roll(evt_arr,y_shift,axis=0)
 
         # Add Gaussian noise.
         if(self.add_noise):
@@ -177,9 +180,8 @@ def my_collate_unet(batch):
 
     return (data, target)
 
-
 class EMFrameDataset(Dataset):
-    def __init__(self, emdset, nframes=1000, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0, m_line=None, b_line=None, th_classical = 825, lside = -1):
+    def __init__(self, emdset, nframes=1000, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0, m_line=None, b_line=None, th_classical = 825, lside = -1, res_factor = 1):
 
         # Save some inputs for later use.
         self.emdset = emdset
@@ -193,11 +195,14 @@ class EMFrameDataset(Dataset):
         self.b_line = b_line
         self.th_classical = th_classical
         self.lside = lside
+        self.res_factor = res_factor     # resolution factor: prediction grid has resolution of event grid * this factor; for now, must be odd
 
         # Get the row and column indices.
         indices = np.indices((frame_size,frame_size))
         self.irows = indices[0]
         self.icols = indices[1]
+
+        # Set up the high resolution grid.
 
     def __len__(self):
         return self.nframes
@@ -207,6 +212,10 @@ class EMFrameDataset(Dataset):
         # Create a random event (index does nothing, though could possibly be used as seed).
         frame = np.zeros([self.frame_size,self.frame_size])
         frame_truth = np.zeros(frame.shape)
+
+        # Create the array for the high-resolution-grid truth.
+        rfac = self.res_factor
+        frame_hrg_truth = np.zeros([self.frame_size*rfac,self.frame_size*rfac])
 
         # Determine the number of electrons.
         nelec = 1 #int(np.random.normal(loc=self.nelec_mean,scale=self.nelec_sigma))
@@ -241,6 +250,7 @@ class EMFrameDataset(Dataset):
             ievt = np.random.randint(len(self.emdset))
             evt_item = self.emdset[ievt]
             evt_arr = evt_item[0]
+            evt_err = evt_item[1]
 
             # Add the electron to the frame.
             delta = int((emnet.EVT_SIZE-1)/2)  # the extent of the event from the central pixel
@@ -255,36 +265,104 @@ class EMFrameDataset(Dataset):
             # Add the electron to the truth array.
             frame_truth[eloc] = 1
 
+            # Add the electron to the high-res truth array.
+            rowoffset = int(rfac*(evt_err[0] + emnet.PIXEL_SIZE/2)/emnet.PIXEL_SIZE)
+            coloffset = int(rfac*(evt_err[1] + emnet.PIXEL_SIZE/2)/emnet.PIXEL_SIZE)
+            hrg_eloc = (rfac*eloc[0] + rowoffset, rfac*eloc[1] + coloffset)
+            frame_hrg_truth[hrg_eloc] = 1
+            #print("For eloc",eloc,"got final loc",hrg_eloc,"plus offsets row=",rowoffset,"and col=",coloffset,"with rowerr=",evt_err[0],"and colerr=",evt_err[1])
+
+
         # Add the noise.
         if(self.noise_sigma > 0):
             frame = gaussnoise(frame, mean=self.noise_mean, stdev=self.noise_sigma)
 
         # Compute the distance matrix.
-        dist = (self.m_line*self.icols - self.irows + self.b_line) / (self.m_line**2 + 1)
+        #dist = (self.m_line*self.icols - self.irows + self.b_line) / (self.m_line**2 + 1)
+
+        # ----------------------------------------------------------------------
+        # Operations on high-resolution grid (HRG)
+        hrg_frame = np.zeros([self.frame_size*rfac, self.frame_size*rfac])
+        hrg_indices = np.indices((self.frame_size*rfac,self.frame_size*rfac))
+        irows_hrg = hrg_indices[0]
+        icols_hrg = hrg_indices[1]
 
         # Create the edge truth.
         if(light_region == 0):
             #dist[self.irows <= self.m_line*self.icols + self.b_line] = 0
-            edge_truth = self.irows >= self.m_line*self.icols + self.b_line
+            edge_truth = irows_hrg >= self.m_line*icols_hrg + self.b_line*rfac
         else:
             #dist[self.irows >= self.m_line*self.icols + self.b_line] = 0
-            edge_truth = self.irows <= self.m_line*self.icols + self.b_line
+            edge_truth = irows_hrg <= self.m_line*icols_hrg + self.b_line*rfac
+
+        # Resample the frame to higher resolution.
+        for row in range(frame.shape[0]):
+            for col in range(frame.shape[1]):
+                uniform_dist = np.ones([rfac,rfac]) #np.random.random_sample([rfac,rfac])
+                uniform_dist = frame[row,col]*uniform_dist/np.sum(uniform_dist)
+                hrg_frame[row*rfac:(row+1)*rfac,col*rfac:(col+1)*rfac] = uniform_dist
+
+        # for row in range(rfac):
+        #     for col in range(rfac):
+        #         hrg_frame[row::rfac,col::rfac] = frame/rfac
 
         # Create the threshold-based "truth".
         #th_truth = (frame > self.th_classical)
-        edge_frame = frame * edge_truth
+        #edge_frame = frame * edge_truth
+
+        # Include the edge information.
+        edge_frame = hrg_frame * edge_truth
+
+        # ----------------------------------
+        # Perform a 3*rfac x 3*rfac average.
+        # ----------------------------------
+
+        # Get the maximum argument.
+        args_max = np.argwhere(edge_frame == np.amax(edge_frame))
+        arg_max = args_max[np.random.randint(len(args_max))]
+        #arg_max = np.unravel_index(np.argmax(edge_frame),edge_frame.shape)
+        # print("Arg max is",arg_max)
+
+        # Get the bounding box.
+        llimit = int((3*rfac-1)/2)
+        rlimit = int((3*rfac-1)/2 + 1)
+        r_lbound = max(arg_max[0]-llimit,0)
+        r_rbound = min(arg_max[0]+rlimit,edge_frame.shape[0])
+        c_lbound = max(arg_max[1]-llimit,0)
+        c_rbound = min(arg_max[1]+rlimit,edge_frame.shape[1])
+        max_3x3 = edge_frame[r_lbound:r_rbound,c_lbound:c_rbound]
+        # print("llimit =",llimit," and rlimit =",rlimit)
+        # print("r_lbound = ",r_lbound," and r_rbound = ",r_rbound)
+        # print("c_lbound = ",c_lbound," and c_rbound = ",c_rbound)
+
+        # Zero-out all negative numbers.
+        max_3x3[max_3x3 < 0] = 0
+
+        # Compute the offsets - note the meshgrid takes (x,y) = (col,row) instead of (row,col).
+        coords_pixels_3x3 = np.meshgrid(np.arange(c_rbound-c_lbound),np.arange(r_rbound-r_lbound))
+        row_offset = np.rint(np.sum(coords_pixels_3x3[1]*max_3x3)/np.sum(max_3x3)).astype('int') - (arg_max[0] - r_lbound)
+        col_offset = np.rint(np.sum(coords_pixels_3x3[0]*max_3x3)/np.sum(max_3x3)).astype('int') - (arg_max[1] - c_lbound)
+
+        # Set the pixel in the truth.
         th_truth = np.zeros(edge_frame.shape)
-        th_truth[np.unravel_index(np.argmax(edge_frame),edge_truth.shape)] = 1
+        th_truth[arg_max[0] + row_offset, arg_max[1] + col_offset] = 1
+
+        # (Use the maximum)
+        # th_truth[arg_max] = 1
+
+        # Compute the distance matrix.
+        dist = (self.m_line*icols_hrg - irows_hrg + self.b_line*rfac) / (self.m_line**2 + 1)
 
         # Store all the truth matrices in a single matrix.
         all_truth = []
-        all_truth.append(frame_truth)
+        all_truth.append(frame_hrg_truth) #(frame_truth)
         all_truth.append(th_truth)
         all_truth.append(edge_truth)
         all_truth.append(dist)
         all_truth = np.array(all_truth)
 
-        return frame,all_truth
+        return hrg_frame,all_truth
+        #return frame,all_truth
 
 
 def loss_edge(output, target, epoch = 0, sigma_dist = 1, w_edge = 100):

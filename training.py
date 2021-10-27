@@ -213,9 +213,15 @@ class EMFrameDataset(Dataset):
         frame = np.zeros([self.frame_size,self.frame_size])
         frame_truth = np.zeros(frame.shape)
 
+        # ----------------------------------------------------------------------
         # Create the array for the high-resolution-grid truth.
         rfac = self.res_factor
         frame_hrg_truth = np.zeros([self.frame_size*rfac,self.frame_size*rfac])
+
+        hrg_frame = np.zeros([self.frame_size*rfac, self.frame_size*rfac])
+        hrg_indices = np.indices((self.frame_size*rfac,self.frame_size*rfac))
+        irows_hrg = hrg_indices[0]
+        icols_hrg = hrg_indices[1]
 
         # Determine the number of electrons.
         nelec = 1 #int(np.random.normal(loc=self.nelec_mean,scale=self.nelec_sigma))
@@ -226,25 +232,34 @@ class EMFrameDataset(Dataset):
         else:
             light_region = np.random.randint(2)
 
+        # Create the edge truth.
+        if(light_region == 0):
+            edge_truth = irows_hrg >= self.m_line*icols_hrg + self.b_line*rfac
+        else:
+            edge_truth = irows_hrg <= self.m_line*icols_hrg + self.b_line*rfac
+
         # Add all electrons to the event.
         iel = 0
         while(iel < nelec):
         #for iel in range(nelec):
 
-            # Pick a random location in the frame for the electron.
-            eloc = np.unravel_index(np.random.randint(frame.size),frame.shape)
+            # Pick a random location in the high-resolution frame for the electron.
+            eloc_hrg = np.unravel_index(np.random.randint(hrg_frame.size),hrg_frame.shape)
 
             # If we have specified an edge, check whether we should throw the electron.
             if((self.m_line is not None and self.b_line is not None)):
 
                 # Do not throw the electron in the dark region.
-                irow = self.irows[eloc]
-                icol = self.icols[eloc]
-                if(((light_region == 0) and (irow < self.m_line*icol + self.b_line)) or ((light_region == 1) and (irow > self.m_line*icol + self.b_line))):
+                irow = irows_hrg[eloc_hrg]
+                icol = icols_hrg[eloc_hrg]
+                if(((light_region == 0) and (irow < self.m_line*icol + self.b_line*rfac)) or ((light_region == 1) and (irow > self.m_line*icol + self.b_line*rfac))):
                     continue
 
             # Throw an electron.
             iel += 1
+
+            # Convert the location on the HRG to the original grid.
+            eloc = (int(eloc_hrg[0]/rfac),int(eloc_hrg[1]/rfac))
 
             # Pick a random event from the EM dataset.
             ievt = np.random.randint(len(self.emdset))
@@ -266,11 +281,12 @@ class EMFrameDataset(Dataset):
             frame_truth[eloc] = 1
 
             # Add the electron to the high-res truth array.
-            rowoffset = int(rfac*(evt_err[0] + emnet.PIXEL_SIZE/2)/emnet.PIXEL_SIZE)
-            coloffset = int(rfac*(evt_err[1] + emnet.PIXEL_SIZE/2)/emnet.PIXEL_SIZE)
-            hrg_eloc = (rfac*eloc[0] + rowoffset, rfac*eloc[1] + coloffset)
-            frame_hrg_truth[hrg_eloc] = 1
-            #print("For eloc",eloc,"got final loc",hrg_eloc,"plus offsets row=",rowoffset,"and col=",coloffset,"with rowerr=",evt_err[0],"and colerr=",evt_err[1])
+            frame_hrg_truth[eloc_hrg] = 1
+
+            # rowoffset = int(rfac*(evt_err[0] + emnet.PIXEL_SIZE/2)/emnet.PIXEL_SIZE)
+            # coloffset = int(rfac*(evt_err[1] + emnet.PIXEL_SIZE/2)/emnet.PIXEL_SIZE)
+            # hrg_eloc = (rfac*eloc[0] + rowoffset, rfac*eloc[1] + coloffset)
+            # print("For eloc",eloc,"got final loc",hrg_eloc,"plus offsets row=",rowoffset,"and col=",coloffset,"with rowerr=",evt_err[0],"and colerr=",evt_err[1])
 
 
         # Add the noise.
@@ -280,46 +296,32 @@ class EMFrameDataset(Dataset):
         # Compute the distance matrix.
         #dist = (self.m_line*self.icols - self.irows + self.b_line) / (self.m_line**2 + 1)
 
-        # ----------------------------------------------------------------------
-        # Operations on high-resolution grid (HRG)
-        hrg_frame = np.zeros([self.frame_size*rfac, self.frame_size*rfac])
-        hrg_indices = np.indices((self.frame_size*rfac,self.frame_size*rfac))
-        irows_hrg = hrg_indices[0]
-        icols_hrg = hrg_indices[1]
-
-        # Create the edge truth.
-        if(light_region == 0):
-            #dist[self.irows <= self.m_line*self.icols + self.b_line] = 0
-            edge_truth = irows_hrg >= self.m_line*icols_hrg + self.b_line*rfac
-        else:
-            #dist[self.irows >= self.m_line*self.icols + self.b_line] = 0
-            edge_truth = irows_hrg <= self.m_line*icols_hrg + self.b_line*rfac
-
         # Resample the frame to higher resolution.
-        for row in range(frame.shape[0]):
-            for col in range(frame.shape[1]):
-                uniform_dist = np.ones([rfac,rfac]) #np.random.random_sample([rfac,rfac])
-                uniform_dist = frame[row,col]*uniform_dist/np.sum(uniform_dist)
-                hrg_frame[row*rfac:(row+1)*rfac,col*rfac:(col+1)*rfac] = uniform_dist
+        # for row in range(frame.shape[0]):
+        #     for col in range(frame.shape[1]):
+        #         uniform_dist = np.ones([rfac,rfac]) #np.random.random_sample([rfac,rfac])
+        #         uniform_dist = frame[row,col]*uniform_dist/np.sum(uniform_dist)
+        #         hrg_frame[row*rfac:(row+1)*rfac,col*rfac:(col+1)*rfac] = uniform_dist
 
-        # for row in range(rfac):
-        #     for col in range(rfac):
-        #         hrg_frame[row::rfac,col::rfac] = frame/rfac
+        # ----------------------------------------------------------------------
+        # Resample the frame to higher resolution.
+        for row in range(rfac):
+            for col in range(rfac):
+                hrg_frame[row::rfac,col::rfac] = frame/(rfac*rfac)
 
         # Create the threshold-based "truth".
         #th_truth = (frame > self.th_classical)
         #edge_frame = frame * edge_truth
 
         # Include the edge information.
-        edge_frame = hrg_frame * edge_truth
+        edge_frame = (hrg_frame - self.noise_mean/(rfac*rfac))* edge_truth
 
         # ----------------------------------
         # Perform a 3*rfac x 3*rfac average.
         # ----------------------------------
-
         # Get the maximum argument.
         args_max = np.argwhere(edge_frame == np.amax(edge_frame))
-        arg_max = args_max[np.random.randint(len(args_max))]
+        arg_max = args_max[int(len(args_max)/2)]
         #arg_max = np.unravel_index(np.argmax(edge_frame),edge_frame.shape)
         # print("Arg max is",arg_max)
 
@@ -331,6 +333,7 @@ class EMFrameDataset(Dataset):
         c_lbound = max(arg_max[1]-llimit,0)
         c_rbound = min(arg_max[1]+rlimit,edge_frame.shape[1])
         max_3x3 = edge_frame[r_lbound:r_rbound,c_lbound:c_rbound]
+        # print("max_3x3 is",max_3x3)
         # print("llimit =",llimit," and rlimit =",rlimit)
         # print("r_lbound = ",r_lbound," and r_rbound = ",r_rbound)
         # print("c_lbound = ",c_lbound," and c_rbound = ",c_rbound)
@@ -340,8 +343,15 @@ class EMFrameDataset(Dataset):
 
         # Compute the offsets - note the meshgrid takes (x,y) = (col,row) instead of (row,col).
         coords_pixels_3x3 = np.meshgrid(np.arange(c_rbound-c_lbound),np.arange(r_rbound-r_lbound))
+        # print("coords_pixels_3x3[0]",coords_pixels_3x3[0])
+        # print("coords_pixels_3x3[1]",coords_pixels_3x3[1])
         row_offset = np.rint(np.sum(coords_pixels_3x3[1]*max_3x3)/np.sum(max_3x3)).astype('int') - (arg_max[0] - r_lbound)
         col_offset = np.rint(np.sum(coords_pixels_3x3[0]*max_3x3)/np.sum(max_3x3)).astype('int') - (arg_max[1] - c_lbound)
+        # print("row_offset=",row_offset,"and col_offset=",col_offset)
+        # print("arg_max[0]=",arg_max[0],"and arg_max[1]=",arg_max[1])
+        # print("max_3x3 sum=",np.sum(max_3x3))
+        # print("weighted sum row=",np.sum(coords_pixels_3x3[1]*max_3x3),"norm=",np.sum(coords_pixels_3x3[1]*max_3x3)/np.sum(max_3x3))
+        # print("weighted sum col=",np.sum(coords_pixels_3x3[0]*max_3x3),"norm=",np.sum(coords_pixels_3x3[0]*max_3x3)/np.sum(max_3x3))
 
         # Set the pixel in the truth.
         th_truth = np.zeros(edge_frame.shape)

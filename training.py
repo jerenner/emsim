@@ -314,6 +314,7 @@ class EMFrameDataset(Dataset):
         #edge_frame = frame * edge_truth
 
         # Include the edge information.
+        # Remove noise to reduce bias in 3x3 CM determination.
         edge_frame = (hrg_frame - self.noise_mean/(rfac*rfac))* edge_truth
 
         # ----------------------------------
@@ -356,6 +357,7 @@ class EMFrameDataset(Dataset):
         # Set the pixel in the truth.
         th_truth = np.zeros(edge_frame.shape)
         th_truth[arg_max[0] + row_offset, arg_max[1] + col_offset] = 1
+        #th_truth[arg_max[0], arg_max[1]] = 1  # for normal maximum-finding
 
         # (Use the maximum)
         # th_truth[arg_max] = 1

@@ -79,15 +79,16 @@ class EMDataset(Dataset):
         for row,col,counts in zip(df_evt['row'].values,df_evt['col'].values,df_evt['counts'].values):
             evt_arr[row,col] += counts
 
-        # Use an 11x11 event+noise to determine the maximum pixel if no manual shift specified.
+        # Use a windowed event+noise to determine the maximum pixel if no manual shift specified.
         if(self.add_shift < 0):
 
-            evt_small = evt_arr[50-int((11-1)/2):50+int((11-1)/2)+1,50-int((11-1)/2):50+int((11-1)/2)+1]
+            ssize = 101
+            evt_small = evt_arr[50-int((ssize-1)/2):50+int((ssize-1)/2)+1,50-int((ssize-1)/2):50+int((ssize-1)/2)+1]
             if(self.add_noise):
                 evt_small = gaussnoise(evt_small, mean=self.noise_mean, stdev=self.noise_sigma)
             yx_shift = np.unravel_index(np.argmax(evt_small),evt_small.shape)
-            y_shift = yx_shift[0] - 5
-            x_shift = yx_shift[1] - 5
+            y_shift = yx_shift[0] - int((ssize-1)/2)
+            x_shift = yx_shift[1] - int((ssize-1)/2)
             #print("Argmax was {}".format(yx_shift))
             #print("Found x-shift = {}, y-shift = {}".format(x_shift,y_shift))
         else:
@@ -114,7 +115,8 @@ class EMDataset(Dataset):
             evt_arr = gaussnoise(evt_arr, mean=self.noise_mean, stdev=self.noise_sigma)
 
         # Add the relative incident positions to the shifts.
-        err = [emnet.PIXEL_SIZE*x_shift + df_evt.xinc.values[0], emnet.PIXEL_SIZE*y_shift + df_evt.yinc.values[0]]
+        err = [-emnet.PIXEL_SIZE*x_shift + df_evt.xinc.values[0], -emnet.PIXEL_SIZE*y_shift + df_evt.yinc.values[0]]
+        #err = [df_evt.xinc.values[0], df_evt.yinc.values[0]]
 
         # Construct the error matrix.
         SHIFTED_ERR_RANGE_MIN = emnet.PIXEL_ERR_RANGE_MIN - self.add_shift*emnet.PIXEL_SIZE
@@ -202,12 +204,86 @@ class EMFrameDataset(Dataset):
         self.irows = indices[0]
         self.icols = indices[1]
 
-        # Set up the high resolution grid.
-
     def __len__(self):
         return self.nframes
 
     def __getitem__(self, idx):
+
+        return self.get_reg_event(idx)
+        #return self.get_hg_event(idx)
+
+    def get_reg_event(self, idx):
+
+        # Create a random event (index does nothing, though could possibly be used as seed).
+        frame = np.zeros([self.frame_size,self.frame_size])
+
+        # Add all electrons to the event.
+        nelec = 1
+        iel = 0
+        while(iel < nelec):
+        #for iel in range(nelec):
+
+            # Pick a random location in the frame for the electron.
+            #eloc = np.unravel_index(np.random.randint(frame.size),frame.shape)
+
+            # Use the central location in the frame for the electron.
+            eloc = np.unravel_index(int((frame.size-1)/2),frame.shape)
+            #print("Loc is ",eloc,"for frame size",frame.size,"and frame shape",frame.shape)
+
+            #ievt = idx
+            # Pick a random event from the EM dataset.
+            ievt = np.random.randint(len(self.emdset))
+
+            evt_item = self.emdset[ievt]
+            evt_arr = evt_item[0]
+            evt_err = evt_item[1]
+
+            # Throw an electron.
+            #err_max = int(frame.shape[0]-1)/2*emnet.PIXEL_SIZE
+            err_max = 1.5*emnet.PIXEL_SIZE
+            if(abs(evt_err[0]) > err_max or abs(evt_err[1]) > err_max):
+                #print("Throwing event with error",evt_err)
+                continue
+            iel += 1
+
+            # Add the electron to the frame.
+            delta = int((emnet.EVT_SIZE-1)/2)  # the extent of the event from the central pixel
+            ileft = max(eloc[0]-delta,0); delta_ileft = eloc[0] - ileft
+            jleft = max(eloc[1]-delta,0); delta_jleft = eloc[1] - jleft
+
+            iright = min(eloc[0]+delta+1,frame.shape[0]); delta_iright = iright - eloc[0]
+            jright = min(eloc[1]+delta+1,frame.shape[1]); delta_jright = jright - eloc[1]
+
+            frame[ileft:iright,jleft:jright] += evt_arr[delta-delta_ileft:delta+delta_iright,delta-delta_jleft:delta+delta_jright] #/10000
+
+            # Get the maximum pixel.
+            arg_max = np.unravel_index(np.argmax(frame),frame.shape)
+
+            # Compute the vector from the max point to the true point.
+            #vec_row = ((arg_max[0] - eloc[0])*emnet.PIXEL_SIZE + evt_err[1])/(emnet.PIXEL_SIZE) # y-error
+            #vec_col = ((arg_max[1] - eloc[1])*emnet.PIXEL_SIZE + evt_err[0])/(emnet.PIXEL_SIZE) # x-error
+            vec_row = evt_err[1]/emnet.PIXEL_SIZE
+            vec_col = evt_err[0]/emnet.PIXEL_SIZE
+            if(not(arg_max[0] == 5 and arg_max[1] == 5)):
+                print("Loc is ",eloc,"for frame size",frame.size,"and frame shape",frame.shape)
+                print("Initial event max is",np.unravel_index(np.argmax(evt_arr),evt_arr.shape))
+                print("Arg max is",arg_max)
+            # print("Eloc = ",eloc)
+            # print("Evt error is",evt_err)
+            # print("Truth is: row =",vec_row,", col =",vec_col)
+
+            # Create the vector truth.
+            #vec_truth = [(eloc[0] + 0.5)*emnet.PIXEL_SIZE + evt_err[0], (eloc[1] + 0.5)*emnet.PIXEL_SIZE + evt_err[1]] # absolute coord.
+            vec_truth = [vec_row, vec_col]
+            #err_rng = 2*err_max
+            #vec_truth = [(vec_row + err_max)/err_rng, (vec_col + err_max)/err_rng]
+            #print("Final error is",vec_truth)
+
+            #print("Threw electron with error from central pixel as: ",vec_truth)
+
+        return frame, vec_truth
+
+    def get_hg_event(self, idx):
 
         # Create a random event (index does nothing, though could possibly be used as seed).
         frame = np.zeros([self.frame_size,self.frame_size])
@@ -315,7 +391,7 @@ class EMFrameDataset(Dataset):
 
         # Include the edge information.
         # Remove noise to reduce bias in 3x3 CM determination.
-        edge_frame = (hrg_frame - self.noise_mean/(rfac*rfac))* edge_truth
+        edge_frame = (hrg_frame - self.noise_mean/(rfac*rfac)) * edge_truth
 
         # ----------------------------------
         # Perform a 3*rfac x 3*rfac average.
@@ -376,6 +452,43 @@ class EMFrameDataset(Dataset):
         return hrg_frame,all_truth
         #return frame,all_truth
 
+# Regression approach
+def train_regression(model, epoch, train_loader, optimizer):
+
+    losses_epoch = []; accuracies_epoch = []
+    for batch_idx, (data, target) in enumerate(train_loader):
+
+        data, target = data.cuda(), target.cuda()
+        data, target = Variable(data), Variable(target)
+        optimizer.zero_grad()
+
+        output_score = model(data)
+        # print("Target shape is",target.shape)
+        # print("Output score shape is",output_score.shape)
+
+        m = nn.MSELoss()
+        loss = m(output_score,target)
+
+        loss.backward()
+        optimizer.step()
+
+        #maxvals = output_score.argmax(dim=1)
+        correctvals = (output_score - target)**2 < 0.0001
+        accuracy = correctvals.sum().float() / float(target.size(0))
+
+        if batch_idx % 1 == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\t score_max: {:.6f}\t score_min: {:.6f}; Accuracy {:.3f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                100. * batch_idx / len(train_loader), loss.data.item(), output_score.data.max(), output_score.data.min(), accuracy.data.item()))
+
+        losses_epoch.append(loss.data.item())
+        accuracies_epoch.append(accuracy.data.item())
+
+    print("---EPOCH AVG TRAIN LOSS:",np.mean(losses_epoch),"ACCURACY:",np.mean(accuracies_epoch))
+    with open("train.txt", "a") as ftrain:
+        ftrain.write("{} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(accuracies_epoch)))
+
+    return np.mean(losses_epoch)
 
 def loss_edge(output, target, epoch = 0, sigma_dist = 1, w_edge = 100):
     output = output.squeeze(1)
@@ -475,7 +588,6 @@ def train_unet(model, epoch, train_loader, optimizer, sigma_dist = 2):
         ftrain.write("{} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(accuracies_epoch)))
 
     return np.mean(losses_epoch)
-
 
 def train(model, epoch, train_loader, optimizer):
 

@@ -159,6 +159,34 @@ def my_collate(batch):
     return (data, target)
 
 
+def my_collate_reg_line(batch):
+
+    data,arg_max,evt_err,light_region = [], [], [], []
+    for item in batch:
+        d,a,ee,l = item[0], item[2], item[3], item[4]
+
+        # Apply a random transformation.
+        if(augment):
+            d = rotate3D(d)
+        #
+        # # Pad all 0s to get a time dimension of tdim.
+        # d = np.pad(d, [(0,ch_dim-d.shape[0]),(0,0),(0,0)])
+
+        #print("final shapes are",d.shape,t.shape)
+        data.append(d)
+        arg_max.append(a)
+        evt_err.append(ee)
+        light_region.append(l)
+
+    #print("Max in batch is",np.max(data))
+    data = torch.tensor(data).float().unsqueeze(1)
+    arg_max = torch.tensor(arg_max).int() #.unsqueeze(1)
+    evt_err = torch.tensor(evt_err).float()
+    light_region = torch.tensor(light_region).int()
+
+    return (data, arg_max, evt_err, light_region)
+
+
 def my_collate_unet(batch):
 
     data,target = [], []
@@ -209,8 +237,92 @@ class EMFrameDataset(Dataset):
 
     def __getitem__(self, idx):
 
-        return self.get_reg_event(idx)
+        return self.get_reg_line_event(idx)
+        #return self.get_reg_event(idx)
         #return self.get_hg_event(idx)
+
+    def get_reg_line_event(self, idx):
+
+        # Create a random event (index does nothing, though could possibly be used as seed).
+        frame = np.zeros([self.frame_size,self.frame_size])
+
+        # Determine the location of the light region, below (= 0), or above (= 1) the line.
+        if(self.lside >= 0):
+            light_region = self.lside
+        else:
+            light_region = np.random.randint(2)
+
+        # Add all electrons to the event.
+        nelec = 1
+        iel = 0
+        evt_err = None
+        while(iel < nelec):
+        #for iel in range(nelec):
+
+            # Pick a random location in the frame for the electron.
+            eloc = np.unravel_index(np.random.randint(frame.size),frame.shape)
+
+            # Use the central location in the frame for the electron.
+            #eloc = np.unravel_index(int((frame.size-1)/2),frame.shape)
+            #print("Loc is ",eloc,"for frame size",frame.size,"and frame shape",frame.shape)
+
+            #ievt = idx
+            # Pick a random event from the EM dataset.
+            ievt = np.random.randint(len(self.emdset))
+
+            evt_item = self.emdset[ievt]
+            evt_arr = evt_item[0]
+            evt_err = evt_item[1]
+
+            # ------------------------------------------------------------------
+            # Throw an electron.
+
+            # Ensure the error is within range.
+            err_max = int(frame.shape[0]-1)/2*emnet.PIXEL_SIZE
+            #err_max = 1.5*emnet.PIXEL_SIZE
+            if(abs(evt_err[0]) > err_max or abs(evt_err[1]) > err_max):
+                #print("Throwing event with error",evt_err)
+                continue
+
+            # If we have specified an edge, check whether we should throw the electron.
+            if((self.m_line is not None and self.b_line is not None)):
+
+                # Do not throw the electron in the dark region.
+                row_true = eloc[0] + evt_err[1]/emnet.PIXEL_SIZE
+                col_true = eloc[1] + evt_err[0]/emnet.PIXEL_SIZE
+                if(((light_region == 0) and (row_true < self.m_line*col_true + self.b_line)) or ((light_region == 1) and (row_true > self.m_line*col_true + self.b_line))):
+                    continue
+
+            # Consider the electron added.
+            iel += 1
+
+            # Add the electron to the frame.
+            delta = int((emnet.EVT_SIZE-1)/2)  # the extent of the event from the center pixel
+            ileft = max(eloc[0]-delta,0); delta_ileft = eloc[0] - ileft
+            jleft = max(eloc[1]-delta,0); delta_jleft = eloc[1] - jleft
+
+            iright = min(eloc[0]+delta+1,frame.shape[0]); delta_iright = iright - eloc[0]
+            jright = min(eloc[1]+delta+1,frame.shape[1]); delta_jright = jright - eloc[1]
+
+            frame[ileft:iright,jleft:jright] += evt_arr[delta-delta_ileft:delta+delta_iright,delta-delta_jleft:delta+delta_jright] #/10000
+
+        # Shift the frame so that it's centered on the max pixel.
+        frame_cmax = np.zeros([self.frame_size,self.frame_size])
+
+        # Get the maximum pixel.
+        arg_max = np.unravel_index(np.argmax(frame),frame.shape)
+
+        # Construct the shifted frame.
+        delta = int((emnet.EVT_SIZE-1)/2)  # the extent of the event from the center pixel
+        ileft = max(arg_max[0]-delta,0); delta_ileft = arg_max[0] - ileft
+        jleft = max(arg_max[1]-delta,0); delta_jleft = arg_max[1] - jleft
+
+        iright = min(arg_max[0]+delta+1,frame.shape[0]); delta_iright = iright - arg_max[0]
+        jright = min(arg_max[1]+delta+1,frame.shape[1]); delta_jright = jright - arg_max[1]
+        frame_cmax[delta-delta_ileft:delta+delta_iright,delta-delta_jleft:delta+delta_jright] += frame[ileft:iright,jleft:jright]
+
+        # Return the frame centered on the max value, the shifted frame, tha maximum shift, and the event error ([x,y], in mm).
+        return frame_cmax, frame, arg_max, evt_err, light_region
 
     def get_reg_event(self, idx):
 
@@ -451,6 +563,99 @@ class EMFrameDataset(Dataset):
 
         return hrg_frame,all_truth
         #return frame,all_truth
+
+def loss_reg_edge(output, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 1, w_edge = 100):
+
+    # Compute the "error" (vector from center of max pixel) in row and column.
+    col_err = output[:,0]/emnet.PIXEL_SIZE
+    row_err = output[:,1]/emnet.PIXEL_SIZE
+
+    # Calculate the reconstructed points on the non-shifted grid (in grid units).
+    col_reco = col_err + arg_max[:,1]
+    row_reco = row_err + arg_max[:,0]
+
+    # Compute the distance from the line for the reconstructed points.
+    dist = (line_m*col_reco - row_reco + line_b) / (line_m**2 + 1)**0.5
+    print("arg_max",arg_max)
+    print("col_reco =",col_reco," and row_reco",row_reco)
+    print("Dist is",dist)
+
+    # Light region 0 = "above" line in x-y plane (distance is negative if electron is within region).
+    #   --> Multiply by -1.
+    # Light region 1 = "below" line in x-y plane (distance is positive if electron is within region).
+    #   --> Do nothing: a positive distance will give a lower loss, which is correct.
+    dist *= 2*light_region-1
+
+    # Compute the loss term of (err)**2.
+    loss_vec = torch.sum(row_err**2 + col_err**2)
+
+    # Compute the loss term concerning the distance from the line.
+    loss_dist = torch.sum(torch.exp(-dist/sigma_dist))
+
+    # --------------------------------------------------------------------------
+    print("-- Vector loss: {}".format(loss_vec))
+    print("-- Distance loss: {}".format(loss_dist))
+
+    # Weight the loss (if specified).
+    #loss_weighted = torch.mean(wts*loss_total)
+    #loss_weighted = torch.mean(loss_total) # no weights
+
+    return loss_vec, loss_dist
+
+# Regression approach with line information
+def train_regression_line(model, epoch, train_loader, optimizer, line_m, line_b):
+
+    losses_epoch = []; losses_vec_epoch = []; losses_dist_epoch = []; accuracies_epoch = []
+    for batch_idx, (data, arg_max, evt_err, light_region) in enumerate(train_loader):
+
+        data = data.cuda()
+        data = Variable(data)
+        arg_max = arg_max.cuda()
+        evt_err = evt_err.cuda()
+        light_region = light_region.cuda()
+
+        optimizer.zero_grad()
+
+        output_score = model(data)
+        # print("Target shape is",target.shape)
+        # print("Output score shape is",output_score.shape)
+
+        loss_vec, loss_dist = loss_reg_edge(output_score,arg_max,line_m,line_b,light_region)
+        loss = loss_vec + loss_dist
+
+        loss.backward()
+        optimizer.step()
+
+        # --------------------------------------------------------------------------
+        # Determine the accuracy by computing the true and reconstructed points.
+        row_err = evt_err[:,1]/emnet.PIXEL_SIZE
+        col_err = evt_err[:,0]/emnet.PIXEL_SIZE
+        row_true = row_err + arg_max[:,0]
+        col_true = col_err + arg_max[:,1]
+        row_out = output_score[:,1]/emnet.PIXEL_SIZE
+        col_out = output_score[:,0]/emnet.PIXEL_SIZE
+        row_reco = row_err + arg_max[:,0]
+        col_reco = col_err + arg_max[:,1]
+
+        correctvals = ((row_true - row_reco)**2 + (col_true - col_reco)**2) < 0.0001
+        accuracy = correctvals.sum().float() / float(arg_max.size(0))
+        # --------------------------------------------------------------------------
+
+        if batch_idx % 1 == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\t score_max: {:.6f}\t score_min: {:.6f}; Accuracy {:.3f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                100. * batch_idx / len(train_loader), loss.data.item(), output_score.data.max(), output_score.data.min(), accuracy.data.item()))
+
+        losses_epoch.append(loss.data.item())
+        losses_vec_epoch.append(loss_vec.data.item())
+        losses_dist_epoch.append(loss_dist.data.item())
+        accuracies_epoch.append(accuracy.data.item())
+
+    print("---EPOCH AVG TRAIN LOSS:",np.mean(losses_epoch),"(VEC:",np.mean(losses_vec_epoch),", DIST:",np.mean(losses_dist_epoch),") ACCURACY:",np.mean(accuracies_epoch))
+    with open("train.txt", "a") as ftrain:
+        ftrain.write("{} {} {} {} {}\n".format(epoch,np.mean(losses_epoch),np.mean(losses_vec_epoch),np.mean(losses_dist_epoch),np.mean(accuracies_epoch)))
+
+    return np.mean(losses_epoch)
 
 # Regression approach
 def train_regression(model, epoch, train_loader, optimizer):

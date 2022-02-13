@@ -288,8 +288,8 @@ class EMFrameDataset(Dataset):
             if((self.m_line is not None and self.b_line is not None)):
 
                 # Do not throw the electron in the dark region.
-                row_true = eloc[0] + evt_err[1]/emnet.PIXEL_SIZE
-                col_true = eloc[1] + evt_err[0]/emnet.PIXEL_SIZE
+                row_true = eloc[0] + evt_err[1]/emnet.PIXEL_SIZE + 0.5
+                col_true = eloc[1] + evt_err[0]/emnet.PIXEL_SIZE + 0.5
                 if(((light_region == 0) and (row_true < self.m_line*col_true + self.b_line)) or ((light_region == 1) and (row_true > self.m_line*col_true + self.b_line))):
                     continue
 
@@ -567,18 +567,18 @@ class EMFrameDataset(Dataset):
 def loss_reg_edge(output, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 1, w_edge = 100):
 
     # Compute the "error" (vector from center of max pixel) in row and column.
-    col_err = output[:,0]/emnet.PIXEL_SIZE
-    row_err = output[:,1]/emnet.PIXEL_SIZE
+    col_err = output[:,0]
+    row_err = output[:,1]
 
     # Calculate the reconstructed points on the non-shifted grid (in grid units).
-    col_reco = col_err + arg_max[:,1]
-    row_reco = row_err + arg_max[:,0]
+    col_reco = col_err + arg_max[:,1] + 0.5
+    row_reco = row_err + arg_max[:,0] + 0.5
 
     # Compute the distance from the line for the reconstructed points.
     dist = (line_m*col_reco - row_reco + line_b) / (line_m**2 + 1)**0.5
-    print("arg_max",arg_max)
-    print("col_reco =",col_reco," and row_reco",row_reco)
-    print("Dist is",dist)
+    # print("arg_max",arg_max)
+    # print("col_reco =",col_reco," and row_reco",row_reco)
+    # print("Dist is",dist)
 
     # Light region 0 = "above" line in x-y plane (distance is negative if electron is within region).
     #   --> Multiply by -1.
@@ -587,14 +587,19 @@ def loss_reg_edge(output, arg_max, line_m, line_b, light_region, epoch = 0, sigm
     dist *= 2*light_region-1
 
     # Compute the loss term of (err)**2.
-    loss_vec = torch.sum(row_err**2 + col_err**2)
+    loss_vec = torch.mean(row_err**2 + col_err**2)
 
     # Compute the loss term concerning the distance from the line.
-    loss_dist = torch.sum(torch.exp(-dist/sigma_dist))
+    loss_dist = torch.mean(torch.exp(-dist/sigma_dist))
+
+    # Do not consider distance loss until the reconstruction error is small.
+    if(torch.max(col_err,0).values > 11 or torch.max(row_err,0).values > 11):
+        #print("Not considering distance loss.")
+        loss_dist = torch.tensor(0.0)
 
     # --------------------------------------------------------------------------
-    print("-- Vector loss: {}".format(loss_vec))
-    print("-- Distance loss: {}".format(loss_dist))
+    # print("-- Vector loss: {}".format(loss_vec))
+    # print("-- Distance loss: {}".format(loss_dist))
 
     # Weight the loss (if specified).
     #loss_weighted = torch.mean(wts*loss_total)
@@ -630,21 +635,25 @@ def train_regression_line(model, epoch, train_loader, optimizer, line_m, line_b)
         # Determine the accuracy by computing the true and reconstructed points.
         row_err = evt_err[:,1]/emnet.PIXEL_SIZE
         col_err = evt_err[:,0]/emnet.PIXEL_SIZE
-        row_true = row_err + arg_max[:,0]
-        col_true = col_err + arg_max[:,1]
-        row_out = output_score[:,1]/emnet.PIXEL_SIZE
-        col_out = output_score[:,0]/emnet.PIXEL_SIZE
-        row_reco = row_err + arg_max[:,0]
-        col_reco = col_err + arg_max[:,1]
+        row_true = row_err + arg_max[:,0] + 0.5
+        col_true = col_err + arg_max[:,1] + 0.5
+        row_out = output_score[:,1]
+        col_out = output_score[:,0]
+        row_reco = row_out + arg_max[:,0] + 0.5
+        col_reco = col_out + arg_max[:,1] + 0.5
 
-        correctvals = ((row_true - row_reco)**2 + (col_true - col_reco)**2) < 0.0001
+        correctvals = ((row_true - row_reco)**2 + (col_true - col_reco)**2)**0.5 < 0.1
         accuracy = correctvals.sum().float() / float(arg_max.size(0))
         # --------------------------------------------------------------------------
 
+        # Get the current learning rate.
+        param_group = optimizer.param_groups
+        current_lr = param_group[0]['lr']
+
         if batch_idx % 1 == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\t score_max: {:.6f}\t score_min: {:.6f}; Accuracy {:.3f}'.format(
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\t score_max: {:.6f}\t score_min: {:.6f}; Accuracy {:.3f}; LR {}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.data.item(), output_score.data.max(), output_score.data.min(), accuracy.data.item()))
+                100. * batch_idx / len(train_loader), loss.data.item(), output_score.data.max(), output_score.data.min(), accuracy.data.item(), current_lr))
 
         losses_epoch.append(loss.data.item())
         losses_vec_epoch.append(loss_vec.data.item())

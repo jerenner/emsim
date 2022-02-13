@@ -11,7 +11,7 @@ ERR_SIZE = 60     # size of prediction grid (in X and Y)
 PIXEL_SIZE = 0.005
 PIXEL_ERR_RANGE_MIN = -0.0075  # error range minimum
 PIXEL_ERR_RANGE_MAX = 0.0075   # error range maximum
-chi = 512
+chi = 128
 
 class FCNet(nn.Module):
 
@@ -101,10 +101,11 @@ class basicCNN_reg(nn.Module):
         self.pool2 = nn.MaxPool2d(2, 2)
         self.pool3 = nn.MaxPool2d(2, 2)
         self.pool4 = nn.MaxPool2d(2, 2)
-        self.fc0 = nn.Linear(chi*4, ERR_SIZE*ERR_SIZE)
-        self.fc1 = nn.Linear(ERR_SIZE*ERR_SIZE, 2)
-        self.drop1 = nn.Dropout(p=0.5)
+        self.fc0 = nn.Linear(chi*4, 2)
+        #self.fc1 = nn.Linear(ERR_SIZE*ERR_SIZE, 2)
+        self.drop1 = nn.Dropout(p=0.2)
         self.sigmoid = nn.Sigmoid()
+        self.tanh = nn.Tanh()
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -126,10 +127,10 @@ class basicCNN_reg(nn.Module):
         #x = x.view(-1, chi*16 * 1)
         if(netdebug): print(x.shape)
         x = self.drop1(x)
+        # x = self.fc0(x)
+        # x = self.drop1(x)
         x = self.fc0(x)
-        x = self.drop1(x)
-        x = self.fc1(x)
-        #x = self.sigmoid(x)
+        x = self.tanh(x)
         if(netdebug): print(x.shape)
 
         return x

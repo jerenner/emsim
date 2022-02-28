@@ -117,11 +117,11 @@ class basicCNN_reg(nn.Module):
     def forward(self, x):
 
         if(netdebug): print(x.shape)
-        x = self.pool4(self.bn1(F.relu(self.conv1(x))))
+        x = self.pool4(self.bn1(F.leaky_relu(self.conv1(x))))
         if(netdebug): print(x.shape)
-        x = self.pool3(self.bn2(F.relu(self.conv2(x))))
+        x = self.pool3(self.bn2(F.leaky_relu(self.conv2(x))))
         if(netdebug): print(x.shape)
-        x = self.pool2(self.bn3(F.relu(self.conv3(x))))
+        x = self.pool2(self.bn3(F.leaky_relu(self.conv3(x))))
         if(netdebug): print(x.shape)
         x = x.flatten(start_dim=1)
         #x = x.view(-1, chi*16 * 1)
@@ -130,7 +130,7 @@ class basicCNN_reg(nn.Module):
         # x = self.fc0(x)
         # x = self.drop1(x)
         x = self.fc0(x)
-        x = self.tanh(x)
+        #x = self.tanh(x)
         if(netdebug): print(x.shape)
 
         return x

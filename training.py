@@ -564,18 +564,63 @@ class EMFrameDataset(Dataset):
         return hrg_frame,all_truth
         #return frame,all_truth
 
-def loss_reg_edge(output, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 1, w_edge = 100):
+def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 1, w_edge = 100):
 
     # Compute the "error" (vector from center of max pixel) in row and column.
     col_err = output[:,0]
     row_err = output[:,1]
+    # print("Output is (col,row)",col_err,",",row_err,")")
 
     # Calculate the reconstructed points on the non-shifted grid (in grid units).
     col_reco = col_err + arg_max[:,1] + 0.5
     row_reco = row_err + arg_max[:,0] + 0.5
 
+    # Calculate the distance between all pixel centers and the reconstructed point.
+    dist_reco = ((col_coords - col_err[:,None,None])**2 + (row_coords - row_err[:,None,None])**2)**0.5
+
+    # --------------------------------------------------------------------------
+    # Consider only distances for pixels with > 0.5*max_pixel_value.
+
+    # Get the maximum value in each pixel * 0.5.
+    #print("Evt array has shape",evt_arr.shape)
+    max_vals = torch.amax(evt_arr,axis=(1,2))*0.5
+    #print("Max vals first has shape",max_vals.shape)
+    max_vals = max_vals.unsqueeze(1).unsqueeze(1)
+    #print("Max vals with shape",max_vals.shape)
+
+    # Make a (frame_size,frame_size) matrix for each value.
+    max_mat = torch.ones(evt_arr.shape).cuda()
+    max_mat = max_vals*max_mat
+    # print("Max mat is",max_mat)
+    # print("Max mat with shape",max_mat.shape)
+
+    # Create the mask for each frame by comparing to each max_value*0.5 along the batch dimension.
+    mask_dist = (evt_arr > max_mat)
+    # print("dist_reco with shape",dist_reco.shape,"and mask with shape",mask_dist.shape)
+    dist_reco_masked = dist_reco*mask_dist              # apply the mask to zero the gradients in the non-masked elements
+    dist_reco_masked[~mask_dist] = torch.max(dist_reco)  # set all pixels outside max range to a large distance
+    # print("Dist reco masked",dist_reco_masked)
+    dist_reco_min = torch.amin(dist_reco_masked,axis=(1,2))
+    # print("Dist reco min after amin",dist_reco_min)
+    dist_reco_min = torch.max(dist_reco_min-0.5*2**0.5,torch.tensor(0.0))  # assume a tolerance of 0.5sqrt(2) pixels
+    # print("Dist reco",dist_reco)
+    # print("Dist reco min",dist_reco_min)
+
+    # Compute the loss using the true point.
+    # row_err_true = evt_err[:,1]/emnet.PIXEL_SIZE
+    # col_err_true = evt_err[:,0]/emnet.PIXEL_SIZE
+    # loss_vec = torch.mean((row_err_true - row_err)**2 + (col_err_true - col_err)**2)
+
+    # Compute the loss term of mean((dist_reco_min)**2)
+    loss_vec = torch.mean((dist_reco_min)**2)
+    # print("Max of dist_reco_min is",torch.max(dist_reco_min))
+    # print("Min of dist_reco_min is",torch.min(dist_reco_min))
+    # print("Vector loss is",loss_vec)
+
     # Compute the distance from the line for the reconstructed points.
-    dist = (line_m*col_reco - row_reco + line_b) / (line_m**2 + 1)**0.5
+    dist_line = (line_m*col_reco - row_reco + line_b) / (line_m**2 + 1)**0.5
+    # print("Max of dist_line is",torch.max(dist_line))
+    # print("Min of dist_line is",torch.min(dist_line))
     # print("arg_max",arg_max)
     # print("col_reco =",col_reco," and row_reco",row_reco)
     # print("Dist is",dist)
@@ -584,17 +629,17 @@ def loss_reg_edge(output, arg_max, line_m, line_b, light_region, epoch = 0, sigm
     #   --> Multiply by -1.
     # Light region 1 = "below" line in x-y plane (distance is positive if electron is within region).
     #   --> Do nothing: a positive distance will give a lower loss, which is correct.
-    dist *= 2*light_region-1
+    dist_line *= 2*light_region-1
 
     # Compute the loss term of (err)**2.
-    loss_vec = torch.mean(row_err**2 + col_err**2)
+    #loss_vec = torch.mean(row_err**2 + col_err**2)
 
     # Compute the loss term concerning the distance from the line.
-    loss_dist = torch.mean(torch.exp(-dist/sigma_dist))
+    loss_dist = torch.mean(torch.exp(-dist_line/sigma_dist))
 
     # Do not consider distance loss until the reconstruction error is small.
     if(torch.max(col_err,0).values > 11 or torch.max(row_err,0).values > 11):
-        #print("Not considering distance loss.")
+        print("Not considering distance loss.")
         loss_dist = torch.tensor(0.0)
 
     # --------------------------------------------------------------------------
@@ -605,10 +650,15 @@ def loss_reg_edge(output, arg_max, line_m, line_b, light_region, epoch = 0, sigm
     #loss_weighted = torch.mean(wts*loss_total)
     #loss_weighted = torch.mean(loss_total) # no weights
 
-    return loss_vec, loss_dist
+    return loss_vec, loss_dist, dist_reco_masked
 
 # Regression approach with line information
-def train_regression_line(model, epoch, train_loader, optimizer, line_m, line_b):
+def train_regression_line(model, epoch, train_loader, optimizer, line_m, line_b, batch_size):
+
+    # Compute row and col coordinates.
+    indices = np.indices((emnet.EVT_SIZE,emnet.EVT_SIZE))
+    row_coords = torch.tensor(indices[0] + 0.5 - ((emnet.EVT_SIZE-1)/2 + 0.5)).repeat([batch_size,1,1]).cuda()
+    col_coords = torch.tensor(indices[1] + 0.5 - ((emnet.EVT_SIZE-1)/2 + 0.5)).repeat([batch_size,1,1]).cuda()
 
     losses_epoch = []; losses_vec_epoch = []; losses_dist_epoch = []; accuracies_epoch = []
     for batch_idx, (data, arg_max, evt_err, light_region) in enumerate(train_loader):
@@ -625,7 +675,7 @@ def train_regression_line(model, epoch, train_loader, optimizer, line_m, line_b)
         # print("Target shape is",target.shape)
         # print("Output score shape is",output_score.shape)
 
-        loss_vec, loss_dist = loss_reg_edge(output_score,arg_max,line_m,line_b,light_region)
+        loss_vec, loss_dist, _ = loss_reg_edge(data.squeeze(1),evt_err,output_score,row_coords,col_coords,arg_max,line_m,line_b,light_region)
         loss = loss_vec + loss_dist
 
         loss.backward()

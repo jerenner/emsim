@@ -39,13 +39,47 @@ def gaussnoise(data, mean=0.0, stdev=0.05):
     dnoise = data + np.random.normal(loc=mean,scale=stdev,size=data.shape)
     return dnoise
 
+def create_L_event():
+    evt_arr = np.zeros([101,101])
+
+    horiz = np.random.rand() > 0.5  # long leg of L is horizontal (over columns)
+    dir1  = np.random.rand() > 0.5  # direction of long leg of L
+    dir2  = np.random.rand() > 0.5  # direction of short leg of L
+
+    # Choose the random values, and normalize to 1.
+    vals = 0.5*np.random.rand(4) + 0.5
+    vals /= np.sum(vals)
+
+    # Flip the direction of the long leg if dir1 = True
+    sign1 = 1
+    if(dir1): sign1 = -1
+
+    # Draw the L
+    if(horiz):
+        for i in range(len(vals)-1):
+            evt_arr[50,50+sign1*i] = vals[i]
+        if(dir2):
+            evt_arr[49,50+sign1*(len(vals)-2)] = vals[len(vals)-1]
+        else:
+            evt_arr[51,50+sign1*(len(vals)-2)] = vals[len(vals)-1]
+    else:
+        for i in range(len(vals)-1):
+            evt_arr[50+sign1*i,50] = vals[i]
+        if(dir2):
+            evt_arr[50+sign1*(len(vals)-2),49] = vals[len(vals)-1]
+        else:
+            evt_arr[50+sign1*(len(vals)-2),51] = vals[len(vals)-1]
+
+    # Return the event.
+    return evt_arr
 
 class EMDataset(Dataset):
-    def __init__(self, dframe, noise_mean=0, noise_sigma=0, nstart=0, nend=0, add_noise=False, add_shift=-1, augment=False):
+    def __init__(self, dframe, noise_mean=0, noise_sigma=0, nstart=0, nend=0, add_noise=False, add_shift=-1, augment=False, Ltest = False):
 
         # Save some inputs for later use.
         self.dframe = dframe
         self.augment = augment
+        self.Ltest = Ltest
         self.noise_mean = noise_mean
         self.noise_sigma = noise_sigma
         self.add_noise = add_noise
@@ -72,12 +106,15 @@ class EMDataset(Dataset):
 
         # Get the event ID corresponding to this key.
         evt = self.events[idx]
+        df_evt = self.df_data[self.df_data.event == evt]
 
         # Prepare the event.
-        evt_arr = np.zeros([101,101])
-        df_evt = self.df_data[self.df_data.event == evt]
-        for row,col,counts in zip(df_evt['row'].values,df_evt['col'].values,df_evt['counts'].values):
-            evt_arr[row,col] += counts
+        if(self.Ltest):
+            evt_arr = create_L_event()
+        else:
+            evt_arr = np.zeros([101,101])
+            for row,col,counts in zip(df_evt['row'].values,df_evt['col'].values,df_evt['counts'].values):
+                evt_arr[row,col] += counts
 
         # Use a windowed event+noise to determine the maximum pixel if no manual shift specified.
         if(self.add_shift < 0):
@@ -115,7 +152,10 @@ class EMDataset(Dataset):
             evt_arr = gaussnoise(evt_arr, mean=self.noise_mean, stdev=self.noise_sigma)
 
         # Add the relative incident positions to the shifts.
-        err = [-emnet.PIXEL_SIZE*x_shift + df_evt.xinc.values[0], -emnet.PIXEL_SIZE*y_shift + df_evt.yinc.values[0]]
+        if(self.Ltest):
+            err = [-emnet.PIXEL_SIZE*x_shift, -emnet.PIXEL_SIZE*y_shift]
+        else:
+            err = [-emnet.PIXEL_SIZE*x_shift + df_evt.xinc.values[0], -emnet.PIXEL_SIZE*y_shift + df_evt.yinc.values[0]]
         #err = [df_evt.xinc.values[0], df_evt.yinc.values[0]]
 
         # Construct the error matrix.
@@ -260,7 +300,11 @@ class EMFrameDataset(Dataset):
         #for iel in range(nelec):
 
             # Pick a random location in the frame for the electron.
-            eloc = np.unravel_index(np.random.randint(frame.size),frame.shape)
+            loc_chosen = False
+            while(not loc_chosen):
+                eloc = np.unravel_index(np.random.randint(frame.size),frame.shape)
+                if(eloc[0] > 1 and eloc[0] < frame.shape[0]-2 and eloc[1] > 1 and eloc[1] < frame.shape[1]-2):
+                    loc_chosen = True
 
             # Use the central location in the frame for the electron.
             #eloc = np.unravel_index(int((frame.size-1)/2),frame.shape)
@@ -635,7 +679,7 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     #loss_vec = torch.mean(row_err**2 + col_err**2)
 
     # Compute the loss term concerning the distance from the line.
-    loss_dist = torch.mean(torch.exp(-dist_line/sigma_dist))
+    loss_dist = torch.mean(torch.exp(-0.5*dist_line/sigma_dist))
 
     # Do not consider distance loss until the reconstruction error is small.
     if(torch.max(col_err,0).values > 11 or torch.max(row_err,0).values > 11):

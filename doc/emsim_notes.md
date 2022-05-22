@@ -1,5 +1,52 @@
 # EMSim Notes
 
+## 22 MAY 2022: Processing of edge data for extraction of single-electron strikes
+
+We begin from 31 data files, each of which contains 4096 frames (512x512), from which 2048 images are constructed by subtracting the first of each set of 2 frames from the other. The median value is subtracted from each image before further processing.
+
+**In short, we want to extract single-electron strikes from this dataset for events near the knife edges.**
+
+First the edge must be determined. This is done as follows:
+- read all images from all data files (2048 images per file)
+- apply a threshold (100 counts) to determine possible single-electron hit pixels
+- sum all counts from each image in each data file to get a summed image for that file
+- sum all summed images to get a final image for which the edge will be located
+- locate the edge by fitting an s-curve for each row in the final image
+
+Here are the summed images for each dataset:
+
+![](fig/20220522/img_th_all_datasets.png)
+
+And here is the fit edge:
+
+![](fig/20220522/img_edge_fit.png)
+
+The s-curve function used is: L/(1 + exp(-k(x-x0))) + b, and the fit parameter x0 determines where the edge is for a particular row (for now, rounded to the nearest pixel value). Here is an example fit (row 280):
+
+![](fig/20220522/scurve_fit_280.png)
+
+Note that if the fit failed for a row (this occurred for example in the empty row just before 300 in the summed image), the x0 value for the previous row was used.
+
+Next, we must find single-electron strikes near the edge for use in training the network. This is done for each image in each data file as follows:
+- the results of the edge fit (the x0 for each row) are stored in an array (of length 512), containing values x0[row]
+- a corresponding array of 512 ones is created, corresponding to the edge locations available for selection
+- a random edge location (row) is selected from the array, and, if that location is still available (corresponds to a 1 in the array of available edge locations) an 11x11-pixel "event" is constructed, centered upon the corresponding (row,x0) point. If that 11x11 event is considered a valid "subimage" (it contains at least 1 count that falls > 2 pixels from the edges of the 11x11 window), it is kept. The "knife edge" for that image is considered to be the line connecting the points p1 = (row - 5 + 0.5, x0[row-5] + 0.5) and p2 = (row + 5 - 0.5, x0[row+5] + 0.5). The subimage (of the thresholded and non-thresholded image) and line parameters (m and b) are saved. Note that if the line is practically vertical (x0[row-5] == x0[row+5]), it is chosen to slope negative p2 --> (row + 5 - 0.5, x0[row+5] + 0.5 + 1) or positive p2 --> (row + 5 - 0.5, x0[row+5] + 0.5 - 1) to follow the general trend of the edge. In the present example, for the edge with the light region on the left, we see that the fit line is in general sloping negative.
+- once a particular edge location (row) has been considered **and leads to the production of a valid subimage**, it is removed from consideration (set to -1 in the array of available edges) along with all elements +/- 5 indices from it in the array
+- if an edge location is selected and is available, but not all edges within +/- 5 array elements are available (1's), it is set to -1 along with the elements within +/- 5 indices
+- if an edge location is selected and unavailable, the selection continues without modifying the array of available edge locations
+- if an edge location is selected and is too close to the first or last row to create an 11x11 event centered on this row, all edge locations within +/- 5 indices of the selected index are set to unavailable (-1's)
+- this process continues until all edge locations are set to unavailable (-1)
+
+The resulting set of non-thresholded subimages and their line parameters should serve as a dataset for training the edge network. Here are some examples:
+
+![](fig/20220522/example_strike_0.png)
+
+![](fig/20220522/example_strike_1.png)
+
+![](fig/20220522/example_strike_6.png)
+
+For the left edge of the present example, 587509 training samples were selected in this way.
+
 ## 27 SEP 2021: 3x3 single-electron reconstruction, training on NERSC
 
 The basic CNN was modified:

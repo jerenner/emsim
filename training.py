@@ -226,6 +226,36 @@ def my_collate_reg_line(batch):
 
     return (data, arg_max, evt_err, light_region)
 
+def my_collate_reg_line_realdata(batch):
+
+    data,arg_max,evt_err,light_region,line_m,line_b = [], [], [], [], [], []
+    for item in batch:
+        d,a,ee,l,m,b = item[0], item[2], item[3], item[4], item[5], item[6]
+
+        # Apply a random transformation.
+        if(augment):
+            d = rotate3D(d)
+        #
+        # # Pad all 0s to get a time dimension of tdim.
+        # d = np.pad(d, [(0,ch_dim-d.shape[0]),(0,0),(0,0)])
+
+        #print("final shapes are",d.shape,t.shape)
+        data.append(d)
+        arg_max.append(a)
+        evt_err.append(ee)
+        light_region.append(l)
+        line_m.append(m)
+        line_b.append(b)
+
+    #print("Max in batch is",np.max(data))
+    data = torch.tensor(data).float().unsqueeze(1)
+    arg_max = torch.tensor(arg_max).int() #.unsqueeze(1)
+    evt_err = torch.tensor(evt_err).float()
+    light_region = torch.tensor(light_region).int()
+    line_m = torch.tensor(line_m).float()
+    line_b = torch.tensor(line_b).float()
+
+    return (data, arg_max, evt_err, light_region, line_m, line_b)
 
 def my_collate_unet(batch):
 
@@ -249,6 +279,73 @@ def my_collate_unet(batch):
     target = torch.tensor(target).float() #.unsqueeze(1)
 
     return (data, target)
+
+class RealFrameDataset(Dataset):
+    def __init__(self, levents_file, revents_file, istart = 0, nframes = 500000):
+
+        # Save the file names and number of frames.
+        self.levents_file = levents_file
+        self.revents_file = revents_file
+        self.nframes = nframes
+
+        # Load the event arrays for light region 0 (below the line, or on the "right").
+        f_revents = np.load(revents_file)
+        self.revents_frame = f_revents['valid_subimages'][istart:istart+nframes]
+        self.revents_m     = f_revents['line_m'][istart:istart+nframes]
+        self.revents_b     = f_revents['line_b'][istart:istart+nframes]
+        self.revents_i     = np.arange(nframes)
+        np.random.shuffle(self.revents_i)
+
+        # Load the event arrays for light region 1 (above the line, or on the "left").
+        f_levents = np.load(levents_file)
+        self.levents_frame = f_levents['valid_subimages'][istart:istart+nframes]
+        self.levents_m     = f_levents['line_m'][istart:istart+nframes]
+        self.levents_b     = f_levents['line_b'][istart:istart+nframes]
+        self.levents_i     = np.arange(nframes)
+        np.random.shuffle(self.levents_i)
+
+    def __len__(self):
+        return self.nframes
+
+    def __getitem__(self, idx):
+
+        return self.get_reg_line_event(idx)
+
+    def get_reg_line_event(self, idx):
+
+        # Determine the location of the light region, below (= 0), or above (= 1) the line.
+        light_region = np.random.randint(2)
+
+        if(light_region == 0):
+            iframe = self.revents_i[idx]
+            frame = self.revents_frame[iframe]
+            line_m = self.revents_m[iframe]
+            line_b = self.revents_b[iframe]
+        else:
+            iframe = self.levents_i[idx]
+            frame = self.levents_frame[iframe]
+            line_m = self.levents_m[iframe]
+            line_b = self.levents_b[iframe]
+
+        # Shift the frame so that it's centered on the max pixel.
+        frame_cmax = np.zeros(frame.shape)
+
+        # Get the maximum pixel.
+        arg_max = np.unravel_index(np.argmax(frame),frame.shape)
+
+        # Construct the shifted frame.
+        delta = int((frame.shape[0]-1)/2)  # the extent of the event from the center pixel
+        ileft = max(arg_max[0]-delta,0); delta_ileft = arg_max[0] - ileft
+        jleft = max(arg_max[1]-delta,0); delta_jleft = arg_max[1] - jleft
+
+        iright = min(arg_max[0]+delta+1,frame.shape[0]); delta_iright = iright - arg_max[0]
+        jright = min(arg_max[1]+delta+1,frame.shape[1]); delta_jright = jright - arg_max[1]
+        frame_cmax[delta-delta_ileft:delta+delta_iright,delta-delta_jleft:delta+delta_jright] += frame[ileft:iright,jleft:jright]
+
+        # Return the frame centered on the max value, the shifted frame, tha maximum shift, and the event error ([x,y], in mm).
+        evt_err = np.zeros(2)
+        return frame_cmax, frame, arg_max, evt_err, light_region, line_m, line_b
+
 
 class EMFrameDataset(Dataset):
     def __init__(self, emdset, nframes=1000, frame_size=576, nelec_mean=2927.294, nelec_sigma=70.531, noise_mean=0, noise_sigma=0, m_line=None, b_line=None, th_classical = 825, lside = -1, res_factor = 1):
@@ -697,7 +794,7 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     return loss_vec, loss_dist, dist_reco_masked
 
 # Regression approach with line information
-def train_regression_line(model, epoch, train_loader, optimizer, line_m, line_b, batch_size):
+def train_regression_line(model, epoch, train_loader, optimizer, batch_size): # line_m, line_b
 
     # Compute row and col coordinates.
     indices = np.indices((emnet.EVT_SIZE,emnet.EVT_SIZE))
@@ -705,13 +802,15 @@ def train_regression_line(model, epoch, train_loader, optimizer, line_m, line_b,
     col_coords = torch.tensor(indices[1] + 0.5 - ((emnet.EVT_SIZE-1)/2 + 0.5)).repeat([batch_size,1,1]).cuda()
 
     losses_epoch = []; losses_vec_epoch = []; losses_dist_epoch = []; accuracies_epoch = []
-    for batch_idx, (data, arg_max, evt_err, light_region) in enumerate(train_loader):
+    for batch_idx, (data, arg_max, evt_err, light_region, line_m, line_b) in enumerate(train_loader):
 
         data = data.cuda()
         data = Variable(data)
         arg_max = arg_max.cuda()
         evt_err = evt_err.cuda()
         light_region = light_region.cuda()
+        line_m = line_m.cuda()
+        line_b = line_b.cuda()
 
         optimizer.zero_grad()
 

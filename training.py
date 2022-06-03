@@ -287,6 +287,7 @@ class RealFrameDataset(Dataset):
         self.levents_file = levents_file
         self.revents_file = revents_file
         self.nframes = nframes
+        self.istart = istart
 
         # Load the event arrays for light region 0 (below the line, or on the "right").
         f_revents = np.load(revents_file)
@@ -319,11 +320,18 @@ class RealFrameDataset(Dataset):
         light_region = np.random.randint(2)
 
         if(light_region == 0):
-            iframe = self.revents_i[idx]
-            frame = np.copy(np.flip(self.revents_frame[iframe],axis=0))
-            frame_cmax = np.copy(np.flip(self.revents_frame_c[iframe],axis=0))
-            line_m = -1*self.revents_m[iframe]
-            line_b = -1*self.revents_b[iframe]
+            # iframe = self.revents_i[idx]
+            # frame = self.revents_frame[iframe]
+            # frame_cmax = self.revents_frame_c[iframe]
+            # line_m = self.revents_m[iframe]
+            # line_b = self.revents_b[iframe]
+
+            # Attempt to symmetrize left events
+            iframe = self.levents_i[idx]
+            frame = np.copy(np.flip(self.levents_frame[iframe]))
+            frame_cmax = np.copy(np.flip(self.levents_frame_c[iframe]))
+            line_m = 1*self.levents_m[iframe]
+            line_b = 2*5.5 - 2*self.levents_m[iframe]*5.5 - self.levents_b[iframe]
         else:
             iframe = self.levents_i[idx]
             frame = self.levents_frame[iframe]

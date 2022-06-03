@@ -291,6 +291,7 @@ class RealFrameDataset(Dataset):
         # Load the event arrays for light region 0 (below the line, or on the "right").
         f_revents = np.load(revents_file)
         self.revents_frame = f_revents['valid_subimages'][istart:istart+nframes]
+        self.revents_frame_c = f_revents['valid_subimages_c'][istart:istart+nframes]
         self.revents_m     = f_revents['line_m'][istart:istart+nframes]
         self.revents_b     = f_revents['line_b'][istart:istart+nframes]
         self.revents_i     = np.arange(nframes)
@@ -299,6 +300,7 @@ class RealFrameDataset(Dataset):
         # Load the event arrays for light region 1 (above the line, or on the "left").
         f_levents = np.load(levents_file)
         self.levents_frame = f_levents['valid_subimages'][istart:istart+nframes]
+        self.levents_frame_c = f_levents['valid_subimages_c'][istart:istart+nframes]
         self.levents_m     = f_levents['line_m'][istart:istart+nframes]
         self.levents_b     = f_levents['line_b'][istart:istart+nframes]
         self.levents_i     = np.arange(nframes)
@@ -318,29 +320,33 @@ class RealFrameDataset(Dataset):
 
         if(light_region == 0):
             iframe = self.revents_i[idx]
-            frame = self.revents_frame[iframe]
-            line_m = self.revents_m[iframe]
-            line_b = self.revents_b[iframe]
+            frame = np.copy(np.flip(self.revents_frame[iframe],axis=0))
+            frame_cmax = np.copy(np.flip(self.revents_frame_c[iframe],axis=0))
+            line_m = -1*self.revents_m[iframe]
+            line_b = -1*self.revents_b[iframe]
         else:
             iframe = self.levents_i[idx]
             frame = self.levents_frame[iframe]
+            frame_cmax = self.levents_frame_c[iframe]
             line_m = self.levents_m[iframe]
             line_b = self.levents_b[iframe]
 
-        # Shift the frame so that it's centered on the max pixel.
-        frame_cmax = np.zeros(frame.shape)
+        # # Shift the frame so that it's centered on the max pixel.
+        # frame_cmax = np.zeros(frame.shape)
+        #
 
         # Get the maximum pixel.
         arg_max = np.unravel_index(np.argmax(frame),frame.shape)
 
-        # Construct the shifted frame.
-        delta = int((frame.shape[0]-1)/2)  # the extent of the event from the center pixel
-        ileft = max(arg_max[0]-delta,0); delta_ileft = arg_max[0] - ileft
-        jleft = max(arg_max[1]-delta,0); delta_jleft = arg_max[1] - jleft
-
-        iright = min(arg_max[0]+delta+1,frame.shape[0]); delta_iright = iright - arg_max[0]
-        jright = min(arg_max[1]+delta+1,frame.shape[1]); delta_jright = jright - arg_max[1]
-        frame_cmax[delta-delta_ileft:delta+delta_iright,delta-delta_jleft:delta+delta_jright] += frame[ileft:iright,jleft:jright]
+        #
+        # # Construct the shifted frame.
+        # delta = int((frame.shape[0]-1)/2)  # the extent of the event from the center pixel
+        # ileft = max(arg_max[0]-delta,0); delta_ileft = arg_max[0] - ileft
+        # jleft = max(arg_max[1]-delta,0); delta_jleft = arg_max[1] - jleft
+        #
+        # iright = min(arg_max[0]+delta+1,frame.shape[0]); delta_iright = iright - arg_max[0]
+        # jright = min(arg_max[1]+delta+1,frame.shape[1]); delta_jright = jright - arg_max[1]
+        # frame_cmax[delta-delta_ileft:delta+delta_iright,delta-delta_jleft:delta+delta_jright] += frame[ileft:iright,jleft:jright]
 
         # Return the frame centered on the max value, the shifted frame, tha maximum shift, and the event error ([x,y], in mm).
         evt_err = np.zeros(2)
@@ -712,6 +718,8 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     row_err = output[:,1]
     # print("Output is (col,row)",col_err,",",row_err,")")
 
+    # print("-- Predicted err (col,row): ({},{})".format(col_err[0],row_err[0]))
+
     # Calculate the reconstructed points on the non-shifted grid (in grid units).
     col_reco = col_err + arg_max[:,1] + 0.5
     row_reco = row_err + arg_max[:,0] + 0.5
@@ -766,11 +774,8 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     # print("col_reco =",col_reco," and row_reco",row_reco)
     # print("Dist is",dist)
 
-    # Light region 0 = "above" line in x-y plane (distance is negative if electron is within region).
-    #   --> Multiply by -1.
-    # Light region 1 = "below" line in x-y plane (distance is positive if electron is within region).
-    #   --> Do nothing: a positive distance will give a lower loss, which is correct.
-    dist_line *= 2*light_region-1
+    # Below sign adjustment may change.
+    dist_line *= 1-2*light_region
 
     # Compute the loss term of (err)**2.
     #loss_vec = torch.mean(row_err**2 + col_err**2)

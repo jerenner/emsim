@@ -21,11 +21,18 @@ def read_images(datfile: str, n_images: int):
     data = np.fromfile(
         datfile, dtype=__dtype, offset=__header_len_in_bytes, count=num_values
     )
+    data = data.astype(int)
 
     data = data.reshape(-1, 512, 512)
 
     img1 = data[::2]
     img2 = data[1::2]
+
+    imgs = img2 - img1
+    med = np.median(imgs, axis=0)
+    imgs = imgs - med
+
+    return imgs
 
 
 def bytes_from_file(filename, chunksize=2):

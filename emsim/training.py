@@ -14,7 +14,7 @@ from torch.utils.data import Dataset
 from torch.autograd import Variable
 from PIL import Image
 
-import emnet
+import emsim.emnet as emnet
 
 # Flag for data augmentation
 augment = False

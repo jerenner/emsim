@@ -27,17 +27,6 @@ class IncidencePoint:
         self.z = float(self.z)
         self.e0 = float(self.e0)
 
-@dataclass
-class Pixel:
-    x: int
-    y: int
-    ionization_electrons: int
-
-    def __post_init__(self):
-        self.x = int(self.x)
-        self.y = int(self.y)
-        self.ionization_electrons = int(self.ionization_electrons)
-
 
 @dataclass
 class Rectangle:
@@ -58,6 +47,7 @@ class Rectangle:
     def center_y(self):
         return (self.ymax + self.ymin) / 2
 
+
 @dataclass
 class BoundingBox(Rectangle):
     def asarray(self):
@@ -76,12 +66,42 @@ class BoundingBox(Rectangle):
             self.height()
         ])
 
+    def rescale(self, x_scale, y_scale):
+        return BoundingBox(
+            xmin=self.xmin * x_scale,
+            xmax=self.xmax * x_scale,
+            ymin=self.ymin * y_scale,
+            ymax=self.ymax * y_scale
+        )
+
+
+@dataclass
+class Pixel:
+    x: int
+    y: int
+    ionization_electrons: int
+
+    def __post_init__(self):
+        self.x = int(self.x)
+        self.y = int(self.y)
+        self.ionization_electrons = int(self.ionization_electrons)
+
+    def in_box(self, box: Rectangle):
+        return box.xmin <= self.x < box.xmax and box.ymin <= self.y < box.ymax
+
+
 @dataclass
 class PixelSet:
     pixels: List[Pixel] = field(default_factory=list)
 
     def get_bounding_box(self):
         return bounding_box(self)
+
+    def crop_to_bounding_box(self, bounding_box):
+        new_pixels = [
+            pixel for pixel in self.pixels if pixel.in_box(bounding_box)
+            ]
+        return PixelSet(new_pixels)
 
 
 @dataclass
@@ -114,29 +134,6 @@ class MultiscaleEvent:
     @property
     def id(self):
         return self.incidence.id
-
-
-@dataclass
-class EventSet:
-    events: List[Event]
-    image_size: Tuple[int]
-
-    def combine(self):
-        return combine_event_arrays(self.events)
-
-
-@dataclass
-class EventExample:
-    incidence: IncidencePoint
-    lowres_bbox: BoundingBox
-    highres_bbox: BoundingBox
-    highres_image: torch.Tensor
-
-
-@dataclass
-class ImageExample:
-    image: torch.Tensor
-    events: List[EventExample]
 
 
 class MultiscaleElectronDataset(IterableDataset):
@@ -178,34 +175,35 @@ class MultiscaleElectronDataset(IterableDataset):
         for part in partitions:
             events = [self.events[i] for i in part]
             image = self.make_composite_lowres_image(events)
-            highres_images = self.highres_images(events)
+
+            boxes = [event.lowres_pixelset.get_bounding_box() for event in events]
+            boxes_pixels = np.stack([box.asarray() for box in boxes], 0)
+            boxes_normalized = self.normalize_boxes(boxes)
+            box_interiors = self.get_lowres_box_interiors(image, boxes)
+            box_sizes = np.stack(
+                [np.array([box.xmax - box.xmin, box.ymax - box.ymin])for box in boxes],
+                0
+            )
+
+            boxes_highres = [
+                self.bounding_box_lowres_to_highres(box) for box in boxes
+            ]
+            boxes_pixels_highres = np.stack([box.asarray() for box in boxes_highres], 0)
+            highres_images = self.highres_images(events, boxes_highres)
             highres_image_sizes = torch.stack([torch.tensor(image.shape) for image in highres_images])
-            highres_image_coords = torch.tensor(np.stack(
-                [event.highres_pixelset.get_bounding_box().asarray() for event in events],
-                axis=0), dtype=torch.float)
-            boxes = self.prepare_boxes(events)
-            boxes_pixels = torch.stack([
-                torch.tensor(event.lowres_pixelset.get_bounding_box().asarray(), dtype=torch.int64)
-                for event in events
-            ])
-            box_interiors = self.get_lowres_box_interiors(image, boxes_pixels)
-            box_sizes = torch.stack(
-                [boxes[:, 2] * self.lowres_image_shape.xmax,
-                 boxes[:, 3] * self.lowres_image_shape.ymax],
-            -1)
-            local_highres_pixel_incidences = self.local_highres_pixel_incidences(events)
+            local_highres_pixel_incidences = self.local_highres_pixel_incidences(events, boxes_highres)
 
             yield {
                 "image": image,
                 "event_ids": torch.tensor([event.id for event in events], dtype=torch.int64),
-                "highres_images": highres_images,
-                "highres_image_coords": highres_image_coords,
-                "boxes": boxes,
                 "boxes_pixels": boxes_pixels,
+                "boxes_normalized": boxes_normalized,
                 "box_interiors": box_interiors,
-                "incidence_locations": local_highres_pixel_incidences,
                 "box_sizes": box_sizes,
+                "boxes_pixels_highres": boxes_pixels_highres,
+                "highres_images": highres_images,
                 "highres_image_sizes": highres_image_sizes,
+                "local_incidence_locations_pixels": local_highres_pixel_incidences,
             }
 
     def make_composite_lowres_image(self, events: List[MultiscaleEvent], add_noise=True) -> torch.Tensor:
@@ -224,21 +222,20 @@ class MultiscaleElectronDataset(IterableDataset):
 
         return image
 
-    def highres_images(self, events: List[MultiscaleEvent]) -> List[torch.Tensor]:
-        def _array(event: MultiscaleEvent):
-            bbox = event.highres_pixelset.get_bounding_box()
+    def highres_images(self, events: List[MultiscaleEvent], boxes: List[BoundingBox]) -> List[torch.Tensor]:
+        def make_image(event: MultiscaleEvent, bbox: BoundingBox):
+            pixelset = event.highres_pixelset.crop_to_bounding_box(bbox)
             array = make_array(
-                event.highres_pixelset, (bbox.width() + 1, bbox.height() + 1),
+                pixelset, (round(bbox.width()), round(bbox.height())),
                 offset_x=bbox.xmin, offset_y=bbox.ymin)
             return torch.tensor(array.todense(), dtype=torch.float)
 
-        images = [_array(event) for event in events]
+        images = [make_image(event, bbox) for event, bbox in zip(events, boxes)]
         return images
 
-    def local_highres_pixel_incidences(self, events: List[MultiscaleEvent]) -> torch.Tensor:
+    def local_highres_pixel_incidences(self, events: List[MultiscaleEvent], boxes: List[BoundingBox]) -> torch.Tensor:
         points = []
-        for event in events:
-            bbox = event.highres_pixelset.get_bounding_box()
+        for event, bbox in zip(events, boxes):
             pixel_location = xy_mm_to_pixel(
                 event.incidence.x, event.incidence.y,
                 event.size_mm.xmin, event.size_mm.xmax,
@@ -251,29 +248,34 @@ class MultiscaleElectronDataset(IterableDataset):
             points.append(pixel_location)
         return torch.tensor(np.stack(points), dtype=torch.float)
 
-    def prepare_boxes(
+    def normalize_boxes(
         self,
-        events: List[MultiscaleEvent]
-    ) -> torch.Tensor:
-        boxes = [event.lowres_pixelset.get_bounding_box() for event in events]
+        boxes: List[BoundingBox]
+    ) -> np.ndarray:
         center_format_boxes = np.stack([box.center_format() for box in boxes], 0)
         center_format_boxes /= np.array(
             [self.lowres_image_shape.width(), self.lowres_image_shape.height(),
              self.lowres_image_shape.width(), self.lowres_image_shape.height()],
             dtype=np.float32
         )
-        return torch.tensor(center_format_boxes, dtype=torch.float)
+        return center_format_boxes
 
     def get_lowres_box_interiors(
         self,
         lowres_composite_image: torch.Tensor,
-        boxes_pixels: torch.Tensor
-    ):
+        boxes: List[BoundingBox]
+    ) -> List[torch.Tensor]:
         images = []
-        for box in boxes_pixels:
-            image = lowres_composite_image[box[0]:box[1], box[2]:box[3]]
+        for box in boxes:
+            image = lowres_composite_image[box.xmin:box.xmax+1, box.ymin:box.ymax+1]
             images.append(image)
         return images
+
+    def bounding_box_lowres_to_highres(self, bbox: BoundingBox):
+        x_scaling = self.highres_image_shape.width() / self.lowres_image_shape.width()
+        y_scaling = self.highres_image_shape.height() / self.lowres_image_shape.height()
+
+        return bbox.rescale(x_scaling, y_scaling)
 
 def _partition(x: List, min_size: int, max_size: int):
     out = []
@@ -347,17 +349,6 @@ def make_array(
     y = np.array(y) - offset_y if offset_y else np.array(y)
     array = sparse.coo_array((np.array(e), (x, y)), shape=shape)
     return array.tocsr()
-
-
-def load_events(filename: str, shape: Tuple[int], bbox_pixel_margin: int) -> List[Event]:
-    events = load_events(filename, shape, bbox_pixel_margin)
-    for event in events:
-        event.finalize(shape, bbox_pixel_margin)
-    return events
-
-
-def combine_event_arrays(events: List[Event]):
-    return sum([event.array for event in events])
 
 
 def bounding_box(pixelset: PixelSet, pixel_margin=0):

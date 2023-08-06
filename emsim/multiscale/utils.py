@@ -15,8 +15,12 @@ def make_array(
         x.append(p.x)
         y.append(p.y)
         e.append(p.ionization_electrons)
-    x = np.array(x) - offset_x if offset_x else np.array(x)
-    y = np.array(y) - offset_y if offset_y else np.array(y)
+    x = np.array(x)
+    y = np.array(y)
+    if offset_x is not None:
+        x = x - offset_x
+    if offset_y is not None:
+        y = y - offset_y
     array = sparse.coo_array((np.array(e), (x, y)), shape=shape)
     return array.tocsr()
 

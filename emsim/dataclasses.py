@@ -1,24 +1,10 @@
 from dataclasses import dataclass, field
 from typing import List, Tuple, Union
+from functools import cached_property
 
 import numpy as np
+from math import floor
 from scipy import sparse
-
-
-@dataclass
-class IncidencePoint:
-    id: int
-    x: float
-    y: float
-    z: float
-    e0: float
-
-    def __post_init__(self):
-        self.id = int(self.id)
-        self.x = float(self.x)
-        self.y = float(self.y)
-        self.z = float(self.z)
-        self.e0 = float(self.e0)
 
 
 @dataclass
@@ -39,6 +25,97 @@ class Rectangle:
 
     def center_y(self):
         return (self.ymax + self.ymin) / 2
+
+
+@dataclass
+class MultiscaleFrame:
+    mm: Rectangle
+    lowres: Rectangle
+    highres: Rectangle
+
+    @cached_property
+    def highres_pixel_size_mm(self):
+        return self.mm.width() / self.highres.width()
+
+    @cached_property
+    def lowres_pixel_size_mm(self):
+        return self.mm.width() / self.lowres.width()
+
+    def mm_to_highres(self, x_mm: float, y_mm: float):
+        x = (x_mm - self.mm.xmin) / self.highres_pixel_size_mm
+        y = (y_mm - self.mm.ymin) / self.highres_pixel_size_mm
+        return x, y
+
+    def mm_to_lowres(self, x_mm: float, y_mm: float):
+        x = (x_mm - self.mm.xmin) / self.lowres_pixel_size_mm
+        y = (y_mm - self.mm.ymin) / self.lowres_pixel_size_mm
+        return x, y
+
+    def lowres_coord_to_mm(
+        self, x_lowres: Union[int, float], y_lowres: Union[int, float],
+    ):
+        x = x_lowres * self.lowres_pixel_size_mm + self.mm.xmin
+        y = y_lowres * self.lowres_pixel_size_mm + self.mm.ymin
+        return x, y
+
+    def lowres_index_to_mm(
+        self, x_lowres: int, y_lowres: int
+    ):
+        if not isinstance(x_lowres, int) or not isinstance(y_lowres, int):
+            raise ValueError(
+                f"Got a non-int value for a pixel index: {(x_lowres, y_lowres)=}")
+        x = x_lowres + 0.5
+        y = y_lowres + 0.5
+        return self.lowres_coord_to_mm(x, y)
+
+    def highres_coord_to_mm(
+        self, x_highres: Union[int, float], y_highres: Union[int, float],
+    ):
+        x = x_highres * self.highres_pixel_size_mm + self.mm.xmin
+        y = y_highres * self.highres_pixel_size_mm + self.mm.ymin
+        return x, y
+
+    def highres_index_to_mm(
+        self, x_highres: int, y_highres: int
+    ):
+        if not isinstance(x_highres, int) or not isinstance(y_highres, int):
+            raise ValueError(
+                f"Got a non-int value for a pixel index: {(x_highres, y_highres)=}")
+        x = x_highres + 0.5
+        y = y_highres + 0.5
+        return self.highres_coord_to_mm(x, y)
+
+@dataclass
+class IncidencePoint:
+    id: int
+    x: float
+    y: float
+    z: float
+    e0: float
+
+    def __post_init__(self):
+        self.id = int(self.id)
+        self.x = float(self.x)
+        self.y = float(self.y)
+        self.z = float(self.z)
+        self.e0 = float(self.e0)
+
+    def normalize_origin(self, x_min: float, y_min: float):
+        return IncidencePoint(self.id, self.x - x_min, self.y - y_min, self.z, self.e0)
+
+    def in_pixel_scale(self, frame: MultiscaleFrame, scale: str):
+        if "lo" in scale and "hi" not in scale:
+            # scale_factor = frame.lowres_pixel_size_mm
+            return frame.mm_to_lowres(self.x, self.y)
+        elif "hi" in scale:
+            # scale_factor = frame.highres_pixel_size_mm
+            return frame.mm_to_highres(self.x, self.y)
+        else:
+            raise ValueError(f"Unknown scale {scale=}")
+        # distance_to_pixel_center = scale_factor / 2
+        # x = (self.x - frame.mm.xmin + distance_to_pixel_center) / scale_factor
+        # y = (self.y - frame.mm.ymin + distance_to_pixel_center) / scale_factor
+        # return x, y
 
 
 @dataclass
@@ -109,6 +186,11 @@ class BoundingBox(Rectangle):
             ymin=self.ymin * y_scale,
             ymax=self.ymax * y_scale
         )
+
+    def scale_to_mm(self, pixel_x_max, pixel_y_max, mm_x_max, mm_y_max):
+        xmin, xmax = np.interp([self.xmin, self.xmax], [0, pixel_x_max], [0, mm_x_max])
+        ymin, ymax = np.interp([self.ymin, self.ymax], [0, pixel_y_max], [0, mm_y_max])
+        return BoundingBox(xmin, xmax, ymin, ymax)
 
 
 @dataclass

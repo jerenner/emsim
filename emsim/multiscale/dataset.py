@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from emsim.dataclasses import BoundingBox, MultiscaleEvent, Rectangle
+from emsim.dataclasses import BoundingBox, MultiscaleEvent, Rectangle, MultiscaleFrame
 from emsim.multiscale.io import read_multiscale_data
 from emsim.multiscale.utils import make_array, xy_mm_to_pixel
 
@@ -19,14 +19,15 @@ class MultiscaleElectronDataset(IterableDataset):
         events_per_image_range: Tuple[int],
         noise_std: float = 1.
     ):
-        self.highres_image_shape = Rectangle(0, highres_image_size[0], 0, highres_image_size[1])
-        self.lowres_image_shape = Rectangle(0, lowres_image_size[0], 0, lowres_image_size[1])
-        self.size_mm = Rectangle(mm_x_range[0], mm_x_range[1], mm_y_range[0], mm_y_range[1])
+        highres_scale = Rectangle(0, highres_image_size[0], 0, highres_image_size[1])
+        lowres_scale = Rectangle(0, lowres_image_size[0], 0, lowres_image_size[1])
+        mm_scale = Rectangle(mm_x_range[0], mm_x_range[1], mm_y_range[0], mm_y_range[1])
+        self.frame = MultiscaleFrame(mm_scale, lowres_scale, highres_scale)
         self.noise_std = noise_std
 
         self.low_to_high_scale_factor = (
-            round(self.highres_image_shape.xmax / self.lowres_image_shape.xmax),
-            round(self.highres_image_shape.ymax / self.lowres_image_shape.ymax)
+            round(self.frame.highres.xmax / self.frame.lowres.xmax),
+            round(self.frame.highres.ymax / self.frame.lowres.ymax)
         )
 
         assert len(events_per_image_range) == 2
@@ -39,8 +40,8 @@ class MultiscaleElectronDataset(IterableDataset):
 
         # validate data
         for event in self.events:
-            assert self.size_mm.xmin <= event.incidence.x <= self.size_mm.xmax
-            assert self.size_mm.ymin <= event.incidence.y <= self.size_mm.ymax
+            assert self.frame.mm.xmin <= event.incidence.x <= self.frame.mm.xmax
+            assert self.frame.mm.ymin <= event.incidence.y <= self.frame.mm.ymax
 
     def __iter__(self):
         event_indices = list(range(len(self.events)))
@@ -66,9 +67,22 @@ class MultiscaleElectronDataset(IterableDataset):
             boxes_pixels_highres = np.stack([box.asarray() for box in boxes_highres], 0)
             highres_images = self.highres_images(events, boxes_highres)
             highres_image_sizes = torch.stack([torch.tensor(image.shape) for image in highres_images])
-            local_highres_pixel_incidences = self.local_highres_pixel_incidences(events, boxes_highres)
+
+            incidence_pixels_lowres = torch.tensor(np.stack([
+                e.incidence.in_pixel_scale(self.frame, "lowres") for e in events
+            ], 0))
+            incidence_pixels_highres = torch.tensor(np.stack([
+                e.incidence.in_pixel_scale(self.frame, "highres") for e in events
+            ], 0))
+
+            local_lowres_pixel_incidences = self.local_lowres_pixel_incidences(events, boxes)
+            local_highres_pixel_incidences = local_lowres_pixel_incidences * torch.tensor(
+                self.low_to_high_scale_factor)
+
+
 
             yield {
+                "events": events,
                 "image": image,
                 "event_ids": torch.tensor([event.id for event in events], dtype=torch.int64),
                 "boxes_pixels": boxes_pixels,
@@ -78,14 +92,17 @@ class MultiscaleElectronDataset(IterableDataset):
                 "boxes_pixels_highres": boxes_pixels_highres,
                 "highres_images": highres_images,
                 "highres_image_sizes": highres_image_sizes,
-                "local_incidence_locations_pixels": local_highres_pixel_incidences,
+                "incidence_pixels_lowres": incidence_pixels_lowres,
+                "incidence_pixels_highres": incidence_pixels_highres,
+                "local_highres_incidence_locations_pixels": local_highres_pixel_incidences,
+                "local_lowres_incidence_locations_pixels": local_lowres_pixel_incidences,
             }
 
     def make_composite_lowres_image(self, events: List[MultiscaleEvent], add_noise=True) -> torch.Tensor:
         arrays = [
             make_array(
                 event.lowres_pixelset,
-                (self.lowres_image_shape.width(), self.lowres_image_shape.height()))
+                (self.frame.lowres.width(), self.frame.lowres.height()))
             for event in events
         ]
 
@@ -111,11 +128,23 @@ class MultiscaleElectronDataset(IterableDataset):
     def local_highres_pixel_incidences(self, events: List[MultiscaleEvent], boxes: List[BoundingBox]) -> torch.Tensor:
         points = []
         for event, bbox in zip(events, boxes):
-            pixel_location = xy_mm_to_pixel(
-                event.incidence.x, event.incidence.y,
-                event.size_mm.xmin, event.size_mm.xmax,
-                event.size_mm.ymin, event.size_mm.ymax,
-                event.highres_image_size.xmax, event.highres_image_size.ymax)
+            # pixel_location = xy_mm_to_pixel(
+            #     event.incidence.x, event.incidence.y,
+            #     self.scale.mm.xmin, self.scale.mm.xmax,
+            #     self.scale.mm.ymin, self.scale.mm.ymax,
+            #     self.scale.highres.xmax, self.scale.highres.ymax)
+            pixel_location = event.incidence.in_pixel_scale(self.frame, "highres")
+            pixel_location = [
+                pixel_location[0] - bbox.xmin,
+                pixel_location[1] - bbox.ymin
+            ]
+            points.append(pixel_location)
+        return torch.tensor(np.stack(points), dtype=torch.float)
+
+    def local_lowres_pixel_incidences(self, events: List[MultiscaleEvent], boxes: List[BoundingBox]) -> torch.Tensor:
+        points = []
+        for event, bbox in zip(events, boxes):
+            pixel_location = event.incidence.in_pixel_scale(self.frame, "lowres")
             pixel_location = [
                 pixel_location[0] - bbox.xmin,
                 pixel_location[1] - bbox.ymin
@@ -129,8 +158,8 @@ class MultiscaleElectronDataset(IterableDataset):
     ) -> np.ndarray:
         center_format_boxes = np.stack([box.center_format() for box in boxes], 0)
         center_format_boxes /= np.array(
-            [self.lowres_image_shape.width(), self.lowres_image_shape.height(),
-             self.lowres_image_shape.width(), self.lowres_image_shape.height()],
+            [self.frame.lowres.width(), self.frame.lowres.height(),
+             self.frame.lowres.width(), self.frame.lowres.height()],
             dtype=np.float32
         )
         return center_format_boxes

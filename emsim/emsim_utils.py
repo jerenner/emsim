@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-import emnet
+from emsim import emnet
 
 from scipy.optimize import curve_fit
 
@@ -58,7 +58,7 @@ def read_electron_data(fname, nevts=1000):
                 l_counts.append(int(vals[2]))
 
     # Construct the DataFrame.
-    evt_dict = {'event': l_evt, 'xinc': l_xinc, 'yinc': l_yinc, 'front': l_front,
+    evt_dict = {'event': l_evt, 'xinc': l_xinc, 'yinc': l_yinc, 'front': l_front,  # x and y incidence points (true x and y points that led to the pixels; subpixel numbers)
                 'energy': l_energy, 'row': l_row, 'col': l_col, 'counts': l_counts}
     df = pd.DataFrame.from_dict(evt_dict)
 
@@ -99,6 +99,9 @@ def compute_moments(evt_arr,args,order,pixel_size,coords_pixels):
 
 # ------------------------------------------------------------------------------
 # Functions for computation of key quantities and evaluation on all events
+
+# Event = single strike/snapshot
+# centroid of pixel windows 3x3 and 5x5
 
 def compute_key_quantities(evt_arr,threshold=40):
     """
@@ -231,6 +234,7 @@ def fit_sigmas(prob_dist,x,y,x0,y0,sigma_x0,sigma_y0,err_pixel_size):
     return popt, pcov
 
 
+# makes
 def construct_evt_dataframe(dset,evts,model,threshold=40):
     """
     Constructs a dataframe containing key information for each of the specified events.

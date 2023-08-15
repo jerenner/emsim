@@ -1,5 +1,57 @@
 # EMSim Notes
 
+## 9 JAN 2023: Distribution of distances to the line
+
+In attempting to train the edge net, one might anticipate the goal to be to train a network that improves the sharpness of the line. One way to examine the behavior of the network would be to look at the histogram of distances from the line for many reconstructed points.
+
+For a CNN trained on 400k 11x11 sub-frames (with the revised edge determination discussed in the 12 DEC note below), here are these histograms using the reconstructed strike locations of 100k sub-frames not used in the training performed 1. with the CNN and 2. assuming the reconstructed location is the center of the pixel with the maximum charge:
+
+**Both methods**
+
+![](fig/20230109/distance_val.png)
+
+**Max charge only**
+
+![](fig/20230109/distance_val_maxcharge.png)
+
+**NN only**
+
+![](fig/20230109/distance_val_NN.png)
+
+**Zoomed**
+
+![](fig/20230109/distance_val_near0.png)
+
+A similar exercise can be repeated with MC-generated events (for which we also have access to the true information):
+
+**Max charge**
+
+![](fig/20230109/MC_max_distance.png)
+
+Note that for the MC events the line was always set at exactly the same place, and so the distance to the centers of the neighboring pixels is discrete.
+
+**NN reconstruction**
+
+![](fig/20230109/MC_NN_distance.png)
+
+**True points**
+
+![](fig/20230109/MC_true_distance.png)
+
+**NN and true superimposed**
+
+![](fig/20230109/MC_true_and_NN_distance.png)
+
+## 12 DEC 2022: Refined determination of the "edge"
+
+The "edge" for the sub-images used in training is now determined using a fit to the determined edge points over all rows:
+
+![](fig/20221212/subimg_xmid_215.png)
+
+Here each of the small red dots represents an S-curve fit (in the X-direction) for each row of pixels in the original "edge" image. This fit is done once per row (so the Y-coordinate is the center of the row in Y) but has sub-pixel resolution in X. The line is now determined by a fit to all of these points present in a single 11x11 subpixel. Before we were just drawing a straight line between the points in the top and bottom rows. In the above example, fitting all the points does not seem like it would make much of a difference, but for other sub-images with more dispersion in the points, it would, for example:
+
+![](fig/20221212/subimg_xmid_337.png)
+
 ## 22 MAY 2022: Processing of edge data for extraction of single-electron strikes
 
 We begin from 31 data files, each of which contains 4096 frames (512x512), from which 2048 images are constructed by subtracting the first of each set of 2 frames from the other. The median value is subtracted from each image before further processing.

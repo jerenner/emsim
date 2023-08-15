@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import training as tr
-import emnet
+import emsim.emnet as emnet
 import emsim_utils
 
 import torch

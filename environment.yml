@@ -1,0 +1,23 @@
+name: emsim
+channels:
+  - huggingface
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.8
+  - pip
+  - h5py
+  - matplotlib
+  - numpy
+  - pandas
+  - pillow
+  - pytorch-cuda
+  - scipy
+  - seaborn
+  - torchvision
+  - transformers
+  - huggingface_hub
+  - datasets
+  - timm

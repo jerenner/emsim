@@ -248,12 +248,12 @@ def my_collate_reg_line_realdata(batch):
         line_b.append(b)
 
     #print("Max in batch is",np.max(data))
-    data = torch.tensor(data).float().unsqueeze(1)
-    arg_max = torch.tensor(arg_max).int() #.unsqueeze(1)
-    evt_err = torch.tensor(evt_err).float()
-    light_region = torch.tensor(light_region).int()
-    line_m = torch.tensor(line_m).float()
-    line_b = torch.tensor(line_b).float()
+    data = torch.tensor(np.array(data)).float().unsqueeze(1)
+    arg_max = torch.tensor(np.array(arg_max)).int() #.unsqueeze(1)
+    evt_err = torch.tensor(np.array(evt_err)).float()
+    light_region = torch.tensor(np.array(light_region)).int()
+    line_m = torch.tensor(np.array(line_m)).float()
+    line_b = torch.tensor(np.array(line_b)).float()
 
     return (data, arg_max, evt_err, light_region, line_m, line_b)
 
@@ -719,7 +719,7 @@ class EMFrameDataset(Dataset):
         return hrg_frame,all_truth
         #return frame,all_truth
 
-def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 1, w_edge = 100):
+def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 1.0, w_edge = 100):
 
     # Compute the "error" (vector from center of max pixel) in row and column.
     col_err = output[:,0]
@@ -739,11 +739,11 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     # Consider only distances for pixels with > 0.5*max_pixel_value.
 
     # Get the maximum value in each pixel * 0.5.
-    #print("Evt array has shape",evt_arr.shape)
-    max_vals = torch.amax(evt_arr,axis=(1,2))*0.5
-    #print("Max vals first has shape",max_vals.shape)
+    # print("Evt array has shape",evt_arr.shape)
+    max_vals = torch.amax(evt_arr,axis=(1,2))*0.9 # (torch.amax(evt_arr,axis=(1,2))-8700)*0.5 + 8700
+    # print("Max vals first has shape",max_vals.shape)
     max_vals = max_vals.unsqueeze(1).unsqueeze(1)
-    #print("Max vals with shape",max_vals.shape)
+    # print("Max vals with shape",max_vals.shape)
 
     # Make a (frame_size,frame_size) matrix for each value.
     max_mat = torch.ones(evt_arr.shape).cuda()
@@ -780,7 +780,7 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     # print("Min of dist_line is",torch.min(dist_line))
     # print("arg_max",arg_max)
     # print("col_reco =",col_reco," and row_reco",row_reco)
-    # print("Dist is",dist)
+    # print("Dist is",dist_line)
 
     # Below sign adjustment may change.
     dist_line *= 1-2*light_region

@@ -719,7 +719,7 @@ class EMFrameDataset(Dataset):
         return hrg_frame,all_truth
         #return frame,all_truth
 
-def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 1.0, w_edge = 100):
+def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 0.75, w_edge = 100):
 
     # Compute the "error" (vector from center of max pixel) in row and column.
     col_err = output[:,0]
@@ -783,7 +783,8 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     # print("Dist is",dist_line)
 
     # Below sign adjustment may change.
-    dist_line *= 1-2*light_region
+    #dist_line *= 1-2*light_region
+    dist_line *= -(1-2*light_region)
 
     # Compute the loss term of (err)**2.
     #loss_vec = torch.mean(row_err**2 + col_err**2)

@@ -4,7 +4,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
-#include <sstream>  
+#include <sstream> 
  
 using namespace std;
 
@@ -29,6 +29,9 @@ int main(int argc, char **argv) {
 
   double posx, posy, posz;
   double xi,yi,zi; // the current position of the ionization electron 
+  vector<double> path_xi;
+  vector<double> path_yi;
+  vector<double> path_zi;
   double de, total_e;
   int n_electrons;
   double costheta, phi, step_length;
@@ -58,6 +61,9 @@ int main(int argc, char **argv) {
   ofstream output_file;
   output_file.open("pixelated_2pt5um_tracks_thinned_4um_back_20k_300keV.txt");
 
+  ofstream e_path_file;
+  e_path_file.open("pixelated_2pt5um_tracks_thinned_4um_back_20k_300keV_electron_paths.txt");
+
   //  output_file << "Writing this to a file.\n";
   output_file << "# " << PIXEL_ARRAY_SIZE << " " << PIXEL_ARRAY_SIZE 
               << " " << PIXEL_ARRAY_SIZE*PIXEL_SIZE_UM << " " << PIXEL_ARRAY_SIZE*PIXEL_SIZE_UM << endl;
@@ -68,7 +74,8 @@ int main(int argc, char **argv) {
   string line;
 
   //  ifstream input_file("../B1-build/run_K2_5um_front_10M_300keV.txt");
-  ifstream input_file("../B1-build/test_20k/e300keV_thinned_4um_back_20k.txt");
+  // ifstream input_file("../B1-build/test_20k/e300keV_thinned_4um_back_20k.txt");
+  ifstream input_file("e300keV_thinned_4um_back_20k.txt");
 
   if (input_file.is_open())
     {
@@ -127,6 +134,21 @@ int main(int argc, char **argv) {
               
               //cout << "starting position: " << " " << xi << " " << yi << " " << zi << '\n';
 
+              // clear lists
+              path_xi.clear();
+              path_yi.clear()
+              // path_yi.erase(path_yi.begin(), path_yi.end());
+              path_zi.clear();
+
+              path_xi.shrink_to_fit();
+              path_yi.shrink_to_fit();
+              path_zi.shrink_to_fit();
+
+              // assign first element to lists to track xyz
+              path_xi.assign(1, xi);
+              path_yi.assign(1, yi);
+              path_zi.assign(1, zi);
+
               while (zi > top_of_epi) { // keep tracking this electron as long as it hasn't reached the top of epi
                 // a fancier simulation would include x-y geometry of the diode and would make other areas reflective
                 // get a random direction
@@ -142,6 +164,10 @@ int main(int argc, char **argv) {
                     zi = bottom_of_epi - (zi-bottom_of_epi);
                     // cout << "REFLECTED BOTTOM position: " << " " << xi << " " << yi << " " << zi << '\n';
                 }
+
+                path_xi.emplace_back(xi);
+                path_yi.emplace_back(yi);
+                path_zi.emplace_back(zi);
                 
                 //cout << "position: " << " " << xi << " " << yi << " " << zi << '\n';
                 //cout << "costheta: " << costheta << '\n';
@@ -160,6 +186,14 @@ int main(int argc, char **argv) {
                 cout << "WARNING, pixel outside of range not added to array: ii: " << ii << " jj: " << jj << " for yi = " << yi << " and xi = " << xi << endl;
               else
                 pixel_array[ii][jj]++;
+
+                int event_num = read_events - 1;
+                e_path_file << "Electron path #" << n_electrons << ". Event: " << event_num << ". Pixel: (" << ii << "," << jj << ")" << '\n';
+
+                for (int i = 0; i < path_xi.size(); i++) {
+                  // event_num and n_electrons create a unique identifier for the ionization electron in the sim
+                  e_path_file << event_num << n_electrons << " " << i << " " << path_xi.at(i) << " " << path_yi.at(i) << " " << path_zi.at(i) << '\n';
+                }
               //cout << "ii: " << ii << " jj: " << jj << " n: " << pixel_array[ii][jj] << endl;
               n_electrons--;
             }
@@ -183,6 +217,7 @@ int main(int argc, char **argv) {
       input_file.close();
     }
   output_file.close();
+  e_path_file.close();
 
   // Delete the dynamically allocated pixel array
   for(int i = 0; i < PIXEL_ARRAY_SIZE; ++i)

@@ -719,7 +719,7 @@ class EMFrameDataset(Dataset):
         return hrg_frame,all_truth
         #return frame,all_truth
 
-def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 0.75, w_edge = 100):
+def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, line_m, line_b, light_region, epoch = 0, sigma_dist = 1.0, w_edge = 100):
 
     # Compute the "error" (vector from center of max pixel) in row and column.
     col_err = output[:,0]
@@ -732,36 +732,50 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     col_reco = col_err + arg_max[:,1] + 0.5
     row_reco = row_err + arg_max[:,0] + 0.5
 
+    # Compute the 3x3 centroid.
+    col_center = int((evt_arr.shape[2]-1)/2)
+    row_center = int((evt_arr.shape[1]-1)/2)
+    cmat_3x3 = torch.Tensor([[-1,0,1],[-1,0,1],[-1,0,1]]).cuda()
+    rmat_3x3 = torch.Tensor([[-1,-1,-1],[0,0,0],[1,1,1]]).cuda()
+    sum_3x3 = torch.sum(evt_arr[:,row_center-1:row_center+2,col_center-1:col_center+2],axis=(1,2))
+    col_3x3 = torch.sum(cmat_3x3*evt_arr[:,row_center-1:row_center+2,col_center-1:col_center+2],axis=(1,2))/sum_3x3
+    row_3x3 = torch.sum(rmat_3x3*evt_arr[:,row_center-1:row_center+2,col_center-1:col_center+2],axis=(1,2))/sum_3x3
+    #print("3x3 CM in loss: (",col_3x3,",",row_3x3,")")
+
+    # Calculate the distance between all pixel centers and the 3x3 centroid.
+    dist_sq_3x3 = ((col_3x3 - col_err)**2 + (row_3x3 - row_err)**2)
+
     # Calculate the distance between all pixel centers and the reconstructed point.
     dist_reco = ((col_coords - col_err[:,None,None])**2 + (row_coords - row_err[:,None,None])**2)**0.5
+    dist_reco_masked = dist_reco # temporary for outputting dist_reco while using 3x3 loss
 
-    # --------------------------------------------------------------------------
-    # Consider only distances for pixels with > 0.5*max_pixel_value.
+    # # --------------------------------------------------------------------------
+    # # Consider only distances for pixels with > 0.5*max_pixel_value.
 
-    # Get the maximum value in each pixel * 0.5.
-    # print("Evt array has shape",evt_arr.shape)
-    max_vals = torch.amax(evt_arr,axis=(1,2))*0.9 # (torch.amax(evt_arr,axis=(1,2))-8700)*0.5 + 8700
-    # print("Max vals first has shape",max_vals.shape)
-    max_vals = max_vals.unsqueeze(1).unsqueeze(1)
-    # print("Max vals with shape",max_vals.shape)
+    # # Get the maximum value in each pixel * 0.5.
+    # # print("Evt array has shape",evt_arr.shape)
+    # max_vals = torch.amax(evt_arr,axis=(1,2))*0.9 # (torch.amax(evt_arr,axis=(1,2))-8700)*0.5 + 8700
+    # # print("Max vals first has shape",max_vals.shape)
+    # max_vals = max_vals.unsqueeze(1).unsqueeze(1)
+    # # print("Max vals with shape",max_vals.shape)
 
-    # Make a (frame_size,frame_size) matrix for each value.
-    max_mat = torch.ones(evt_arr.shape).cuda()
-    max_mat = max_vals*max_mat
-    # print("Max mat is",max_mat)
-    # print("Max mat with shape",max_mat.shape)
+    # # Make a (frame_size,frame_size) matrix for each value.
+    # max_mat = torch.ones(evt_arr.shape).cuda()
+    # max_mat = max_vals*max_mat
+    # # print("Max mat is",max_mat)
+    # # print("Max mat with shape",max_mat.shape)
 
-    # Create the mask for each frame by comparing to each max_value*0.5 along the batch dimension.
-    mask_dist = (evt_arr > max_mat)
-    # print("dist_reco with shape",dist_reco.shape,"and mask with shape",mask_dist.shape)
-    dist_reco_masked = dist_reco*mask_dist              # apply the mask to zero the gradients in the non-masked elements
-    dist_reco_masked[~mask_dist] = torch.max(dist_reco)  # set all pixels outside max range to a large distance
-    # print("Dist reco masked",dist_reco_masked)
-    dist_reco_min = torch.amin(dist_reco_masked,axis=(1,2))
-    # print("Dist reco min after amin",dist_reco_min)
-    dist_reco_min = torch.max(dist_reco_min-0.5*2**0.5,torch.tensor(0.0))  # assume a tolerance of 0.5sqrt(2) pixels
-    # print("Dist reco",dist_reco)
-    # print("Dist reco min",dist_reco_min)
+    # # Create the mask for each frame by comparing to each max_value*0.5 along the batch dimension.
+    # mask_dist = (evt_arr > max_mat)
+    # # print("dist_reco with shape",dist_reco.shape,"and mask with shape",mask_dist.shape)
+    # dist_reco_masked = dist_reco*mask_dist              # apply the mask to zero the gradients in the non-masked elements
+    # dist_reco_masked[~mask_dist] = torch.max(dist_reco)  # set all pixels outside max range to a large distance
+    # # print("Dist reco masked",dist_reco_masked)
+    # dist_reco_min = torch.amin(dist_reco_masked,axis=(1,2))
+    # # print("Dist reco min after amin",dist_reco_min)
+    # dist_reco_min = torch.max(dist_reco_min-0.5*2**0.5,torch.tensor(0.0))  # assume a tolerance of 0.5sqrt(2) pixels
+    # # print("Dist reco",dist_reco)
+    # # print("Dist reco min",dist_reco_min)
 
     # Compute the loss using the true point.
     # row_err_true = evt_err[:,1]/emnet.PIXEL_SIZE
@@ -769,10 +783,13 @@ def loss_reg_edge(evt_arr, evt_err, output, row_coords, col_coords, arg_max, lin
     # loss_vec = torch.mean((row_err_true - row_err)**2 + (col_err_true - col_err)**2)
 
     # Compute the loss term of mean((dist_reco_min)**2)
-    loss_vec = torch.mean((dist_reco_min)**2)
+    #loss_vec = torch.mean((dist_reco_min)**2)
     # print("Max of dist_reco_min is",torch.max(dist_reco_min))
     # print("Min of dist_reco_min is",torch.min(dist_reco_min))
     # print("Vector loss is",loss_vec)
+
+    # Compute the loss term using distance from the 3x3 point.
+    loss_vec = torch.mean(dist_sq_3x3)
 
     # Compute the distance from the line for the reconstructed points.
     dist_line = (line_m*col_reco - row_reco + line_b) / (line_m**2 + 1)**0.5

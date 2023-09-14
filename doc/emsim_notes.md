@@ -1,5 +1,86 @@
 # EMSim Notes
 
+## 14 SEPT 2023: Edge data analysis
+
+Here we describe a second attempt to refine edge data with a CNN. 1024 dark-noise-subtracted images of size 3240x2304 were considered. The sum of these images (normalized) is shown below:
+
+![](fig/20230914/summed_img.png)
+
+In summary, in this study we seek to:
+
+1. Quantify the "edge" as a single line
+2. Extract hits near the edge in 11x11 subimages as training events
+3. Train a neural network to reconstruct events near the pixels with the most charge but avoiding reconstruction on the side with no edge
+4. Evaluate the performance of the reconstruction
+
+**1. Quantification of the edge**
+
+To determine the edge, we consider +/- 50 samples in a single row about a center point x0 and fit an s-curve (sigmoid, y = L / [1 + exp(-k*(x-x0))] + b) to the result, similar to the one shown:
+
+![](fig/20230914/edge_fit_single_scurve.png)
+
+The fit x0 is recorded for each row. For all rows for which the fit failed, x0 is considered to be the mean of the values from the neighboring rows. A line is then fit to all of the determined x0 values for each row:
+
+![](fig/20230914/edge_fit_line.png)
+
+The line was found to be y = 6.726618999489237x - 11435.748631593482.
+
+**2. Extraction of 11x11 training samples**
+
+In order to identify individual hits, we must obtain some idea of the noise profile and eliminate noise samples. Looking at a histogram of all samples in a single image,
+
+![](fig/20230914/test_img_samples.png)
+
+we choose a threshold of 9500. Here is a subset of that image with all samples below the threshold set to 0:
+
+![](fig/20230914/test_thresholded_img.png)
+
+We then select rows at random and search for hits near the sample in that row through which the fit line passed. The subimage will be centered about the pixel through which the fit line passed and include +/- 5 samples from that pixel in each dimension (for a total of 11x11 pixels). As later we will present the neural network with images centered about the pixel with maximum charge, the subimage must meet the following conditions:
+- at least 1 pixel must be above threshold
+- the pixel with maximum charge must be more than 2 pixels from all edges of the subimage
+
+A "centered" subimage (centered about the pixel with maximum charge) will also be produced at this point. The equation of the fit line shifted to the coordinate system of the subimage is also saved. Once an image has been selected, all rows in that image are removed from the array of potential rows from which a new subimage can be originated. Note that for an image to be selected, none of its rows may have appeared in any other selected subimage. Some example subimages are as follows:
+
+![](fig/20230914/subimg_0.png)
+![](fig/20230914/subimg_1.png)
+![](fig/20230914/subimg_2.png)
+![](fig/20230914/subimg_3.png)
+
+Of order 20000 subimages were extracted from the 1024-image dataset to be used for training.
+
+**3. NN training**
+
+A convolutional neural network was then trained to compute the displacement from the center of the pixel with maximum charge corresponding to the electron hit location for each subimage. This was done by presenting the network with a 11x11 subimage centered about the maximum pixel and minimizing a loss consisting of two terms:
+
+1. The 3x3 centroid loss. This term was the distance between the reconstructed point and a the centroid of the 3x3 set of pixels including the maximum pixel. (Another version of the training was also considered in which this term was a "cluster loss" consisting of the minimum distance between the reconstructed point and a "cluster" of pixels with charge greater than some chosen fraction of the maximum pixel charge in the image).
+2. The "line" loss. This term is the exponentiated distance from the reconstructed point to the fit line: exp(-0.5*dist_line/sigma_dist), where sigma_dist is a chosen parameter.
+
+An example of two training loss curves is shown below:
+
+![](fig/20230914/loss_1pt0.png)
+![](fig/20230914/loss_1pt75.png)
+
+Note that for the "weaker" line loss (sigma_dist = 1.75) the net optimizes more towards a lower centroid term.
+
+**4. Evaluation of the performance**
+
+To evaluate the performance of the network all 1024 images were reconstructed by selecting 11x11 subimages, encompassing pixels above threshold and centered on the maximum pixel in the subimage, using 3 methods:
+
+1. "Threshold" method: assuming the reconstructed point is the center of the pixel with the maximum charge for all subimages.
+2. "3x3 centroid" method: assuming the reconstructed point is a 3x3 centroid about the pixel with the maximum charge.
+3. NN method: reconstructing using the trained NN.
+
+The reconstructed points were then binned in an image of the original size (3240x2304) with 10 bins per pixel, and the resulting image was rotated so that the edge was vertical, for example:
+
+![](fig/20230914/reco_fac1_10.png)
+
+The rotated image was projected onto the x-axis and the resulting s-curve fit with a sigmoid for each method:
+
+![](fig/20230914/scurves_1pt0.png)
+![](fig/20230914/scurves_1pt75.png)
+
+For each of the NNs shown (sigma_dist = 1.0 and sigma_dist = 1.75), the model weights from the final training epoch (200) were used. The conclusion was that it is difficult to distinguish the performance of any of the methods in this way, and no combination of NN training/parameters yielded significant improvement according to these curves.
+
 ## 9 JAN 2023: Distribution of distances to the line
 
 In attempting to train the edge net, one might anticipate the goal to be to train a network that improves the sharpness of the line. One way to examine the behavior of the network would be to look at the histogram of distances from the line for many reconstructed points.

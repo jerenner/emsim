@@ -6,7 +6,7 @@ from pyro.distributions import Stable
 
 from .zeta import _zeta
 
-from .pdf import stable_standard_density
+from .pdf import stable_standard_density, EPSILON
 from .integrator import Batch1DIntegrator
 
 
@@ -47,8 +47,8 @@ class StableWithLogProb(Stable):
             self._integration_N_gridpoints,
             compiled_integrate=self.use_compiled_integrate,
         )
-        p = p.log() - self.scale.log()
-        return p
+        p = torch.where(p == 0.0, p + EPSILON, p / self.scale)
+        return p.log().float()
 
     def expand(self, batch_shape, _instance=None):
         new = self._get_checked_instance(StableWithLogProb, _instance)

@@ -103,10 +103,11 @@ class StableParameters(nn.Module):
     def combined_loss(self, data, quantile_weight, reduction="mean"):
         nll_loss = self.nll_loss(data, reduction)
         quantile_loss = self.quantile_loss(data, "none")
-        with torch.no_grad():
-            scale_difference = quantile_loss / nll_loss
-        quantile_loss = quantile_loss / scale_difference
-        return (1 - quantile_weight) * nll_loss + quantile_weight * quantile_loss
+        return nll_loss + quantile_weight * quantile_loss
+
+    @property
+    def device(self):
+        return self._raw_alpha.device
 
 
 def fit_from_true_dist(
@@ -114,7 +115,7 @@ def fit_from_true_dist(
     module,
     num_steps,
     batch_size,
-    quantile_weight=0.1,
+    initial_quantile_weight=10,
     quantile_decay_steps=2000,
 ):
     optim = torch.optim.AdamW(module.parameters())
@@ -134,10 +135,10 @@ def fit_from_true_dist(
             ]
         )
         for i in pbar:
-            data = true_dist.sample((batch_size,))
+            data = true_dist.sample((batch_size,)).to(module.device)
             optim.zero_grad()
             loss = module.combined_loss(
-                data, cosine_decay(quantile_weight, quantile_decay_steps, i)
+                data, cosine_decay(initial_quantile_weight, quantile_decay_steps, i)
             )
 
             loss.backward()
@@ -171,12 +172,12 @@ def fit_from_data(
     module,
     num_steps=6000,
     batch_size=1024,
+    initial_quantile_weight=10,
     quantile_decay_steps=2000,
     manual_seed=123,
 ):
-    optim = torch.optim.AdamW(module.parameters())
+    optim = torch.optim.SGD(module.parameters(), lr=1e-3)
     losses = []
-    gradients = []
     param_values = []
     torch.manual_seed(manual_seed)
 
@@ -195,15 +196,16 @@ def fit_from_data(
                 loader = make_loader()
                 batch = next(loader)[0]
 
-            optim.zero_grad()
-            loss = module.combined_loss(
-                batch, cosine_decay(1.0, quantile_decay_steps, i)
-            )
-            loss.backward()
-            with torch.no_grad():
-                grad_t = [param.grad.item() for param in module.parameters()]
+            batch = batch.to(module.device)
 
-            gradients.append(grad_t)
+            optim.zero_grad()
+            if i <= quantile_decay_steps:
+                loss = module.combined_loss(
+                    batch, cosine_decay(initial_quantile_weight, quantile_decay_steps, i)
+                )
+            else:
+                loss = module.nll_loss(batch)
+            loss.backward()
 
             optim.step()
             losses.append(loss.item())

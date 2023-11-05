@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, default_collate, DataLoader
 
+import stempy.io as stio
+
 __raw_file_regex = re.compile(".*/?data_scan(\d+).h5")
 __counted_file_regex = re.compile(".*/?data_scan(\d+)_id\d+_electrons.h5")
 
@@ -115,7 +117,7 @@ class NCEMHubDataset(Dataset):
 
     def __getitem__(self, idx):
         if isinstance(idx, torch.Tensor):
-            idx = idx.tolist()
+            idx = idx.item()
         # Get the last scan with first_frame_index lower than idx
         scan = next(
             scan for scan in reversed(self.scans) if idx >= scan.first_frame_index
@@ -125,7 +127,7 @@ class NCEMHubDataset(Dataset):
         counted_frame = scan.counted_frame(local_index).astype(np.float16)
 
         windows = windowed_electrons_for_frame(raw_frame, counted_frame)
-        energies = sum_window_energies(windows)
+        energies = np.sum(windows, (-2, -1))
 
         return {
             "raw_frame": raw_frame,
@@ -136,6 +138,16 @@ class NCEMHubDataset(Dataset):
             "energies": energies,
             "windows": windows,
         }
+
+    def get_all_energies_of_scan(self, scan_index):
+        scan = self.scans[scan_index]
+        raw_frames = scan.raw_frame(slice(None))
+        counted_frames = stio.load_electron_counts(scan.counted_filename).ravel_scans()
+        windows = extract_surrounding_windows(raw_frames, counted_frames)
+        frame_window_energies = [
+            np.sum(frame_windows, (-2, -1)) for frame_windows in windows
+        ]
+        return np.concatenate(frame_window_energies)
 
 
 def get_loader(raw_folder, counted_folder, **kwargs):
@@ -189,11 +201,6 @@ def windowed_electrons_for_frame(
     return np.stack(frame_windows, 0)
 
 
-def sum_window_energies(windows):
-    energies = np.stack([np.sum(frame_windows, (-2, -1)) for frame_windows in windows])
-    return energies
-
-
 def collate(batch):
     windows = [sample.pop("windows") for sample in batch]
     energies = [sample.pop("energies") for sample in batch]
@@ -208,12 +215,8 @@ def collate(batch):
         ]
     )
 
-    batch["energies"] = torch.cat(
-        [torch.as_tensor(frame_energies) for frame_energies in energies], 0
-    )
-    batch["windows"] = torch.cat(
-        [torch.as_tensor(frame_windows) for frame_windows in windows], 0
-    )
+    batch["energies"] = torch.as_tensor(np.concatenate(energies, 0))
+    batch["windows"] = torch.as_tensor(np.concatenate(windows, 0))
     batch["batch_indices"] = batch_tensor
 
     return batch

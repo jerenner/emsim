@@ -6,7 +6,7 @@ from torchstable import Batch1DIntegrator, StableWithLogProb, quantile_loss
 from torchstable.mcculloch_quantile_estimate import cosine_decay
 from tqdm import trange
 
-from emsim.io.ncemhub_dataset import get_loader
+from emsim.io.ncemhub_dataset import collate
 
 
 class StableParameters(nn.Module):
@@ -169,23 +169,22 @@ def fit_from_true_dist(
     return param_values, per_param_errors, param_errors, losses
 
 
-def fit_from_data(
-    raw_directory,
-    counted_directory,
-    module,
+def fit_from_dataset(
+    dataset,
+    param_module,
     num_steps=6000,
     batch_size=1024,
     initial_quantile_weight=10,
     quantile_decay_steps=2000,
     manual_seed=123,
 ):
-    optim = torch.optim.SGD(module.parameters(), lr=1e-3)
+    optim = torch.optim.SGD(param_module.parameters(), lr=1e-3)
     losses = []
     param_values = []
     torch.manual_seed(manual_seed)
 
     def make_loader():
-        return iter(get_loader(raw_directory, counted_directory, batch_size, shuffle=True, pin_memory=True))
+        return iter(DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate, pin_memory=True))
 
     loader = make_loader()
     with trange(num_steps) as pbar:
@@ -196,21 +195,21 @@ def fit_from_data(
                 loader = make_loader()
                 batch = next(loader)
 
-            batch = batch.to(module.device)
+            batch = batch.to(param_module.device)
 
             optim.zero_grad()
             if i <= quantile_decay_steps:
-                loss = module.combined_loss(
+                loss = param_module.combined_loss(
                     batch, cosine_decay(initial_quantile_weight, quantile_decay_steps, i)
                 )
             else:
-                loss = module.nll_loss(batch)
+                loss = param_module.nll_loss(batch)
             loss.backward()
 
             optim.step()
             losses.append(loss.item())
             with torch.no_grad():
-                params_t = np.array([param.item() for param in module.params()])
+                params_t = np.array([param.item() for param in param_module.params()])
             param_values.append(params_t)
 
             pbar.set_postfix(

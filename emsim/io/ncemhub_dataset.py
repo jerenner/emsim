@@ -8,7 +8,7 @@ from typing import Optional
 import h5py
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate, DataLoader
 
 __raw_file_regex = re.compile(".*/?data_scan(\d+).h5")
 __counted_file_regex = re.compile(".*/?data_scan(\d+)_id\d+_electrons.h5")
@@ -54,7 +54,6 @@ class _Scan:
             self._raw_ptr.close()
         if self._counted_ptr and hasattr(self._counted_ptr, "close"):
             self._counted_ptr.close()
-        super().__del__(self)
 
     def raw_frame(self, frame_index) -> np.ndarray:
         return self.raw_ptr["frames"][frame_index]
@@ -125,13 +124,23 @@ class NCEMHubDataset(Dataset):
         raw_frame = scan.raw_frame(local_index).astype(np.float16)
         counted_frame = scan.counted_frame(local_index).astype(np.float16)
 
+        windows = windowed_electrons_for_frame(raw_frame, counted_frame)
+        energies = sum_window_energies(windows)
+
         return {
             "raw_frame": raw_frame,
             "counted_frame": counted_frame,
             "scan_id": scan.id,
             "local_index": local_index,
             "index": idx,
+            "energies": energies,
+            "windows": windows,
         }
+
+
+def get_loader(raw_folder, counted_folder, **kwargs):
+    dataset = NCEMHubDataset(raw_folder, counted_folder)
+    return DataLoader(dataset, collate_fn=collate, **kwargs)
 
 
 def compute_indices(center, array_size, window_size=np.array([3, 3])):
@@ -152,29 +161,59 @@ def extract_surrounding_windows(
     raw_frames: np.ndarray, counted_frames: np.ndarray, window_size=np.array((3, 3))
 ) -> np.ndarray:
     if raw_frames.ndim == 2:
-        raw_frames = raw_frames.unsqueeze(0)
+        raw_frames = np.expand_dims(raw_frames, 0)
     if counted_frames.ndim == 2:
-        counted_frames = counted_frames.unsqueeze(0)
-    windows = []
-    for raw, counted in zip(raw_frames, counted_frames):
-        frame_windows = []
-        window_centers = np.argwhere(counted)
-        window_low_indices, window_high_indices = compute_indices(
-            window_centers, raw.shape, window_size
-        )
-        frame_windows = []
-        for low, high in zip(window_low_indices, window_high_indices):
-            window = raw[low[0] : high[0], low[1] : high[1]]
-            frame_windows.append(window)
-
-        windows.append(np.stack(frame_windows))
-
+        counted_frames = np.expand_dims(counted_frames, 0)
+    windows = [
+        windowed_electrons_for_frame(raw, counted, window_size)
+        for raw, counted, in zip(raw_frames, counted_frames)
+    ]
     return windows
 
 
-def get_summed_windowed_energies(
-    raw_frames, counted_frames, window_size=np.array((3, 3))
+def windowed_electrons_for_frame(
+    raw_frame: np.ndarray, counted_frame: np.ndarray, window_size=np.array((3, 3))
 ):
-    windows = extract_surrounding_windows(raw_frames, counted_frames, window_size)
-    energies = [np.sum(frame_windows, (-2, -1)) for frame_windows in windows]
+    assert raw_frame.ndim == 2
+    assert counted_frame.ndim == 2
+    frame_windows = []
+    window_centers = np.argwhere(counted_frame)
+    window_low_indices, window_high_indices = compute_indices(
+        window_centers, raw_frame.shape, window_size
+    )
+    frame_windows = []
+    for low, high in zip(window_low_indices, window_high_indices):
+        window = raw_frame[low[0] : high[0], low[1] : high[1]]
+        frame_windows.append(window)
+
+    return np.stack(frame_windows, 0)
+
+
+def sum_window_energies(windows):
+    energies = np.stack([np.sum(frame_windows, (-2, -1)) for frame_windows in windows])
     return energies
+
+
+def collate(batch):
+    windows = [sample.pop("windows") for sample in batch]
+    energies = [sample.pop("energies") for sample in batch]
+
+    batch = default_collate(batch)
+
+    lengths = torch.as_tensor([en.shape[0] for en in energies])
+    batch_tensor = torch.cat(
+        [
+            torch.repeat_interleave(torch.as_tensor(i), length)
+            for i, length in enumerate(lengths)
+        ]
+    )
+
+    batch["energies"] = torch.cat(
+        [torch.as_tensor(frame_energies) for frame_energies in energies], 0
+    )
+    batch["windows"] = torch.cat(
+        [torch.as_tensor(frame_windows) for frame_windows in windows], 0
+    )
+    batch["batch_indices"] = batch_tensor
+
+    return batch

@@ -6,6 +6,8 @@ from torchstable import Batch1DIntegrator, StableWithLogProb, quantile_loss
 from torchstable.mcculloch_quantile_estimate import cosine_decay
 from tqdm import trange
 
+from emsim.io.ncemhub_dataset import get_loader
+
 
 class StableParameters(nn.Module):
     def __init__(
@@ -168,7 +170,8 @@ def fit_from_true_dist(
 
 
 def fit_from_data(
-    data,
+    raw_directory,
+    counted_directory,
     module,
     num_steps=6000,
     batch_size=1024,
@@ -181,20 +184,17 @@ def fit_from_data(
     param_values = []
     torch.manual_seed(manual_seed)
 
-    dataset = TensorDataset(data)
-
     def make_loader():
-        return iter(DataLoader(dataset, batch_size, shuffle=True, pin_memory=True))
+        return iter(get_loader(raw_directory, counted_directory, batch_size, shuffle=True, pin_memory=True))
 
-    i = 0
     loader = make_loader()
     with trange(num_steps) as pbar:
         for i in pbar:
             try:
-                batch = next(loader)[0]
+                batch = next(loader)
             except StopIteration:
                 loader = make_loader()
-                batch = next(loader)[0]
+                batch = next(loader)
 
             batch = batch.to(module.device)
 

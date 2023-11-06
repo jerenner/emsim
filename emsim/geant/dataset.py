@@ -6,6 +6,10 @@ import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 from typing import Callable, Any, Optional
+from transformers import MaskFormerImageProcessor
+import albumentations as A
+
+
 
 from emsim.dataclasses import BoundingBox
 from emsim.geant.dataclasses import GeantElectron
@@ -40,20 +44,23 @@ _PAD_STACK_WITHIN_EXAMPLE = (
 class GeantElectronDataset(IterableDataset):
     def __init__(
         self,
-        trajectory_file: str,
         pixels_file: str,
         undiffused_file: str,
         events_per_image_range: tuple[int],
+        processor: MaskFormerImageProcessor,
+        transform: A.Compose,
         noise_std: float = 1.0,
         shuffle=True,
     ):
-        self.electrons = read_files(trajectory_file, pixels_file, undiffused_file)
+        self.electrons = read_files(pixels_file=pixels_file, undiffused_pixels_file=undiffused_file)
         self.grid = self.electrons[0].grid
 
         assert len(events_per_image_range) == 2
         self.events_per_image_range = events_per_image_range
         self.noise_std = noise_std
         self.shuffle = shuffle
+        self.processor = processor
+        self.transform = transform
 
     def __iter__(self):
         elec_indices = list(range(len(self.electrons)))
@@ -65,61 +72,43 @@ class GeantElectronDataset(IterableDataset):
             elecs: list[GeantElectron] = [self.electrons[i] for i in chunk]
             image = self.make_composite_image(elecs)
 
-            boxes = [elec.pixels.get_bounding_box() for elec in elecs]
-            boxes_normalized = torch.tensor(
-                normalize_boxes(boxes, self.grid.xmax_pixel, self.grid.ymax_pixel),
-                dtype=torch.float32,
-            )
-            box_interiors = self.box_interiors(image, boxes)
-            undiffused_box_interiors = self.undiffused_box_interiors(elecs, boxes)
-
-            trajectory_tensors = [
-                torch.tensor(elec.trajectory.as_array(), dtype=torch.float)
-                for elec in elecs
-            ]
+            maps = [elec.get_segmentation_map(inst_id) for inst_id, elec in enumerate(elecs)]
 
             incidence_points = torch.stack(
                 [torch.tensor([elec.incidence.x, elec.incidence.y]) for elec in elecs]
             )
 
-            box_offsets = torch.stack(
-                [torch.tensor([box.xmin, box.ymin]) for box in boxes]
-            )
-            offsets_mm = box_offsets * (torch.tensor(self.grid.pixel_size_um) / 1000)
+            instance_seg = None
 
-            local_trajectories = [
-                torch.tensor(
-                    elec.trajectory.localize(offset[0], offset[1]).as_array(),
-                    dtype=torch.float,
-                )
-                for elec, offset in zip(elecs, offsets_mm)
-            ]
-            local_incidences = incidence_points - offsets_mm
+            # image = np.array(image.convert("RGB"))
 
-            mm_to_pixel = 1 / (torch.tensor(self.grid.pixel_size_um) / 1000)
-            local_incidences_pixels = local_incidences * mm_to_pixel
+            if self.transform is not None:
+                image = image.numpy()
+                instance_seg = np.array(maps.segmentation_map for i in range(len(maps)))
+                transformed = self.transform(image=image, mask=instance_seg)
+                image, instance_seg = transformed['image'], transformed['mask']
 
-            trajectory_to_pixels = torch.cat([mm_to_pixel, torch.tensor([1.0, 1.0])])
-            local_trajectories_pixels = [
-                traj * trajectory_to_pixels for traj in local_trajectories
-            ]
+                # "convert to C, H, W". wth does this do
+                image = image.transpose(2, 0, 1)
 
-            yield {
-                "image": image,
-                "electron_ids": torch.tensor(
-                    [elec.id for elec in elecs], dtype=torch.int
-                ),
-                "boxes": boxes,
-                "boxes_normalized": boxes_normalized,
-                "box_interiors": box_interiors,
-                "undiffused_box_interiors": undiffused_box_interiors,
-                "trajectories": trajectory_tensors,
-                "incidence_points": incidence_points,
-                "local_trajectories": local_trajectories,
-                "local_incidences": local_incidences,
-                "local_trajectories_pixels": local_trajectories_pixels,
-                "local_incidences_pixels": local_incidences_pixels,
-            }
+            if self.processor is not None:
+                if instance_seg is None:
+                    instance_seg = np.array(maps.segmentation_map for i in range(len(maps)))
+
+                inputs = self.processor([image], [instance_seg], return_tensors="pt")
+                inputs = {k: v.squeeze() if isinstance(v, torch.Tensor) else v[0] for k,v in inputs.items()}
+                    
+            if self.processor is not None or self.transform is not None:
+                yield inputs 
+            else:
+                yield {
+                    "image": image,
+                    "electron_ids": torch.tensor(
+                        [elec.id for elec in elecs], dtype=torch.int
+                    ),
+                    "maps": maps, 
+                    "incidence_points": incidence_points,
+                }
 
     def make_composite_image(self, elecs: list[GeantElectron]) -> torch.Tensor:
         arrays = [

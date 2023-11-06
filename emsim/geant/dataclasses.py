@@ -105,12 +105,26 @@ class Trajectory:
             self, x0=self.x0 - x_offset, y0=self.y0 - y_offset, _points=new_points
         )
 
+@dataclass
+class Map:
+    instance_id: int
+    grid: GeantGridsize
+    pixels: PixelSet
+    segmentation_map: np.ndarray[int, np.dtype[np.int64]] = field(default_factory=lambda: np.zeros(shape=(1,1), dtype=np.int64))
 
+    def __post_init__(self):
+        self.segmentation_map = np.zeros((self.grid.xmax_pixel, self.grid.ymax_pixel))
+        for px in self.pixels._pixels:
+            self.segmentation_map[px.x][px.y] = 1
+
+#A class for GeantElectrons without simulated electrons
 @dataclass
 class GeantElectron:
     id: int
     incidence: IncidencePoint
-    trajectory: Trajectory
     pixels: PixelSet
     undiffused_pixels: PixelSet
     grid: GeantGridsize
+
+    def get_segmentation_map(self, instance_id):
+        return Map(instance_id, self.grid, self.undiffused_pixels)

@@ -6,24 +6,21 @@ from emsim.dataclasses import Event, IncidencePoint, IonizationElectronPixel, En
 from emsim.geant.dataclasses import (GeantElectron, GeantGridsize, Trajectory,
                                      TrajectoryPoint)
 
-
 def read_files(
-    trajectory_file: str, pixels_file: str, undiffused_pixels_file: str
+    pixels_file: str, undiffused_pixels_file: str
 ) -> List[GeantElectron]:
     grid, pixel_events = read_pixelized_geant_output(pixels_file)
     undiffused_pixel_events = read_true_pixel_file(undiffused_pixels_file)
-    trajectories = read_trajectory_file(trajectory_file)
 
     electrons = []
-    for pixel, undiffused, traj in zip(
-        pixel_events, undiffused_pixel_events, trajectories
+    for pixel, undiffused in zip(
+        pixel_events, undiffused_pixel_events
     ):
         assert pixel.incidence == undiffused.incidence
-        assert pixel.incidence.id == undiffused.incidence.id == traj.electron_id
+        assert pixel.incidence.id == undiffused.incidence.id
         elec = GeantElectron(
             id=pixel.incidence.id,
             incidence=pixel.incidence,
-            trajectory=traj,
             pixels=pixel.pixelset,
             undiffused_pixels=undiffused.pixelset,
             grid=grid,

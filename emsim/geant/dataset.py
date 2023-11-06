@@ -31,9 +31,7 @@ _KEYS_TO_BATCH = (
     "local_incidences_pixels",
 )
 
-_TO_DEFAULT_COLLATE = (
-    "image",
-)
+_TO_DEFAULT_COLLATE = ("image",)
 
 _PAD_STACK_WITHIN_EXAMPLE = (
     "box_interiors",
@@ -146,7 +144,7 @@ class GeantElectronDataset(IterableDataset):
 
 def electron_collate_fn(
     batch: list[dict[str, Any]],
-    pad_to_multiple_of=None, # e.g. 8 for tensor cores
+    pad_to_multiple_of=None,  # e.g. 8 for tensor cores
     default_collate_fn: Callable = torch.utils.data.dataloader.default_collate,
 ) -> dict[str, Any]:
     batch = [{k: example[k] for k in _KEYS_TO_BATCH} for example in batch]
@@ -163,7 +161,9 @@ def electron_collate_fn(
             stacked_list = []
             mask_list = []
             for electron in batch:
-                stacked, mask = pad_and_stack_electron_boxes(electron[key], pad_to_multiple_of)
+                stacked, mask = pad_and_stack_electron_boxes(
+                    electron[key], pad_to_multiple_of
+                )
                 stacked_list.append(stacked)
                 mask_list.append(mask)
             out_batch[key] = stacked_list
@@ -178,8 +178,7 @@ def electron_collate_fn(
 
 def pad_and_stack_electron_boxes(
     tensors: list[torch.Tensor], pad_to_multiple_of: Optional[int] = None
-    ) -> (torch.Tensor, torch.Tensor):
-
+) -> (torch.Tensor, torch.Tensor):
     shapes = [t.shape for t in tensors]
     bsz = len(tensors)
 

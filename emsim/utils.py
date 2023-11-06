@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from scipy import sparse
 
-from emsim.dataclasses import BoundingBox, PixelSet
+from emsim.dataclasses import BoundingBox
 from emsim.multiscale.dataclasses import PixelSet
 
 

@@ -124,7 +124,7 @@ class NCEMHubDataset(Dataset):
         )
         local_index = idx - scan.first_frame_index
         raw_frame = scan.raw_frame(local_index).astype(np.float16)
-        counted_frame = scan.counted_frame(local_index).astype(np.float16)
+        counted_frame = scan.counted_frame(local_index).astype(np.bool)
 
         windows = windowed_electrons_for_frame(raw_frame, counted_frame)
         energies = np.sum(windows, (-2, -1))
@@ -148,11 +148,6 @@ class NCEMHubDataset(Dataset):
             np.sum(frame_windows, (-2, -1)) for frame_windows in windows
         ]
         return np.concatenate(frame_window_energies)
-
-
-def get_loader(raw_folder, counted_folder, **kwargs):
-    dataset = NCEMHubDataset(raw_folder, counted_folder)
-    return DataLoader(dataset, collate_fn=collate, **kwargs)
 
 
 def compute_indices(center, array_size, window_size=np.array([3, 3])):

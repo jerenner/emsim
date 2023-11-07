@@ -124,7 +124,7 @@ class NCEMHubDataset(Dataset):
         )
         local_index = idx - scan.first_frame_index
         raw_frame = scan.raw_frame(local_index).astype(np.float16)
-        counted_frame = scan.counted_frame(local_index).astype(np.bool)
+        counted_frame = scan.counted_frame(local_index).astype(bool)
 
         windows = windowed_electrons_for_frame(raw_frame, counted_frame)
         energies = np.sum(windows, (-2, -1))

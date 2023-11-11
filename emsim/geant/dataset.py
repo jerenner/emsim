@@ -6,37 +6,22 @@ import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 from typing import Callable, Any, Optional
-from transformers import MaskFormerImageProcessor
-import albumentations as A
 
-
-
-from emsim.dataclasses import BoundingBox
+from emsim.dataclasses import BoundingBox, IonizationElectronPixel
 from emsim.geant.dataclasses import GeantElectron
 from emsim.geant.io import read_files
 from emsim.utils import (
     random_chunks,
     sparsearray_from_pixels,
-    normalize_boxes,
     make_image,
 )
 
 
-_KEYS_TO_BATCH = (
-    "image",
-    "boxes_normalized",
-    "box_interiors",
-    "undiffused_box_interiors",
-    "local_trajectories_pixels",
-    "local_incidences_pixels",
-)
+# keys in here will not be batched in the collate fn
+_KEYS_TO_NOT_BATCH = ("maps",)
 
+# these keys get passed to the default collate_fn, everything else uses custom batching logic
 _TO_DEFAULT_COLLATE = ("image",)
-
-_PAD_STACK_WITHIN_EXAMPLE = (
-    "box_interiors",
-    "undiffused_box_interiors",
-)
 
 
 class GeantElectronDataset(IterableDataset):
@@ -45,16 +30,22 @@ class GeantElectronDataset(IterableDataset):
         pixels_file: str,
         undiffused_file: str,
         events_per_image_range: tuple[int],
-        processor: MaskFormerImageProcessor,
-        transform: A.Compose,
+        pixel_patch_size: int = 5,
+        processor: Callable = None,
+        transform: Callable = None,
         noise_std: float = 1.0,
         shuffle=True,
     ):
-        self.electrons = read_files(pixels_file=pixels_file, undiffused_pixels_file=undiffused_file)
+        self.electrons = read_files(
+            pixels_file=pixels_file, undiffused_pixels_file=undiffused_file
+        )
         self.grid = self.electrons[0].grid
 
         assert len(events_per_image_range) == 2
         self.events_per_image_range = events_per_image_range
+        if pixel_patch_size % 2 == 0:
+            raise ValueError(f"pixel_patch_size should be odd, got {pixel_patch_size}")
+        self.pixel_patch_size = pixel_patch_size
         self.noise_std = noise_std
         self.shuffle = shuffle
         self.processor = processor
@@ -70,11 +61,27 @@ class GeantElectronDataset(IterableDataset):
             elecs: list[GeantElectron] = [self.electrons[i] for i in chunk]
             image = self.make_composite_image(elecs)
 
-            maps = [elec.get_segmentation_map(inst_id) for inst_id, elec in enumerate(elecs)]
-
-            incidence_points = torch.stack(
-                [torch.tensor([elec.incidence.x, elec.incidence.y]) for elec in elecs]
+            patches, patch_coords = get_pixel_patches(
+                image, elecs, self.pixel_patch_size
             )
+            patch_coords_mm = (
+                patch_coords * np.array(self.grid.pixel_size_um * 2) / 1000
+            )
+
+            maps = [
+                elec.get_segmentation_map(inst_id) for inst_id, elec in enumerate(elecs)
+            ]
+
+            incidence_points = np.stack(
+                [
+                    np.array([elec.incidence.x, elec.incidence.y], dtype=np.float32)
+                    for elec in elecs
+                ]
+            )
+            local_incidence_points_mm = incidence_points - patch_coords_mm[:, :2]
+            local_incidence_points_pixels = local_incidence_points_mm / (
+                np.array(self.grid.pixel_size_um) / 1000
+            ).astype(np.float32)
 
             instance_seg = None
 
@@ -84,70 +91,109 @@ class GeantElectronDataset(IterableDataset):
                 image = image.numpy()
                 instance_seg = np.array(maps.segmentation_map for i in range(len(maps)))
                 transformed = self.transform(image=image, mask=instance_seg)
-                image, instance_seg = transformed['image'], transformed['mask']
+                image, instance_seg = transformed["image"], transformed["mask"]
 
                 # "convert to C, H, W". wth does this do
                 image = image.transpose(2, 0, 1)
 
             if self.processor is not None:
                 if instance_seg is None:
-                    instance_seg = np.array(maps.segmentation_map for i in range(len(maps)))
+                    instance_seg = np.array(
+                        maps.segmentation_map for i in range(len(maps))
+                    )
 
                 inputs = self.processor([image], [instance_seg], return_tensors="pt")
-                inputs = {k: v.squeeze() if isinstance(v, torch.Tensor) else v[0] for k,v in inputs.items()}
+                inputs = {
+                    k: v.squeeze() if isinstance(v, torch.Tensor) else v[0]
+                    for k, v in inputs.items()
+                }
 
             if self.processor is not None or self.transform is not None:
                 yield inputs
             else:
                 yield {
-                    "image": image,
-                    "electron_ids": torch.tensor(
-                        [elec.id for elec in elecs], dtype=torch.int
-                    ),
+                    "image": image.astype(np.float32),
+                    "electron_ids": np.array([elec.id for elec in elecs], dtype=int),
                     "maps": maps,
                     "incidence_points": incidence_points,
+                    "local_incidence_points_pixels": local_incidence_points_pixels,
+                    "pixel_patches": patches,
                 }
 
-    def make_composite_image(self, elecs: list[GeantElectron]) -> torch.Tensor:
+    def make_composite_image(self, elecs: list[GeantElectron]) -> np.ndarray:
         arrays = [
             sparsearray_from_pixels(
                 elec.pixels, (self.grid.xmax_pixel, self.grid.ymax_pixel)
             )
             for elec in elecs
         ]
-        image = torch.tensor(sum(arrays).todense(), dtype=torch.float)
+        image = np.array(sum(arrays).todense(), dtype=np.float32)
 
         if self.noise_std > 0:
-            image = image + torch.normal(0.0, self.noise_std, size=image.shape)
+            image = image + np.random.normal(
+                0.0, self.noise_std, size=image.shape
+            ).astype(np.float32)
 
         return image
 
-    def box_interiors(
-        self, image: torch.Tensor, boxes: list[BoundingBox]
-    ) -> list[torch.Tensor]:
-        images = []
-        for box in boxes:
-            box_pixels = box.as_indices()
-            xmin, ymin, xmax, ymax = box_pixels
-            box_interior = image[xmin : xmax + 1, ymin : ymax + 1]
-            images.append(box_interior)
-        return images
-
     def undiffused_box_interiors(
         self, elecs: list[GeantElectron], boxes: list[BoundingBox]
-    ) -> list[torch.Tensor]:
+    ) -> list[np.ndarray]:
         images = [
             make_image(elec.undiffused_pixels, bbox) for elec, bbox in zip(elecs, boxes)
         ]
         return images
 
 
+def get_pixel_patches(
+    image: np.ndarray,
+    electrons: list[GeantElectron],
+    patch_size: int,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    patches = []
+    patch_coordinates = []
+
+    for electron in electrons:
+        peak_pixel: IonizationElectronPixel = max(
+            electron.pixels, key=lambda x: x.ionization_electrons
+        )
+
+        x_min = peak_pixel.x - patch_size // 2
+        x_max = peak_pixel.x + patch_size // 2 + 1
+        y_min = peak_pixel.y - patch_size // 2
+        y_max = peak_pixel.y + patch_size // 2 + 1
+        patch_coordinates.append(np.array([x_min, y_min, x_max, y_max]))
+
+        # compute padding if any
+        if x_min < 0:
+            pad_x_left = -x_min
+            x_min = 0
+        else:
+            pad_x_left = 0
+        if y_min < 0:
+            pad_y_top = -y_min
+            y_min = 0
+        else:
+            pad_y_top = 0
+
+        pad_y_bottom = max(0, x_max - image.shape[0])
+        pad_x_right = max(0, y_max - image.shape[1])
+
+        patch = image[x_min:x_max, y_min:y_max]
+        patch = np.pad(patch, ((pad_x_left, pad_x_right), (pad_y_top, pad_y_bottom)))
+
+        patches.append(patch)
+    return patches, np.stack(patch_coordinates, 0)
+
+
 def electron_collate_fn(
     batch: list[dict[str, Any]],
-    pad_to_multiple_of=None,  # e.g. 8 for tensor cores
-    default_collate_fn: Callable = torch.utils.data.dataloader.default_collate,
+    default_collate_fn: Callable = default_collate,
 ) -> dict[str, Any]:
-    batch = [{k: example[k] for k in _KEYS_TO_BATCH} for example in batch]
+    batch = [
+        {k: example[k] for k in example if k not in _KEYS_TO_NOT_BATCH}
+        for example in batch
+    ]
 
     out_batch = {}
     to_default_collate = [{} for _ in range(len(batch))]
@@ -157,47 +203,34 @@ def electron_collate_fn(
         if key in _TO_DEFAULT_COLLATE:
             for to_default, electron in zip(to_default_collate, batch):
                 to_default[key] = electron[key]
-        elif key in _PAD_STACK_WITHIN_EXAMPLE:
-            stacked_list = []
-            mask_list = []
-            for electron in batch:
-                stacked, mask = pad_and_stack_electron_boxes(
-                    electron[key], pad_to_multiple_of
-                )
-                stacked_list.append(stacked)
-                mask_list.append(mask)
-            out_batch[key] = stacked_list
-            out_batch[key + "_pad_mask"] = mask_list
         else:
-            out_batch[key] = [electron[key] for electron in batch]
+            lengths = [len(sample[key]) for sample in batch]
+            out_batch[key] = torch.as_tensor(
+                np.concatenate([sample[key] for sample in batch], axis=0)
+            )
+            out_batch[key + "_batch_index"] = torch.cat(
+                [
+                    torch.repeat_interleave(torch.as_tensor(i), length)
+                    for i, length in enumerate(lengths)
+                ]
+            )
 
     out_batch.update(default_collate_fn(to_default_collate))
 
     return out_batch
 
 
-def pad_and_stack_electron_boxes(
-    tensors: list[torch.Tensor], pad_to_multiple_of: Optional[int] = None
-) -> (torch.Tensor, torch.Tensor):
-    shapes = [t.shape for t in tensors]
-    bsz = len(tensors)
+def plot_pixel_patch_and_incidence_point(
+    pixel_patch: np.ndarray, incidence_point: np.ndarray
+):
+    import matplotlib.pyplot as plt
 
-    all_same_size = all(shape == shapes[0] for shape in shapes)
-    if all_same_size:
-        stacked_padded = torch.stack(tensors, 0)
-        mask = stacked_padded.new_ones(stacked_padded.shape, dtype=torch.bool)
-        return stacked_padded, mask
-
-    pad_to = np.stack(shapes).max(0)
-    if pad_to_multiple_of is not None:
-        pad_to = ((pad_to // pad_to_multiple_of) + 1) * pad_to_multiple_of
-
-    stacked_padded = torch.zeros((bsz, *pad_to), dtype=torch.float)
-    pad_mask = stacked_padded.new_zeros(stacked_padded.shape, dtype=torch.bool)
-
-    for source, target, mask in zip(tensors, stacked_padded, pad_mask):
-        width, height = source.shape
-        target[:width, :height] = source
-        mask[:width, :height] = True
-
-    return stacked_padded, mask
+    fig, ax = plt.subplots()
+    map = ax.imshow(
+        pixel_patch.T,
+        extent=(0, pixel_patch.shape[0], pixel_patch.shape[1], 0),
+        interpolation=None,
+    )
+    fig.colorbar(map, ax=ax)
+    ax.scatter(*incidence_point, c="r")
+    return fig, ax

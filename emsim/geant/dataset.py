@@ -83,6 +83,8 @@ class GeantElectronDataset(IterableDataset):
                 np.array(self.grid.pixel_size_um) / 1000
             ).astype(np.float32)
 
+            local_centers_of_mass_pixels = charge_2d_center_of_mass(patches)
+
             instance_seg = None
 
             # image = np.array(image.convert("RGB"))
@@ -115,9 +117,10 @@ class GeantElectronDataset(IterableDataset):
                     "image": image.astype(np.float32),
                     "electron_ids": np.array([elec.id for elec in elecs], dtype=int),
                     "maps": maps,
-                    "incidence_points": incidence_points,
-                    "local_incidence_points_pixels": local_incidence_points_pixels,
-                    "pixel_patches": patches,
+                    "incidence_points": incidence_points.astype(np.float32),
+                    "local_incidence_points_pixels": local_incidence_points_pixels.astype(np.float32),
+                    "pixel_patches": patches.astype(np.float32),
+                    "local_centers_of_mass_pixels": local_centers_of_mass_pixels.astype(np.float32)
                 }
 
     def make_composite_image(self, elecs: list[GeantElectron]) -> np.ndarray:
@@ -183,7 +186,30 @@ def get_pixel_patches(
         patch = np.pad(patch, ((pad_x_left, pad_x_right), (pad_y_top, pad_y_bottom)))
 
         patches.append(patch)
-    return patches, np.stack(patch_coordinates, 0)
+    return np.stack(patches, 0), np.stack(patch_coordinates, 0)
+
+
+def charge_2d_center_of_mass(patches: np.ndarray):
+    if patches.ndim == 2:
+        # add batch dim
+        patches = np.expand_dims(patches, 0)
+
+    # permute from rows by columns to x by y
+    patches = patches.transpose(0, 2, 1)
+
+    patch_x_len = patches.shape[-2]
+    patch_y_len = patches.shape[-1]
+    coord_grid = np.stack(
+        np.meshgrid(np.arange(0.5, patch_x_len, 1), np.arange(0.5, patch_y_len, 1))
+    )
+
+    # patches: batch * 1 * x * y
+    patches = np.expand_dims(patches, 1)
+    # coord grid: 1 * 2 * x * y
+    coord_grid = np.expand_dims(coord_grid, 0)
+
+    weighted_grid = patches * coord_grid
+    return weighted_grid.sum((-1, -2)) / patches.sum((-1, -2))
 
 
 def electron_collate_fn(

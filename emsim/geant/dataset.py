@@ -8,6 +8,8 @@ from torch.utils.data.dataloader import default_collate
 from typing import Callable, Any, Optional
 from transformers import MaskFormerImageProcessor
 import albumentations as A
+from PIL import Image
+from torchvision.transforms.functional import to_pil_image
 
 
 
@@ -82,16 +84,16 @@ class GeantElectronDataset(IterableDataset):
 
             if self.transform is not None:
                 image = image.numpy()
-                instance_seg = np.array(maps.segmentation_map for i in range(len(maps)))
-                transformed = self.transform(image=image, mask=instance_seg)
-                image, instance_seg = transformed['image'], transformed['mask']
+                instance_seg = np.array([maps[i].segmentation_map for i in range(2)], dtype=np.int64)
+                transformed = self.transform(image=image, masks=instance_seg)
+                image, instance_seg = transformed['image'], transformed['masks']
 
                 # "convert to C, H, W". wth does this do
-                image = image.transpose(2, 0, 1)
+                # image = image.transpose(2, 0, 1)
 
             if self.processor is not None:
                 if instance_seg is None:
-                    instance_seg = np.array(maps.segmentation_map for i in range(len(maps)))
+                    instance_seg = [maps[i].segmentation_map for i in range(2)]
 
                 inputs = self.processor([image], [instance_seg], return_tensors="pt")
                 inputs = {k: v.squeeze() if isinstance(v, torch.Tensor) else v[0] for k,v in inputs.items()}
@@ -107,6 +109,75 @@ class GeantElectronDataset(IterableDataset):
                     "maps": maps, 
                     "incidence_points": incidence_points,
                 }
+
+class PennFudanElectronDataset(IterableDataset):
+    def __init__(
+        self,
+        pixels_file: str,
+        undiffused_file: str,
+        events_per_image_range: tuple[int],
+        noise_std: float = 1.0,
+        shuffle=True,
+        transforms=None
+    ):
+        self.electrons = read_files(pixels_file=pixels_file, undiffused_pixels_file=undiffused_file)
+        self.grid = self.electrons[0].grid
+
+        assert len(events_per_image_range) == 2
+        self.events_per_image_range = events_per_image_range
+        self.noise_std = noise_std
+        self.shuffle = shuffle
+        self.transforms = transforms
+        self.length = np.random.randint(5, 20)
+
+    def __iter__(self):
+        elec_indices = list(range(len(self.electrons)))
+        if self.shuffle:
+            shuffle(elec_indices)
+        chunks = random_chunks(elec_indices, *self.events_per_image_range)
+
+        elecs: list[GeantElectron] = [self.electrons[i] for i in chunks[np.random.randint(0, len(chunks) - 1)]]
+        image = self.make_composite_image(elecs).numpy()
+        # convert to three channel
+        image = torch.tensor(np.stack((image,)*3, axis=-1))
+        image = to_pil_image(image)
+
+        maps = [elec.get_segmentation_map(inst_id) for inst_id, elec in enumerate(elecs)]
+        masks = torch.as_tensor(maps, dtype=torch.uint8)
+
+        boxes = [elec.pixels.get_bounding_box().aslist() for elec in elecs]
+        boxes_normalized = torch.tensor(
+            normalize_boxes(boxes, self.grid.xmax_pixel, self.grid.ymax_pixel),
+            dtype=torch.float32,
+        )
+
+        # This may need to be changed to reflect crowded instances
+        iscrowd = torch.zeros((len(boxes),), dtype=torch.int64)
+        
+        area = [np.abs((box.xmax - box.xmin)*(box.ymax - box.ymin)) for box in boxes]
+
+        image_id = int("".join(chunks))
+
+        target = {
+            "labels": torch.tensor(
+                [elec.id for elec in elecs], dtype=torch.int
+            ),
+            "masks": masks,
+            "boxes": torch.tensor(boxes, dtype=torch.float),
+            "boxes_normalized": boxes_normalized,
+            "area": torch.tensor(area),
+            "iscrowd": iscrowd,
+            "image_id": torch.tensor([image_id])
+        }
+
+        if self.transforms is not None:
+            image, target = self.transforms(image, target)
+
+        yield image, target
+
+    def __len__(self):
+        return self.length
+
 
     def make_composite_image(self, elecs: list[GeantElectron]) -> torch.Tensor:
         arrays = [

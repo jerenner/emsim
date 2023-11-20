@@ -127,4 +127,4 @@ class GeantElectron:
     grid: GeantGridsize
 
     def get_segmentation_map(self, instance_id):
-        return Map(instance_id, self.grid, self.undiffused_pixels)
+        return Map(instance_id, self.grid, self.pixels)

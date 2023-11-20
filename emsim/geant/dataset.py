@@ -28,17 +28,26 @@ class GeantElectronDataset(IterableDataset):
     def __init__(
         self,
         pixels_file: str,
-        undiffused_file: str,
         events_per_image_range: tuple[int],
         pixel_patch_size: int = 5,
+        train_percentage: float = 0.95,
+        split: str = "train",
         processor: Callable = None,
         transform: Callable = None,
         noise_std: float = 1.0,
         shuffle=True,
     ):
+        assert 0 < train_percentage <= 1
+        assert split in ("train", "test")
         self.electrons = read_files(
-            pixels_file=pixels_file, undiffused_pixels_file=undiffused_file
+            pixels_file=pixels_file
         )
+        train_test_split = int(len(self.electrons) * train_percentage)
+        if split == "train":
+            self.electrons = self.electrons[:train_test_split]
+        else:
+            self.electrons = self.electrons[train_test_split:]
+
         self.grid = self.electrons[0].grid
 
         assert len(events_per_image_range) == 2
@@ -138,14 +147,6 @@ class GeantElectronDataset(IterableDataset):
             ).astype(np.float32)
 
         return image
-
-    def undiffused_box_interiors(
-        self, elecs: list[GeantElectron], boxes: list[BoundingBox]
-    ) -> list[np.ndarray]:
-        images = [
-            make_image(elec.undiffused_pixels, bbox) for elec, bbox in zip(elecs, boxes)
-        ]
-        return images
 
 
 def get_pixel_patches(

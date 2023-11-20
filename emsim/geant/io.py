@@ -2,27 +2,29 @@ from typing import List, Tuple, Dict
 
 import pandas as pd
 
-from emsim.dataclasses import Event, IncidencePoint, IonizationElectronPixel, EnergyLossPixel
-from emsim.geant.dataclasses import (GeantElectron, GeantGridsize, Trajectory,
-                                     TrajectoryPoint)
+from emsim.dataclasses import (
+    Event,
+    IncidencePoint,
+    IonizationElectronPixel,
+    EnergyLossPixel,
+)
+from emsim.geant.dataclasses import (
+    GeantElectron,
+    GeantGridsize,
+    Trajectory,
+    TrajectoryPoint,
+)
 
-def read_files(
-    pixels_file: str, undiffused_pixels_file: str
-) -> List[GeantElectron]:
+
+def read_files(pixels_file: str) -> List[GeantElectron]:
     grid, pixel_events = read_pixelized_geant_output(pixels_file)
-    undiffused_pixel_events = read_true_pixel_file(undiffused_pixels_file)
 
     electrons = []
-    for pixel, undiffused in zip(
-        pixel_events, undiffused_pixel_events
-    ):
-        assert pixel.incidence == undiffused.incidence
-        assert pixel.incidence.id == undiffused.incidence.id
+    for event in pixel_events:
         elec = GeantElectron(
-            id=pixel.incidence.id,
-            incidence=pixel.incidence,
-            pixels=pixel.pixelset,
-            undiffused_pixels=undiffused.pixelset,
+            id=event.incidence.id,
+            incidence=event.incidence,
+            pixels=event.pixelset,
             grid=grid,
         )
         electrons.append(elec)

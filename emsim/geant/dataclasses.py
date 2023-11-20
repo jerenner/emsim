@@ -123,8 +123,7 @@ class GeantElectron:
     id: int
     incidence: IncidencePoint
     pixels: PixelSet
-    undiffused_pixels: PixelSet
     grid: GeantGridsize
 
     def get_segmentation_map(self, instance_id):
-        return Map(instance_id, self.grid, self.undiffused_pixels)
+        return Map(instance_id, self.grid, self.pixels)

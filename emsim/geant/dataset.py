@@ -22,7 +22,9 @@ from emsim.utils import (
 
 
 # keys in here will not be batched in the collate fn
-_KEYS_TO_NOT_BATCH = ("maps",)
+_KEYS_TO_NOT_BATCH = ()
+
+# ("maps",)
 
 # these keys get passed to the default collate_fn, everything else uses custom batching logic
 _TO_DEFAULT_COLLATE = ("image",)
@@ -162,17 +164,6 @@ class MaskElectronDataset(IterableDataset):
         maps = [elec.get_segmentation_map(inst_id) for inst_id, elec in enumerate(elecs)]
         masks = torch.as_tensor(maps, dtype=torch.uint8)
 
-        boxes = [elec.pixels.get_bounding_box().aslist() for elec in elecs]
-        boxes_normalized = torch.tensor(
-            normalize_boxes(boxes, self.grid.xmax_pixel, self.grid.ymax_pixel),
-            dtype=torch.float32,
-        )
-
-        # This may need to be changed to reflect crowded instances
-        iscrowd = torch.zeros((len(boxes),), dtype=torch.int64)
-        
-        area = [np.abs((box.xmax - box.xmin)*(box.ymax - box.ymin)) for box in boxes]
-
         image_id = int("".join(chunks))
 
         target = {
@@ -180,10 +171,6 @@ class MaskElectronDataset(IterableDataset):
                 [elec.id for elec in elecs], dtype=torch.int
             ),
             "masks": masks,
-            "boxes": torch.tensor(boxes, dtype=torch.float),
-            "boxes_normalized": boxes_normalized,
-            "area": torch.tensor(area),
-            "iscrowd": iscrowd,
             "image_id": torch.tensor([image_id])
         }
 

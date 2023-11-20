@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.utils.data
 from PIL import Image
-from emsim.geant.dataset import PennFudanElectronDataset
+from emsim.geant.dataset import MaskElectronDataset, electron_collate_fn
 
 pixelated_file = '/home/zero/emsim/segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt'
 true_pixelated_file = '/home/zero/emsim/segmentation/true_pixelated_1pt25um_thinned_4um_back_20k_300keV.txt'
@@ -20,10 +20,10 @@ model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=True)
 # replace the classifier with a new one, that has
 # num_classes which is user-defined
 num_classes = 2  # 1 class (person) + background
-# get number of input features for the classifier
-in_features = model.roi_heads.box_predictor.cls_score.in_features
-# replace the pre-trained head with a new one
-model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+# # get number of input features for the classifier
+# in_features = model.roi_heads.box_predictor.cls_score.in_features
+# # replace the pre-trained head with a new one
+# model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
 
 
 import torchvision
@@ -104,8 +104,8 @@ def get_transform(train):
 
 events_per_image_range = (12, 16)
 
-dataset = PennFudanElectronDataset(pixels_file=pixelated_file, undiffused_file=true_pixelated_file, events_per_image_range=events_per_image_range, transforms=get_transform(train=True))
-data_loader = torch.utils.data.DataLoader(dataset, batch_size=None)
+dataset = MaskElectronDataset(pixels_file=pixelated_file, undiffused_file=true_pixelated_file, events_per_image_range=events_per_image_range, transforms=get_transform(train=True))
+data_loader = torch.utils.data.DataLoader(dataset, collate_fn=electron_collate_fn, batch_size=None)
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
@@ -137,3 +137,6 @@ for epoch in range(num_epochs):
     # update the learning rate
     lr_scheduler.step()
     print("completed one epoch")
+
+    # don't evaluate on the training set
+    evaluate(model, data_loader, device=device)

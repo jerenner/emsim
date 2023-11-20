@@ -7,8 +7,9 @@ from typing import Optional
 
 import h5py
 import numpy as np
+from scipy import ndimage
 import torch
-from torch.utils.data import Dataset, default_collate, DataLoader
+from torch.utils.data import Dataset, default_collate
 
 import stempy.io as stio
 
@@ -103,9 +104,10 @@ def _parse_data_dirs(raw_folder, counted_folder) -> list[_Scan]:
 
 
 class NCEMHubDataset(Dataset):
-    def __init__(self, raw_directory, counted_directory):
+    def __init__(self, raw_directory, counted_directory, electron_window_size=3):
         self.raw_folder = raw_directory
         self.counted_folder = counted_directory
+        self.electron_window_size = electron_window_size
 
         self.scans: list[_Scan] = _parse_data_dirs(raw_directory, counted_directory)
 
@@ -124,14 +126,18 @@ class NCEMHubDataset(Dataset):
         )
         local_index = idx - scan.first_frame_index
         raw_frame = scan.raw_frame(local_index).astype(np.float16)
-        counted_frame = scan.counted_frame(local_index).astype(np.float16)
+        counted_frame = scan.counted_frame(local_index).astype(bool)
 
         windows = windowed_electrons_for_frame(raw_frame, counted_frame)
         energies = np.sum(windows, (-2, -1))
+        sparsified_raw_frame = sparsify_raw_frame_from_counted_frame(
+            raw_frame, counted_frame, window_size=self.electron_window_size
+        )
 
         return {
             "raw_frame": raw_frame,
             "counted_frame": counted_frame,
+            "sparsified_raw_frame": sparsified_raw_frame,
             "scan_id": scan.id,
             "local_index": local_index,
             "index": idx,
@@ -150,9 +156,22 @@ class NCEMHubDataset(Dataset):
         return np.concatenate(frame_window_energies)
 
 
-def get_loader(raw_folder, counted_folder, **kwargs):
-    dataset = NCEMHubDataset(raw_folder, counted_folder)
-    return DataLoader(dataset, collate_fn=collate, **kwargs)
+def sparsify_raw_frame_from_counted_frame(raw_frame, counted_frame, window_size=3):
+    if raw_frame.ndim == 2:
+        window = np.ones([window_size, window_size], dtype=bool)
+    elif raw_frame.ndim == 3:
+        window = np.zeros([3, window_size, window_size], dtype=bool)
+        window[1] = True
+    else:
+        raise ValueError("Expected frames of dimensionality 2 or 3")
+
+    # dilate the single pixels in the counted frame to the specified size
+    dilated_counted = ndimage.binary_dilation(counted_frame, window)
+
+    # create an all-zero array and fill in the entries from the raw frame
+    out = np.zeros_like(raw_frame)
+    out[dilated_counted.nonzero()] = raw_frame[dilated_counted.nonzero()]
+    return out
 
 
 def compute_indices(center, array_size, window_size=np.array([3, 3])):

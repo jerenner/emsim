@@ -173,7 +173,7 @@ def fit_from_dataset(
     dataset,
     param_module,
     num_steps=6000,
-    batch_size=1024,
+    batch_size=4,
     initial_quantile_weight=10,
     quantile_decay_steps=2000,
     manual_seed=123,
@@ -195,15 +195,15 @@ def fit_from_dataset(
                 loader = make_loader()
                 batch = next(loader)
 
-            batch = batch.to(param_module.device)
+            energies = batch["energies"].to(param_module.device, torch.float)
 
             optim.zero_grad()
             if i <= quantile_decay_steps:
                 loss = param_module.combined_loss(
-                    batch, cosine_decay(initial_quantile_weight, quantile_decay_steps, i)
+                    energies, cosine_decay(initial_quantile_weight, quantile_decay_steps, i)
                 )
             else:
-                loss = param_module.nll_loss(batch)
+                loss = param_module.nll_loss(energies)
             loss.backward()
 
             optim.step()

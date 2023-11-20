@@ -1,21 +1,21 @@
+from math import ceil, floor
 from random import shuffle
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
-from typing import Callable, Any, Optional
 
 from emsim.dataclasses import BoundingBox, IonizationElectronPixel
 from emsim.geant.dataclasses import GeantElectron
 from emsim.geant.io import read_files
 from emsim.utils import (
+    make_image,
     random_chunks,
     sparsearray_from_pixels,
-    make_image,
 )
-
 
 # keys in here will not be batched in the collate fn
 _KEYS_TO_NOT_BATCH = ("maps",)
@@ -39,9 +39,7 @@ class GeantElectronDataset(IterableDataset):
     ):
         assert 0 < train_percentage <= 1
         assert split in ("train", "test")
-        self.electrons = read_files(
-            pixels_file=pixels_file
-        )
+        self.electrons = read_files(pixels_file=pixels_file)
         train_test_split = int(len(self.electrons) * train_percentage)
         if split == "train":
             self.electrons = self.electrons[:train_test_split]
@@ -127,9 +125,13 @@ class GeantElectronDataset(IterableDataset):
                     "electron_ids": np.array([elec.id for elec in elecs], dtype=int),
                     "maps": maps,
                     "incidence_points": incidence_points.astype(np.float32),
-                    "local_incidence_points_pixels": local_incidence_points_pixels.astype(np.float32),
+                    "local_incidence_points_pixels": local_incidence_points_pixels.astype(
+                        np.float32
+                    ),
                     "pixel_patches": patches.astype(np.float32),
-                    "local_centers_of_mass_pixels": local_centers_of_mass_pixels.astype(np.float32)
+                    "local_centers_of_mass_pixels": local_centers_of_mass_pixels.astype(
+                        np.float32
+                    ),
                 }
 
     def make_composite_image(self, elecs: list[GeantElectron]) -> np.ndarray:
@@ -190,7 +192,9 @@ def get_pixel_patches(
     return np.stack(patches, 0), np.stack(patch_coordinates, 0)
 
 
-def charge_2d_center_of_mass(patches: np.ndarray):
+def charge_2d_center_of_mass(patches: np.ndarray, com_patch_size=3):
+    if com_patch_size % 2 == 0:
+        raise ValueError(f"'com_patch_size' should be odd, got '{com_patch_size}'")
     if patches.ndim == 2:
         # add batch dim
         patches = np.expand_dims(patches, 0)
@@ -201,8 +205,26 @@ def charge_2d_center_of_mass(patches: np.ndarray):
     patch_x_len = patches.shape[-2]
     patch_y_len = patches.shape[-1]
     coord_grid = np.stack(
-        np.meshgrid(np.arange(0.5, patch_x_len, 1), np.arange(0.5, patch_y_len, 1))
+        np.meshgrid(
+            np.arange(0.5, patches.shape[-2], 1), np.arange(0.5, patches.shape[-1], 1)
+        )
     )
+
+    patch_x_mid = patch_x_len / 2
+    patch_y_mid = patch_y_len / 2
+
+    patch_radius = com_patch_size // 2
+
+    patches = patches[
+        ...,
+        floor(patch_x_mid) - patch_radius : ceil(patch_x_mid) + patch_radius,
+        floor(patch_y_mid) - patch_radius : ceil(patch_y_mid) + patch_radius,
+    ]
+    coord_grid = coord_grid[
+        ...,
+        floor(patch_x_mid) - patch_radius : ceil(patch_x_mid) + patch_radius,
+        floor(patch_y_mid) - patch_radius : ceil(patch_y_mid) + patch_radius,
+    ]
 
     # patches: batch * 1 * x * y
     patches = np.expand_dims(patches, 1)

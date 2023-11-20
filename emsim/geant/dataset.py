@@ -269,8 +269,11 @@ def electron_collate_fn(
     return out_batch
 
 
-def plot_pixel_patch_and_incidence_point(
-    pixel_patch: np.ndarray, incidence_point: np.ndarray
+def plot_pixel_patch_and_points(
+    pixel_patch: np.ndarray,
+    points: list[np.ndarray],
+    point_labels: Optional[list[str]] = None,
+    contour: Optional[np.ndarray] = None
 ):
     import matplotlib.pyplot as plt
 
@@ -281,5 +284,13 @@ def plot_pixel_patch_and_incidence_point(
         interpolation=None,
     )
     fig.colorbar(map, ax=ax)
-    ax.scatter(*incidence_point, c="r")
+    for point in points:
+        ax.scatter(*point)
+    if point_labels is not None:
+        ax.legend(point_labels)
+    if contour is not None:
+        ax.contour(
+            np.linspace(0, pixel_patch.shape[0], contour.shape[0]),
+            np.linspace(0, pixel_patch.shape[1], contour.shape[1]),
+                contour, levels=[1 - .997, 1 - .95, 1 - .68], colors="k")
     return fig, ax

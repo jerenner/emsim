@@ -8,8 +8,8 @@ import torch.utils.data
 from PIL import Image
 from emsim.geant.dataset import MaskElectronDataset, electron_collate_fn
 
-pixelated_file = '/home/zero/emsim/segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt'
-true_pixelated_file = '/home/zero/emsim/segmentation/true_pixelated_1pt25um_thinned_4um_back_20k_300keV.txt'
+pixelated_file = '~/emsim/segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt'
+true_pixelated_file = '~/emsim/segmentation/true_pixelated_1pt25um_thinned_4um_back_20k_300keV.txt'
 
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor

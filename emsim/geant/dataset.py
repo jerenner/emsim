@@ -2,13 +2,9 @@ from random import shuffle
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 from typing import Callable, Any, Optional
-from transformers import MaskFormerImageProcessor
-import albumentations as A
-from PIL import Image
 from torchvision.transforms.functional import to_pil_image
 
 from emsim.dataclasses import BoundingBox, IonizationElectronPixel

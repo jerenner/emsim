@@ -9,7 +9,7 @@ from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 
 from emsim.dataclasses import BoundingBox, IonizationElectronPixel
-from emsim.geant.dataclasses import GeantElectron
+from emsim.geant.dataclasses import GeantElectron, Trajectory
 from emsim.geant.io import read_files
 from emsim.utils import (
     make_image,
@@ -18,11 +18,13 @@ from emsim.utils import (
 )
 
 # keys in here will not be batched in the collate fn
-_KEYS_TO_NOT_BATCH = ("maps",)
+_KEYS_TO_NOT_BATCH = ("maps", "local_trajectories_pixels")
 
 # these keys get passed to the default collate_fn, everything else uses custom batching logic
 _TO_DEFAULT_COLLATE = ("image",)
 
+
+ELECTRON_IONIZATION_MEV = 3.6-6
 
 class GeantElectronDataset(IterableDataset):
     def __init__(
@@ -30,6 +32,7 @@ class GeantElectronDataset(IterableDataset):
         pixels_file: str,
         events_per_image_range: tuple[int],
         pixel_patch_size: int = 5,
+        trajectory_file: str = None,
         train_percentage: float = 0.95,
         split: str = "train",
         processor: Callable = None,
@@ -39,7 +42,9 @@ class GeantElectronDataset(IterableDataset):
     ):
         assert 0 < train_percentage <= 1
         assert split in ("train", "test")
-        self.electrons = read_files(pixels_file=pixels_file)
+        self.electrons = read_files(
+            pixels_file=pixels_file, trajectory_file=trajectory_file
+        )
         train_test_split = int(len(self.electrons) * train_percentage)
         if split == "train":
             self.electrons = self.electrons[:train_test_split]
@@ -47,6 +52,7 @@ class GeantElectronDataset(IterableDataset):
             self.electrons = self.electrons[train_test_split:]
 
         self.grid = self.electrons[0].grid
+        self.pixel_to_mm = np.array(self.grid.pixel_size_um) / 1000
 
         assert len(events_per_image_range) == 2
         self.events_per_image_range = events_per_image_range
@@ -71,8 +77,8 @@ class GeantElectronDataset(IterableDataset):
             patches, patch_coords = get_pixel_patches(
                 image, elecs, self.pixel_patch_size
             )
-            patch_coords_mm = (
-                patch_coords * np.array(self.grid.pixel_size_um * 2) / 1000
+            patch_coords_mm = patch_coords * np.concatenate(
+                [self.pixel_to_mm, self.pixel_to_mm]
             )
 
             maps = [
@@ -86,11 +92,18 @@ class GeantElectronDataset(IterableDataset):
                 ]
             )
             local_incidence_points_mm = incidence_points - patch_coords_mm[:, :2]
-            local_incidence_points_pixels = local_incidence_points_mm / (
-                np.array(self.grid.pixel_size_um) / 1000
-            ).astype(np.float32)
+            local_incidence_points_pixels = (
+                local_incidence_points_mm / self.pixel_to_mm.astype(np.float32)
+            )
 
             local_centers_of_mass_pixels = charge_2d_center_of_mass(patches)
+
+            local_trajectories = [
+                elec.trajectory.localize(coords[0], coords[1]).as_array()
+                for elec, coords in zip(elecs, patch_coords_mm)
+            ]
+            trajectory_mm_to_pixels = np.concatenate([1 / self.pixel_to_mm, np.array([1.0, 1.0])]).astype(np.float32)
+            local_trajectories_pixels = [traj * trajectory_mm_to_pixels for traj in local_trajectories]
 
             instance_seg = None
 
@@ -132,6 +145,7 @@ class GeantElectronDataset(IterableDataset):
                     "local_centers_of_mass_pixels": local_centers_of_mass_pixels.astype(
                         np.float32
                     ),
+                    "local_trajectories_pixels": local_trajectories_pixels
                 }
 
     def make_composite_image(self, elecs: list[GeantElectron]) -> np.ndarray:
@@ -235,6 +249,14 @@ def charge_2d_center_of_mass(patches: np.ndarray, com_patch_size=3):
     return weighted_grid.sum((-1, -2)) / patches.sum((-1, -2))
 
 
+def trajectory_to_ionization_electron_points(trajectory: Trajectory):
+    traj_array = trajectory.to_array()
+    energy_deposition_points = traj_array[traj_array[:, -1] != 0.0]
+    n_elecs = energy_deposition_points[:, -1] / ELECTRON_IONIZATION_MEV
+    points = np.concatenate([traj_array[:, :2], n_elecs[..., None]], 1)
+    return points
+
+
 def electron_collate_fn(
     batch: list[dict[str, Any]],
     default_collate_fn: Callable = default_collate,
@@ -273,7 +295,7 @@ def plot_pixel_patch_and_points(
     pixel_patch: np.ndarray,
     points: list[np.ndarray],
     point_labels: Optional[list[str]] = None,
-    contour: Optional[np.ndarray] = None
+    contour: Optional[np.ndarray] = None,
 ):
     import matplotlib.pyplot as plt
 
@@ -292,5 +314,8 @@ def plot_pixel_patch_and_points(
         ax.contour(
             np.linspace(0, pixel_patch.shape[0], contour.shape[0]),
             np.linspace(0, pixel_patch.shape[1], contour.shape[1]),
-                contour, levels=[1 - .997, 1 - .95, 1 - .68], colors="k")
+            contour,
+            levels=[1 - 0.997, 1 - 0.95, 1 - 0.68], # 3, 2, 1 std devs
+            colors="k",
+        )
     return fig, ax

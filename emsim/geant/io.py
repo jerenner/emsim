@@ -16,16 +16,21 @@ from emsim.geant.dataclasses import (
 )
 
 
-def read_files(pixels_file: str) -> List[GeantElectron]:
+def read_files(pixels_file: str, trajectory_file: str = None) -> List[GeantElectron]:
     grid, pixel_events = read_pixelized_geant_output(pixels_file)
+    if trajectory_file is not None:
+        trajectories = read_trajectory_file(trajectory_file)
+    else:
+        trajectories = [None] * len(pixel_events)
 
     electrons = []
-    for event in pixel_events:
+    for event, trajectory in zip(pixel_events, trajectories):
         elec = GeantElectron(
             id=event.incidence.id,
             incidence=event.incidence,
             pixels=event.pixelset,
             grid=grid,
+            trajectory=trajectory,
         )
         electrons.append(elec)
 

@@ -151,14 +151,16 @@ class MaskElectronDataset(IterableDataset):
             shuffle(elec_indices)
         chunks = random_chunks(elec_indices, *self.events_per_image_range)
 
-        elecs: list[GeantElectron] = [self.electrons[i] for i in chunks[np.random.randint(0, len(chunks) - 1)]]
-        image = self.make_composite_image(elecs).numpy()
+        elecs: list[GeantElectron] = [self.electrons[i] for i in chunks[0]]
+        image = self.make_composite_image(elecs)
         # convert to three channel
-        image = torch.tensor(np.stack((image,)*3, axis=-1))
+        #image = torch.tensor(np.stack((image,)*3, axis=-1))
+        print("converting image")
         image = to_pil_image(image)
-
-        maps = [elec.get_segmentation_map(inst_id) for inst_id, elec in enumerate(elecs)]
+        print("finished converting image to pil")
+        maps = [elec.get_segmentation_map(inst_id).segmentation_map for inst_id, elec in enumerate(elecs)]
         masks = torch.as_tensor(maps, dtype=torch.uint8)
+        print("finished getting masks")
 
         image_id = int("".join(chunks))
 
@@ -172,7 +174,7 @@ class MaskElectronDataset(IterableDataset):
 
         if self.transforms is not None:
             image, target = self.transforms(image, target)
-
+        print("yielding image,target")
         yield image, target
 
     def __len__(self):

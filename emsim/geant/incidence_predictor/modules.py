@@ -4,7 +4,7 @@ from torch import nn
 from torch.distributions import MultivariateNormal
 
 
-class GaussianFullRankIncidencePointPredictor(nn.Module):
+class GaussianIncidencePointPredictor(nn.Module):
     def __init__(self, backbone, hidden_dim=512, mean_parameterization="sigmoid", diagonal_covariance=False, eps=1e-6):
         super().__init__()
         self.mean_parameterization = mean_parameterization
@@ -53,3 +53,33 @@ class GaussianFullRankIncidencePointPredictor(nn.Module):
             cholesky = inverse_scaling_matrix @ cholesky
 
         return MultivariateNormal(mean_vector, scale_tril=cholesky)
+
+    @property
+    def device(self):
+        return self.predictor.get_submodule("0").weight.device
+
+
+class IncidencePointPredictor(nn.Module):
+    def __init__(self, backbone, hidden_dim=512):
+        super().__init__()
+        self.backbone = backbone
+
+        self.predictor = nn.Sequential(
+            nn.Linear(self.backbone.num_features, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 2),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        if x.ndim == 3:
+            x = x.unsqueeze(1)
+        patch_shape = torch.as_tensor(x.shape[-2:], device=x.device)
+        x = self.backbone(x)
+        x = self.predictor(x)
+        x = x * patch_shape
+        return x
+
+    @property
+    def device(self):
+        return self.predictor.get_submodule("0").weight.device

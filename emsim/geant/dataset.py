@@ -301,6 +301,7 @@ def plot_pixel_patch_and_points(
 ):
     import matplotlib.pyplot as plt
 
+    pixel_patch = pixel_patch.squeeze()
     fig, ax = plt.subplots()
     map = ax.imshow(
         pixel_patch.T,

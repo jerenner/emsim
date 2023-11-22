@@ -24,8 +24,6 @@ class GaussianIncidencePointPredictor(nn.Module):
         )
 
     def forward(self, x):
-        if x.ndim == 3:
-            x = x.unsqueeze(1)
         patch_shape = torch.as_tensor(x.shape[-2:], dtype=torch.float, device=x.device)
         # patch_center_coords = patch_shape / 2
         x = self.backbone(x)
@@ -72,8 +70,6 @@ class IncidencePointPredictor(nn.Module):
         )
 
     def forward(self, x):
-        if x.ndim == 3:
-            x = x.unsqueeze(1)
         patch_shape = torch.as_tensor(x.shape[-2:], device=x.device)
         x = self.backbone(x)
         x = self.predictor(x)

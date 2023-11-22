@@ -162,6 +162,9 @@ class GeantElectronDataset(IterableDataset):
                 0.0, self.noise_std, size=image.shape
             ).astype(np.float32)
 
+        # add channel dimension
+        image = np.expand_dims(image, 0)
+
         return image
 
 
@@ -196,11 +199,11 @@ def get_pixel_patches(
         else:
             pad_y_top = 0
 
-        pad_y_bottom = max(0, x_max - image.shape[0])
-        pad_x_right = max(0, y_max - image.shape[1])
+        pad_y_bottom = max(0, x_max - image.shape[-2])
+        pad_x_right = max(0, y_max - image.shape[-1])
 
-        patch = image[x_min:x_max, y_min:y_max]
-        patch = np.pad(patch, ((pad_x_left, pad_x_right), (pad_y_top, pad_y_bottom)))
+        patch = image[...,x_min:x_max, y_min:y_max]
+        patch = np.pad(patch, ((0, 0), (pad_x_left, pad_x_right), (pad_y_top, pad_y_bottom)))
 
         patches.append(patch)
     return np.stack(patches, 0), np.stack(patch_coordinates, 0)
@@ -214,7 +217,7 @@ def charge_2d_center_of_mass(patches: np.ndarray, com_patch_size=3):
         patches = np.expand_dims(patches, 0)
 
     # permute from rows by columns to x by y
-    patches = patches.transpose(0, 2, 1)
+    patches = patches.transpose(0, 1, 3, 2)
 
     patch_x_len = patches.shape[-2]
     patch_y_len = patches.shape[-1]
@@ -241,7 +244,6 @@ def charge_2d_center_of_mass(patches: np.ndarray, com_patch_size=3):
     ]
 
     # patches: batch * 1 * x * y
-    patches = np.expand_dims(patches, 1)
     # coord grid: 1 * 2 * x * y
     coord_grid = np.expand_dims(coord_grid, 0)
 

@@ -78,7 +78,7 @@ def fit_pointwise_patch_predictor(model: nn.Module, dataset: GeantElectronDatase
             except StopIteration:
                 iter_loader = make_loader()
                 batch = next(iter_loader)
-            patches = batch["pixel_patches"].to(device).unsqueeze(1)
+            patches = batch["pixel_patches"].to(device)
             incidence_points = batch["local_incidence_points_pixels"].to(device)
 
             optim.zero_grad()

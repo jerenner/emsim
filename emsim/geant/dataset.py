@@ -157,7 +157,7 @@ class MaskElectronDataset(IterableDataset):
         image = torch.tensor(np.stack((image,)*3, axis=-1))
         image = to_pil_image(image)
 
-        maps = [elec.get_segmentation_map(inst_id) for inst_id, elec in enumerate(elecs)]
+        maps = [elec.get_segmentation_map(inst_id).segmentation_map for inst_id, elec in enumerate(elecs)]
         masks = torch.as_tensor(maps, dtype=torch.uint8)
 
         image_id = int("".join(chunks))

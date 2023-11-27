@@ -183,7 +183,7 @@ class Event:
         self.bounding_box = bounding_box(self.pixelset._pixels, pixel_margin)
 
 
-def bounding_box(pixels: List[Pixel] | PixelSet, pixel_margin=0):
+def bounding_box(pixels: PixelSet, pixel_margin=0):
     if isinstance(pixels, list):
         x = np.array([p.x for p in pixels])
         y = np.array([p.y for p in pixels])

@@ -36,7 +36,7 @@ class TrajectoryPoint:
     x: float
     y: float
     z: float
-    edep: float
+    edep: float  # MeV
     x0: Optional[float] = None
     y0: Optional[float] = None
     z0: Optional[float] = None
@@ -62,7 +62,7 @@ class Trajectory:
     y0: float
     z0: float
     pz0: float
-    e0: float
+    e0: float  # MeV
     _points: List[TrajectoryPoint] = field(default_factory=list)
 
     def __post_init__(self):
@@ -84,7 +84,7 @@ class Trajectory:
     def as_array(self):
         return np.stack(
             [
-                np.array([point.x, point.y, point.z, point.edep], dtype=np.float32)
+                np.array([point.x, point.y, point.z, point.edep])
                 for point in self._points
             ],
             0,
@@ -123,8 +123,8 @@ class GeantElectron:
     id: int
     incidence: IncidencePoint
     pixels: PixelSet
-    undiffused_pixels: PixelSet
     grid: GeantGridsize
+    trajectory: Optional[Trajectory] = None
 
     def get_segmentation_map(self, instance_id):
         return Map(instance_id, self.grid, self.pixels)

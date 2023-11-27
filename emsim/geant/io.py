@@ -2,28 +2,35 @@ from typing import List, Tuple, Dict
 
 import pandas as pd
 
-from emsim.dataclasses import Event, IncidencePoint, IonizationElectronPixel, EnergyLossPixel
-from emsim.geant.dataclasses import (GeantElectron, GeantGridsize, Trajectory,
-                                     TrajectoryPoint)
+from emsim.dataclasses import (
+    Event,
+    IncidencePoint,
+    IonizationElectronPixel,
+    EnergyLossPixel,
+)
+from emsim.geant.dataclasses import (
+    GeantElectron,
+    GeantGridsize,
+    Trajectory,
+    TrajectoryPoint,
+)
 
-def read_files(
-    pixels_file: str, undiffused_pixels_file: str
-) -> List[GeantElectron]:
+
+def read_files(pixels_file: str, trajectory_file: str = None) -> List[GeantElectron]:
     grid, pixel_events = read_pixelized_geant_output(pixels_file)
-    undiffused_pixel_events = read_true_pixel_file(undiffused_pixels_file)
+    if trajectory_file is not None:
+        trajectories = read_trajectory_file(trajectory_file)
+    else:
+        trajectories = [None] * len(pixel_events)
 
     electrons = []
-    for pixel, undiffused in zip(
-        pixel_events, undiffused_pixel_events
-    ):
-        assert pixel.incidence == undiffused.incidence
-        assert pixel.incidence.id == undiffused.incidence.id
+    for event, trajectory in zip(pixel_events, trajectories):
         elec = GeantElectron(
-            id=pixel.incidence.id,
-            incidence=pixel.incidence,
-            pixels=pixel.pixelset,
-            undiffused_pixels=undiffused.pixelset,
+            id=event.incidence.id,
+            incidence=event.incidence,
+            pixels=event.pixelset,
             grid=grid,
+            trajectory=trajectory,
         )
         electrons.append(elec)
 

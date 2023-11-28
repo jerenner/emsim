@@ -1,3 +1,5 @@
+import sys
+sys.path.insert(0,'..')
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy
@@ -98,19 +100,24 @@ if __name__ == "__main__":
 
     os.system("mkdir test_output")
 
+    i = 2
     if arguments[1] != "-m":
         print("Model backbone name is required.")
         sys.exit(0)
     else:
-        i = 2
         while i < len(arguments) and arguments[i] != "-n":
             backbone_types.append(arguments[2])
             i += 1
 
-    if i >= len(arguments):
+    if len(backbone_types) == 0:
+        print("Must specify a backbone after flag.")
+        sys.exit(0)
+
+    if i >= len(arguments) or arguments[i] != "-n":
         print("Noise flag is required.")
         sys.exit(0)
     else:
+        i += 1
         while i < len(arguments) and is_num(arguments[i]):
             noise_levels.append(arguments[i])
             i += 1

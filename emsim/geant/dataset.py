@@ -24,7 +24,7 @@ _KEYS_TO_NOT_BATCH = ("maps", "local_trajectories_pixels")
 _TO_DEFAULT_COLLATE = ("image",)
 
 
-ELECTRON_IONIZATION_MEV = 3.6-6
+ELECTRON_IONIZATION_MEV = 3.6e-6
 
 class GeantElectronDataset(IterableDataset):
     def __init__(

@@ -57,7 +57,7 @@ def sparsearray_from_pixels(
 def normalize_boxes(boxes: list[BoundingBox], image_width: int, image_height: int):
     center_format_boxes = np.stack([box.center_format() for box in boxes], 0)
     center_format_boxes /= np.array(
-        [image_width, image_height, image_width, image_height], dtype=np.float32
+        [image_width, image_height, image_width, image_height]
     )
     return center_format_boxes
 

@@ -8,20 +8,20 @@ import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 
-from emsim.dataclasses import BoundingBox, IonizationElectronPixel
+from emsim.dataclasses import IonizationElectronPixel
 from emsim.geant.dataclasses import GeantElectron, Trajectory
 from emsim.geant.io import read_files
 from emsim.utils import (
-    make_image,
     random_chunks,
+    normalize_boxes,
     sparsearray_from_pixels,
 )
 
 # keys in here will not be batched in the collate fn
-_KEYS_TO_NOT_BATCH = ("maps", "local_trajectories_pixels")
+_KEYS_TO_NOT_BATCH = ("local_trajectories_pixels")
 
 # these keys get passed to the default collate_fn, everything else uses custom batching logic
-_TO_DEFAULT_COLLATE = ("image",)
+_TO_DEFAULT_COLLATE = ("image")
 
 
 ELECTRON_IONIZATION_MEV = 3.6e-6
@@ -74,16 +74,16 @@ class GeantElectronDataset(IterableDataset):
             elecs: list[GeantElectron] = [self.electrons[i] for i in chunk]
             image = self.make_composite_image(elecs)
 
+            boxes = [elec.pixels.get_bounding_box() for elec in elecs]
+            boxes_normalized = normalize_boxes(boxes, self.grid.xmax_pixel, self.grid.ymax_pixel)
+            boxes_array = [box.asarray() for box in boxes]
+
             patches, patch_coords = get_pixel_patches(
                 image, elecs, self.pixel_patch_size
             )
             patch_coords_mm = patch_coords * np.concatenate(
                 [self.pixel_to_mm, self.pixel_to_mm]
             )
-
-            maps = [
-                elec.get_segmentation_map(inst_id) for inst_id, elec in enumerate(elecs)
-            ]
 
             incidence_points = np.stack(
                 [
@@ -105,48 +105,24 @@ class GeantElectronDataset(IterableDataset):
             trajectory_mm_to_pixels = np.concatenate([1 / self.pixel_to_mm, np.array([1.0, 1.0])]).astype(np.float32)
             local_trajectories_pixels = [traj * trajectory_mm_to_pixels for traj in local_trajectories]
 
-            instance_seg = None
+            segmentation_mask = make_segmentation_mask(elecs)
 
-            # image = np.array(image.convert("RGB"))
-
-            if self.transform is not None:
-                image = image.numpy()
-                instance_seg = np.array(maps.segmentation_map for i in range(len(maps)))
-                transformed = self.transform(image=image, mask=instance_seg)
-                image, instance_seg = transformed["image"], transformed["mask"]
-
-                # "convert to C, H, W". wth does this do
-                image = image.transpose(2, 0, 1)
-
-            if self.processor is not None:
-                if instance_seg is None:
-                    instance_seg = np.array(
-                        maps.segmentation_map for i in range(len(maps))
-                    )
-
-                inputs = self.processor([image], [instance_seg], return_tensors="pt")
-                inputs = {
-                    k: v.squeeze() if isinstance(v, torch.Tensor) else v[0]
-                    for k, v in inputs.items()
-                }
-
-            if self.processor is not None or self.transform is not None:
-                yield inputs
-            else:
-                yield {
-                    "image": image.astype(np.float32),
-                    "electron_ids": np.array([elec.id for elec in elecs], dtype=int),
-                    "maps": maps,
-                    "incidence_points": incidence_points.astype(np.float32),
-                    "local_incidence_points_pixels": local_incidence_points_pixels.astype(
-                        np.float32
-                    ),
-                    "pixel_patches": patches.astype(np.float32),
-                    "local_centers_of_mass_pixels": local_centers_of_mass_pixels.astype(
-                        np.float32
-                    ),
-                    "local_trajectories_pixels": local_trajectories_pixels
-                }
+            yield {
+                "image": image.astype(np.float32),
+                "electron_ids": np.array([elec.id for elec in elecs], dtype=int),
+                "bounding_boxes": boxes_normalized.astype(np.float32),
+                "bounding_boxes_unnormalized": np.array(boxes_array, dtype=np.float32),
+                "incidence_points": incidence_points.astype(np.float32),
+                "local_incidence_points_pixels": local_incidence_points_pixels.astype(
+                    np.float32
+                ),
+                "pixel_patches": patches.astype(np.float32),
+                "local_centers_of_mass_pixels": local_centers_of_mass_pixels.astype(
+                    np.float32
+                ),
+                "local_trajectories_pixels": local_trajectories_pixels,
+                "segmentation_mask": segmentation_mask,
+            }
 
     def make_composite_image(self, elecs: list[GeantElectron]) -> np.ndarray:
         arrays = [
@@ -166,6 +142,25 @@ class GeantElectronDataset(IterableDataset):
         image = np.expand_dims(image, 0)
 
         return image
+
+
+def make_segmentation_mask(electrons: list[GeantElectron], dtype=np.float32):
+    grid = electrons[0].grid
+    maps = [
+        sparsearray_from_pixels(electron.pixels, (grid.xmax_pixel, grid.ymax_pixel), dtype=dtype) for electron in electrons
+    ]
+    background = np.ones((grid.xmax_pixel, grid.ymax_pixel), dtype=dtype)
+    background[sum(maps).nonzero()] = 0
+
+    denom = sum(maps) + background
+
+    mask = np.zeros((len(electrons) + 1, grid.xmax_pixel, grid.ymax_pixel), dtype=dtype)
+    mask[0] = background
+    for electron_mask, sparse_electron_map in zip(mask[1:], maps):
+        portion = sparse_electron_map / denom
+        electron_mask[portion.nonzero()] = portion.data
+
+    return mask
 
 
 def get_pixel_patches(

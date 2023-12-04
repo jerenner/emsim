@@ -18,13 +18,14 @@ from emsim.utils import (
 )
 
 # keys in here will not be batched in the collate fn
-_KEYS_TO_NOT_BATCH = ("local_trajectories_pixels")
+_KEYS_TO_NOT_BATCH = "local_trajectories_pixels"
 
 # these keys get passed to the default collate_fn, everything else uses custom batching logic
-_TO_DEFAULT_COLLATE = ("image")
+_TO_DEFAULT_COLLATE = ("image", "batch_size")
 
 
 ELECTRON_IONIZATION_MEV = 3.6e-6
+
 
 class GeantElectronDataset(IterableDataset):
     def __init__(
@@ -32,7 +33,7 @@ class GeantElectronDataset(IterableDataset):
         pixels_file: str,
         events_per_image_range: tuple[int],
         pixel_patch_size: int = 5,
-        trajectory_file: str = None,
+        trajectory_file: Optional[str] = None,
         train_percentage: float = 0.95,
         split: str = "train",
         processor: Callable = None,
@@ -42,6 +43,9 @@ class GeantElectronDataset(IterableDataset):
     ):
         assert 0 < train_percentage <= 1
         assert split in ("train", "test")
+        self.pixels_file = pixels_file
+        self.trajectory_file = trajectory_file
+
         self.electrons = read_files(
             pixels_file=pixels_file, trajectory_file=trajectory_file
         )
@@ -72,19 +76,34 @@ class GeantElectronDataset(IterableDataset):
 
         for chunk in chunks:
             elecs: list[GeantElectron] = [self.electrons[i] for i in chunk]
-            image = self.make_composite_image(elecs)
+            batch = {}
+            batch["electron_ids"] = np.array([elec.id for elec in elecs], dtype=int)
+            batch["batch_size"] = len(elecs)
 
+            # composite electron image
+            batch["image"] = self.make_composite_image(elecs)
+
+            # bounding boxes
             boxes = [elec.pixels.get_bounding_box() for elec in elecs]
-            boxes_normalized = normalize_boxes(boxes, self.grid.xmax_pixel, self.grid.ymax_pixel)
+            boxes_normalized = normalize_boxes(
+                boxes, self.grid.xmax_pixel, self.grid.ymax_pixel
+            )
             boxes_array = [box.asarray() for box in boxes]
+            batch["bounding_boxes"] = boxes_normalized.astype(np.float32)
+            batch["bounding_boxes_unnormalized"] = np.array(
+                boxes_array, dtype=np.float32
+            )
 
+            # patches centered on high-energy pixels
             patches, patch_coords = get_pixel_patches(
-                image, elecs, self.pixel_patch_size
+                batch["image"], elecs, self.pixel_patch_size
             )
             patch_coords_mm = patch_coords * np.concatenate(
                 [self.pixel_to_mm, self.pixel_to_mm]
             )
+            batch["pixel_patches"] = patches.astype(np.float32)
 
+            # actual point the geant electron hit the detector surface
             incidence_points = np.stack(
                 [
                     np.array([elec.incidence.x, elec.incidence.y], dtype=np.float32)
@@ -95,34 +114,42 @@ class GeantElectronDataset(IterableDataset):
             local_incidence_points_pixels = (
                 local_incidence_points_mm / self.pixel_to_mm.astype(np.float32)
             )
+            batch["incidence_points"] = incidence_points.astype(np.float32)
+            batch[
+                "local_incidence_points_pixels"
+            ] = local_incidence_points_pixels.astype(np.float32)
 
+            # center of mass for each patch
             local_centers_of_mass_pixels = charge_2d_center_of_mass(patches)
+            batch["local_centers_of_mass_pixels"] = local_centers_of_mass_pixels.astype(
+                np.float32
+            )
 
-            local_trajectories = [
-                elec.trajectory.localize(coords[0], coords[1]).as_array()
-                for elec, coords in zip(elecs, patch_coords_mm)
-            ]
-            trajectory_mm_to_pixels = np.concatenate([1 / self.pixel_to_mm, np.array([1.0, 1.0])]).astype(np.float32)
-            local_trajectories_pixels = [traj * trajectory_mm_to_pixels for traj in local_trajectories]
+            # whole trajectories, if trajectory file is given
+            if self.trajectory_file is not None:
+                local_trajectories = [
+                    elec.trajectory.localize(coords[0], coords[1]).as_array()
+                    for elec, coords in zip(elecs, patch_coords_mm)
+                ]
+                trajectory_mm_to_pixels = np.concatenate(
+                    [1 / self.pixel_to_mm, np.array([1.0, 1.0])]
+                ).astype(np.float32)
+                local_trajectories_pixels = [
+                    traj * trajectory_mm_to_pixels for traj in local_trajectories
+                ]
+                batch["local_trajectories_pixels"] = local_trajectories_pixels
 
-            segmentation_mask = make_segmentation_mask(elecs)
+            # per-electron segmentation mask
+            segmentation_mask = make_soft_segmentation_mask(elecs)
+            batch["segmentation_mask"] = segmentation_mask
 
-            yield {
-                "image": image.astype(np.float32),
-                "electron_ids": np.array([elec.id for elec in elecs], dtype=int),
-                "bounding_boxes": boxes_normalized.astype(np.float32),
-                "bounding_boxes_unnormalized": np.array(boxes_array, dtype=np.float32),
-                "incidence_points": incidence_points.astype(np.float32),
-                "local_incidence_points_pixels": local_incidence_points_pixels.astype(
-                    np.float32
-                ),
-                "pixel_patches": patches.astype(np.float32),
-                "local_centers_of_mass_pixels": local_centers_of_mass_pixels.astype(
-                    np.float32
-                ),
-                "local_trajectories_pixels": local_trajectories_pixels,
-                "segmentation_mask": segmentation_mask,
-            }
+            if self.processor is not None:
+                batch = self.processor(batch)
+
+            if self.transform is not None:
+                batch = self.transform(batch)
+
+            yield batch
 
     def make_composite_image(self, elecs: list[GeantElectron]) -> np.ndarray:
         arrays = [
@@ -144,10 +171,13 @@ class GeantElectronDataset(IterableDataset):
         return image
 
 
-def make_segmentation_mask(electrons: list[GeantElectron], dtype=np.float32):
+def make_soft_segmentation_mask(electrons: list[GeantElectron], dtype=np.float32):
     grid = electrons[0].grid
     maps = [
-        sparsearray_from_pixels(electron.pixels, (grid.xmax_pixel, grid.ymax_pixel), dtype=dtype) for electron in electrons
+        sparsearray_from_pixels(
+            electron.pixels, (grid.xmax_pixel, grid.ymax_pixel), dtype=dtype
+        )
+        for electron in electrons
     ]
     background = np.ones((grid.xmax_pixel, grid.ymax_pixel), dtype=dtype)
     background[sum(maps).nonzero()] = 0
@@ -197,8 +227,10 @@ def get_pixel_patches(
         pad_y_bottom = max(0, x_max - image.shape[-2])
         pad_x_right = max(0, y_max - image.shape[-1])
 
-        patch = image[...,x_min:x_max, y_min:y_max]
-        patch = np.pad(patch, ((0, 0), (pad_x_left, pad_x_right), (pad_y_top, pad_y_bottom)))
+        patch = image[..., x_min:x_max, y_min:y_max]
+        patch = np.pad(
+            patch, ((0, 0), (pad_x_left, pad_x_right), (pad_y_top, pad_y_bottom))
+        )
 
         patches.append(patch)
     return np.stack(patches, 0), np.stack(patch_coordinates, 0)
@@ -313,7 +345,7 @@ def plot_pixel_patch_and_points(
             np.linspace(0, pixel_patch.shape[0], contour.shape[0]),
             np.linspace(0, pixel_patch.shape[1], contour.shape[1]),
             contour,
-            levels=[1 - 0.997, 1 - 0.95, 1 - 0.68], # 3, 2, 1 std devs
+            levels=[1 - 0.997, 1 - 0.95, 1 - 0.68],  # 3, 2, 1 std devs
             colors="k",
         )
     return fig, ax

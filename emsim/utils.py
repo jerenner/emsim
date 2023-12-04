@@ -37,6 +37,7 @@ def sparsearray_from_pixels(
     shape: Tuple[int],
     offset_x: Optional[int] = None,
     offset_y: Optional[int] = None,
+    dtype=None
 ):
     x_indices, y_indices, data = [], [], []
     for p in pixelset:
@@ -50,7 +51,7 @@ def sparsearray_from_pixels(
         x_indices = x_indices - offset_x
     if offset_y is not None:
         y_indices = y_indices - offset_y
-    array = sparse.coo_array((np.array(data), (x_indices, y_indices)), shape=shape)
+    array = sparse.coo_array((np.array(data, dtype=dtype), (x_indices, y_indices)), shape=shape)
     return array.tocsr()
 
 

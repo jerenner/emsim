@@ -3,6 +3,7 @@ from random import shuffle
 from typing import Any, Callable, Optional
 
 import numpy as np
+import sparse
 import torch
 import torch.nn.functional as F
 from torch.utils.data import IterableDataset
@@ -140,8 +141,9 @@ class GeantElectronDataset(IterableDataset):
                 batch["local_trajectories_pixels"] = local_trajectories_pixels
 
             # per-electron segmentation mask
-            segmentation_mask = make_soft_segmentation_mask(elecs)
+            segmentation_mask, background = make_soft_segmentation_mask(elecs)
             batch["segmentation_mask"] = segmentation_mask
+            batch["segmentation_background"] = background
 
             if self.processor is not None:
                 batch = self.processor(batch)
@@ -173,24 +175,24 @@ class GeantElectronDataset(IterableDataset):
 
 def make_soft_segmentation_mask(electrons: list[GeantElectron], dtype=np.float32):
     grid = electrons[0].grid
-    maps = [
+    single_electron_arrays = [
         sparsearray_from_pixels(
             electron.pixels, (grid.xmax_pixel, grid.ymax_pixel), dtype=dtype
         )
         for electron in electrons
     ]
-    background = np.ones((grid.xmax_pixel, grid.ymax_pixel), dtype=dtype)
-    background[sum(maps).nonzero()] = 0
 
-    denom = sum(maps) + background
+    # convert to "sparse" package objects
+    single_electron_arrays = [sparse.COO.from_scipy_sparse(array) for array in single_electron_arrays]
+    sparse_array = sparse.stack(single_electron_arrays)
+    sparse_sum = sparse_array.sum(0)
 
-    mask = np.zeros((len(electrons) + 1, grid.xmax_pixel, grid.ymax_pixel), dtype=dtype)
-    mask[0] = background
-    for electron_mask, sparse_electron_map in zip(mask[1:], maps):
-        portion = sparse_electron_map / denom
-        electron_mask[portion.nonzero()] = portion.data
+    background = ~sparse_sum.astype(bool)
+    denom = sparse_sum + background
 
-    return mask
+    sparse_soft_segmap = sparse_array / denom
+
+    return sparse_soft_segmap, background
 
 
 def get_pixel_patches(
@@ -305,9 +307,16 @@ def electron_collate_fn(
                 to_default[key] = electron[key]
         else:
             lengths = [len(sample[key]) for sample in batch]
-            out_batch[key] = torch.as_tensor(
-                np.concatenate([sample[key] for sample in batch], axis=0)
-            )
+            if isinstance(first[key], sparse.SparseArray):
+                concatted = sparse.concatenate([sample[key] for sample in batch], axis=0)
+                out_batch[key] = torch.sparse_coo_tensor(
+                    concatted.coords, concatted.data, concatted.shape
+                ).coalesce()
+            else:
+                out_batch[key] = torch.as_tensor(
+                    np.concatenate([sample[key] for sample in batch], axis=0)
+                )
+
             out_batch[key + "_batch_index"] = torch.cat(
                 [
                     torch.repeat_interleave(torch.as_tensor(i), length)

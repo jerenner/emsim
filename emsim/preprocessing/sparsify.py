@@ -10,12 +10,14 @@ class NSigmaSparsifyTransform:
         self.background_threshold_n_sigma = background_threshold_n_sigma
         self.window_size = window_size
 
-    def __call__(self, x):
-        return torch_sigma_energy_threshold_sparsify(
+    def __call__(self, batch):
+        x = batch["image"]
+        batch["image_thresholded"] = torch_sigma_energy_threshold_sparsify(
             x,
             background_threshold_n_sigma=self.background_threshold_n_sigma,
             window_size=self.window_size,
         )
+        return batch
 
 
 def torch_sigma_energy_threshold_sparsify(

@@ -24,6 +24,11 @@ _KEYS_TO_NOT_BATCH = "local_trajectories_pixels"
 # these keys get passed to the default collate_fn, everything else uses custom batching logic
 _TO_DEFAULT_COLLATE = ("image", "batch_size")
 
+# these sparse arrays get stacked with an extra batch dimension
+_SPARSE_STACK = ("segmentation_background", "image_sparsified")
+
+# these sparse arrays get concatenated, with no batch dimension
+_SPARSE_CONCAT = ("segmentation_mask")
 
 ELECTRON_IONIZATION_MEV = 3.6e-6
 
@@ -308,21 +313,25 @@ def electron_collate_fn(
         else:
             lengths = [len(sample[key]) for sample in batch]
             if isinstance(first[key], sparse.SparseArray):
-                concatted = sparse.concatenate([sample[key] for sample in batch], axis=0)
+                if key in _SPARSE_CONCAT:
+                    sparse_batched = sparse.concatenate([sample[key] for sample in batch], axis=0)
+                elif key in _SPARSE_STACK:
+                    sparse_batched = sparse.stack([sample[key] for sample in batch], axis=0)
                 out_batch[key] = torch.sparse_coo_tensor(
-                    concatted.coords, concatted.data, concatted.shape
+                    sparse_batched.coords, sparse_batched.data, sparse_batched.shape
                 ).coalesce()
             else:
                 out_batch[key] = torch.as_tensor(
                     np.concatenate([sample[key] for sample in batch], axis=0)
                 )
 
-            out_batch[key + "_batch_index"] = torch.cat(
-                [
-                    torch.repeat_interleave(torch.as_tensor(i), length)
-                    for i, length in enumerate(lengths)
-                ]
-            )
+            if key not in _SPARSE_STACK + _TO_DEFAULT_COLLATE:
+                out_batch[key + "_batch_index"] = torch.cat(
+                    [
+                        torch.repeat_interleave(torch.as_tensor(i), length)
+                        for i, length in enumerate(lengths)
+                    ]
+                )
 
     out_batch.update(default_collate_fn(to_default_collate))
 

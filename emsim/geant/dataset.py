@@ -25,10 +25,10 @@ _KEYS_TO_NOT_BATCH = "local_trajectories_pixels"
 _TO_DEFAULT_COLLATE = ("image", "batch_size")
 
 # these sparse arrays get stacked with an extra batch dimension
-_SPARSE_STACK = ("segmentation_background", "image_sparsified")
+_SPARSE_STACK = ("segmentation_background", "image_sparsified", "segmentation_mask")
 
 # these sparse arrays get concatenated, with no batch dimension
-_SPARSE_CONCAT = ("segmentation_mask")
+_SPARSE_CONCAT = []
 
 ELECTRON_IONIZATION_MEV = 3.6e-6
 
@@ -188,9 +188,11 @@ def make_soft_segmentation_mask(electrons: list[GeantElectron], dtype=np.float32
     ]
 
     # convert to "sparse" package objects
-    single_electron_arrays = [sparse.COO.from_scipy_sparse(array) for array in single_electron_arrays]
+    single_electron_arrays = [
+        sparse.COO.from_scipy_sparse(array) for array in single_electron_arrays
+    ]
     sparse_array = sparse.stack(single_electron_arrays)
-    sparse_sum = sparse_array.sum(0)
+    sparse_sum = sparse_array.sum(0, keepdims=True)
 
     background = ~sparse_sum.astype(bool)
     denom = sparse_sum + background
@@ -314,9 +316,13 @@ def electron_collate_fn(
             lengths = [len(sample[key]) for sample in batch]
             if isinstance(first[key], sparse.SparseArray):
                 if key in _SPARSE_CONCAT:
-                    sparse_batched = sparse.concatenate([sample[key] for sample in batch], axis=0)
+                    sparse_batched = sparse.concatenate(
+                        [sample[key] for sample in batch], axis=0
+                    )
                 elif key in _SPARSE_STACK:
-                    sparse_batched = sparse.stack([sample[key] for sample in batch], axis=0)
+                    to_stack = _sparse_pad([sample[key] for sample in batch])
+                    sparse_batched = sparse.stack(to_stack, axis=0)
+
                 out_batch[key] = torch.sparse_coo_tensor(
                     sparse_batched.coords, sparse_batched.data, sparse_batched.shape
                 ).coalesce()
@@ -336,6 +342,20 @@ def electron_collate_fn(
     out_batch.update(default_collate_fn(to_default_collate))
 
     return out_batch
+
+
+def _sparse_pad(items: list[sparse.SparseArray]):
+    assert (
+        len({x.shape[1:] for x in items}) == 1
+    )  # only expect the leading dimension to vary
+    if len({x.shape for x in items}) > 1:
+        max_channels = max(x.shape[0] for x in items)
+        zero_padding = [(0, 0)] * (items[0].ndim - 1)
+        items = [
+            sparse.pad(item, [(0, max_channels - item.shape[0]), *zero_padding])
+            for item in items
+        ]
+    return items
 
 
 def plot_pixel_patch_and_points(

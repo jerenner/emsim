@@ -5,8 +5,8 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from emsim.dataclasses import BoundingBox, Rectangle
-from emsim.multiscale.dataclasses import PixelSet, MultiscaleFrame
+from emsim.dataclasses import BoundingBox, Rectangle, PixelSet
+from emsim.multiscale.dataclasses import MultiscalePixelSet, MultiscaleFrame
 from emsim.multiscale.io import read_multiscale_data
 from emsim.utils import make_image, random_chunks, sparsearray_from_pixels
 
@@ -44,7 +44,7 @@ class MultiscaleElectronDataset(IterableDataset):
         partitions = random_chunks(event_indices, self.events_per_image_range[0], self.events_per_image_range[1])
 
         for part in partitions:
-            events: List[PixelSet] = [self.events[i] for i in part]
+            events: List[MultiscalePixelSet] = [self.events[i] for i in part]
             image = self.make_composite_lowres_image(events)
 
             boxes = [event.lowres_pixelset.get_bounding_box() for event in events]
@@ -90,7 +90,7 @@ class MultiscaleElectronDataset(IterableDataset):
                 "local_lowres_incidence_locations_pixels": local_lowres_pixel_incidences,
             }
 
-    def make_composite_lowres_image(self, events: List[PixelSet], add_noise=True) -> torch.Tensor:
+    def make_composite_lowres_image(self, events: List[MultiscalePixelSet], add_noise=True) -> torch.Tensor:
         arrays = [
             sparsearray_from_pixels(
                 event.lowres_pixelset,
@@ -111,7 +111,7 @@ class MultiscaleElectronDataset(IterableDataset):
         return images
 
     def local_pixel_incidences(
-        self, events: List[PixelSet], boxes: List[BoundingBox], resolution=str
+        self, events: List[MultiscalePixelSet], boxes: List[BoundingBox], resolution=str
     ) -> torch.Tensor:
         assert resolution in ["highres", "lowres"]
         points = []

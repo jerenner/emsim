@@ -7,8 +7,7 @@ import numpy as np
 import torch
 from scipy import sparse
 
-from emsim.dataclasses import BoundingBox
-from emsim.multiscale.dataclasses import PixelSet
+from emsim.dataclasses import BoundingBox, PixelSet
 
 
 def random_chunks(x: List[Any], min_size: int, max_size: int):

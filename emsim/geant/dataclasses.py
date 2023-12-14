@@ -4,8 +4,6 @@ from typing import List, Optional
 import numpy as np
 
 from emsim.dataclasses import (
-    IonizationElectronPixel,
-    EnergyLossPixel,
     IncidencePoint,
     PixelSet,
 )

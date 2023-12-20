@@ -8,6 +8,7 @@ dependencies:
   - python>=3.8
   - pip
   - h5py
+  - cython
   - matplotlib
   - numpy
   - pandas
@@ -24,3 +25,9 @@ dependencies:
   - notebook
   - ipympl
   - sparse
+  - fire
+  - torchquad
+  - deprecation
+  - pip:
+    - stempy
+    - pylandau

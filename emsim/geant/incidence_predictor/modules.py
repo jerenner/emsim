@@ -5,12 +5,13 @@ from torch.distributions import MultivariateNormal
 
 
 class GaussianIncidencePointPredictor(nn.Module):
-    def __init__(self, backbone, hidden_dim=512, mean_parameterization="sigmoid", diagonal_covariance=False, eps=1e-6):
+    def __init__(self, backbone, hidden_dim=512, mean_parameterization="sigmoid", diagonal_covariance=False, eps=1e-6, max_cov=1e6):
         super().__init__()
         self.mean_parameterization = mean_parameterization
         self.backbone = backbone
         self.diagonal_covariance = diagonal_covariance
         self.eps = eps
+        self.max_cov = max_cov
 
         if diagonal_covariance:
             out_dim = 4
@@ -35,7 +36,7 @@ class GaussianIncidencePointPredictor(nn.Module):
             mean_vector, cholesky_diagonal, cholesky_offdiag = torch.split(x, [2, 2, 1], -1)
 
         cholesky_diagonal = cholesky_diagonal.exp()
-        cholesky_diagonal = torch.clamp_min(cholesky_diagonal, self.eps)
+        cholesky_diagonal = torch.clamp(cholesky_diagonal, self.eps, self.max_cov)
         cholesky = torch.diag_embed(cholesky_diagonal)
         if not self.diagonal_covariance:
             tril_indices = torch.tril_indices(2, 2, offset=-1, device=x.device)

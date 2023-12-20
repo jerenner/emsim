@@ -364,17 +364,6 @@ def sparse_to_torch_hybrid(sparse_array: sparse.SparseArray, n_hybrid_dims=1):
     return torch.sparse_coo_tensor(hybrid_indices, hybrid_values, sparse_array.shape).coalesce()
 
 
-def sparse_to_torch_hybrid_old(sparse_array: sparse.SparseArray):
-    nonempty_coords = sparse_array.any(-1).coords
-    values = [sparse_array[*coords].todense() for coords in nonempty_coords.T]
-    values = np.stack(values)
-    return torch.sparse_coo_tensor(
-        torch.as_tensor(nonempty_coords),
-        torch.as_tensor(values),
-        size=sparse_array.shape,
-    ).coalesce()
-
-
 def _sparse_pad(items: list[sparse.SparseArray]):
     if len({x.shape for x in items}) > 1:
         max_shape = np.stack([item.shape for item in items], 0).max(0)

@@ -6,9 +6,12 @@ from scipy.ndimage import binary_dilation
 
 
 class NSigmaSparsifyTransform:
-    def __init__(self, background_threshold_n_sigma=4, window_size=7):
+    def __init__(
+        self, background_threshold_n_sigma=4, window_size=7, channels_last=True
+    ):
         self.background_threshold_n_sigma = background_threshold_n_sigma
         self.window_size = window_size
+        self.channels_last = channels_last
 
     def __call__(self, batch):
         image = batch["image"]
@@ -16,7 +19,7 @@ class NSigmaSparsifyTransform:
             sparsified = numpy_sigma_energy_threshold_sparsify(
                 image,
                 background_threshold_n_sigma=self.background_threshold_n_sigma,
-                window_size=self.window_size
+                window_size=self.window_size,
             )
         elif isinstance(image, torch.Tensor):
             sparsified = torch_sigma_energy_threshold_sparsify(
@@ -24,6 +27,23 @@ class NSigmaSparsifyTransform:
                 background_threshold_n_sigma=self.background_threshold_n_sigma,
                 window_size=self.window_size,
             )
+        else:
+            raise ValueError
+
+        if self.channels_last:
+            if isinstance(sparsified, sparse.SparseArray):
+                sparsified = (
+                    sparsified.transpose([0, 2, 3, 1])
+                    if sparsified.ndim == 4
+                    else sparsified.transpose([1, 2, 0])
+                )
+            elif isinstance(sparsified, torch.Tensor):
+                sparsified = (
+                    sparsified.permute(0, 2, 3, 1)
+                    if sparsified.ndim == 4
+                    else sparsified.permute(1, 2, 0)
+                ).coalesce()
+
         batch["image_sparsified"] = sparsified
         return batch
 

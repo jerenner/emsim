@@ -6,6 +6,7 @@ from typing import Any, List, Optional, Tuple
 import numpy as np
 import torch
 from scipy import sparse
+import spconv.pytorch as spconv
 
 from emsim.dataclasses import BoundingBox, PixelSet
 
@@ -24,6 +25,15 @@ def random_chunks(x: List[Any], min_size: int, max_size: int):
                 return out
 
     return out
+
+
+def torch_sparse_to_spconv(tensor: torch.Tensor):
+    assert tensor.is_sparse
+    spatial_shape = tensor.shape[1:-1]
+    batch_size = tensor.shape[0]
+    indices_th = tensor.indices().permute(1, 0).contiguous().int()
+    features_th = tensor.values()
+    return spconv.SparseConvTensor(features_th, indices_th, spatial_shape, batch_size)
 
 
 def tensors_same_size(tensors: list[torch.Tensor]) -> bool:

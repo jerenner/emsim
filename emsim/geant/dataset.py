@@ -19,7 +19,7 @@ from emsim.utils import (
 )
 
 # keys in here will not be batched in the collate fn
-_KEYS_TO_NOT_BATCH = "local_trajectories_pixels"
+_KEYS_TO_NOT_BATCH = ("local_trajectories_pixels", "hybrid_sparse_tensors")
 
 # these keys get passed to the default collate_fn, everything else uses custom batching logic
 _TO_DEFAULT_COLLATE = ("image", "batch_size")
@@ -39,6 +39,7 @@ class GeantElectronDataset(IterableDataset):
         pixels_file: str,
         events_per_image_range: tuple[int],
         pixel_patch_size: int = 5,
+        hybrid_sparse_tensors: bool = True,
         trajectory_file: Optional[str] = None,
         train_percentage: float = 0.95,
         split: str = "train",
@@ -51,6 +52,7 @@ class GeantElectronDataset(IterableDataset):
         assert split in ("train", "test")
         self.pixels_file = pixels_file
         self.trajectory_file = trajectory_file
+        self.hybrid_sparse_tensors = hybrid_sparse_tensors
 
         self.electrons = read_files(
             pixels_file=pixels_file, trajectory_file=trajectory_file
@@ -85,6 +87,7 @@ class GeantElectronDataset(IterableDataset):
             batch = {}
             batch["electron_ids"] = np.array([elec.id for elec in elecs], dtype=int)
             batch["batch_size"] = len(elecs)
+            batch["hybrid_sparse_tensors"] = self.hybrid_sparse_tensors
 
             # composite electron image
             batch["image"] = self.make_composite_image(elecs)
@@ -191,8 +194,8 @@ def make_soft_segmentation_mask(electrons: list[GeantElectron], dtype=np.float32
     single_electron_arrays = [
         sparse.COO.from_scipy_sparse(array) for array in single_electron_arrays
     ]
-    sparse_array = sparse.stack(single_electron_arrays)
-    sparse_sum = sparse_array.sum(0, keepdims=True)
+    sparse_array = sparse.stack(single_electron_arrays, -1)
+    sparse_sum = sparse_array.sum(-1, keepdims=True)
 
     background = ~sparse_sum.astype(bool)
     denom = sparse_sum + background
@@ -299,16 +302,13 @@ def electron_collate_fn(
     batch: list[dict[str, Any]],
     default_collate_fn: Callable = default_collate,
 ) -> dict[str, Any]:
-    batch = [
-        {k: example[k] for k in example if k not in _KEYS_TO_NOT_BATCH}
-        for example in batch
-    ]
-
     out_batch = {}
     to_default_collate = [{} for _ in range(len(batch))]
 
     first = batch[0]
     for key in first:
+        if key in _KEYS_TO_NOT_BATCH:
+            continue
         if key in _TO_DEFAULT_COLLATE:
             for to_default, electron in zip(to_default_collate, batch):
                 to_default[key] = electron[key]
@@ -323,9 +323,12 @@ def electron_collate_fn(
                     to_stack = _sparse_pad([sample[key] for sample in batch])
                     sparse_batched = sparse.stack(to_stack, axis=0)
 
-                out_batch[key] = torch.sparse_coo_tensor(
-                    sparse_batched.coords, sparse_batched.data, sparse_batched.shape
-                ).coalesce()
+                if first.get("hybrid_sparse_tensors", False):
+                    out_batch[key] = sparse_to_torch_hybrid(sparse_batched)
+                else:
+                    out_batch[key] = torch.sparse_coo_tensor(
+                        sparse_batched.coords, sparse_batched.data, sparse_batched.shape
+                    ).coalesce()
             else:
                 out_batch[key] = torch.as_tensor(
                     np.concatenate([sample[key] for sample in batch], axis=0)
@@ -344,15 +347,45 @@ def electron_collate_fn(
     return out_batch
 
 
+def sparse_to_torch_hybrid(sparse_array: sparse.SparseArray, n_hybrid_dims=1):
+    dtype = sparse_array.dtype
+    hybrid_indices = []
+    hybrid_values = []
+    hybrid_value_shape = sparse_array.shape[-n_hybrid_dims:]
+    for index, value in zip(sparse_array.coords.T, sparse_array.data):
+        torch_index = index[:-n_hybrid_dims]
+        torch_value = np.zeros(hybrid_value_shape, dtype=dtype)
+        torch_value[index[-n_hybrid_dims:]] = value
+        hybrid_indices.append(torch_index)
+        hybrid_values.append(torch_value)
+
+    hybrid_indices = np.stack(hybrid_indices, -1)
+    hybrid_values = np.stack(hybrid_values, 0)
+    return torch.sparse_coo_tensor(hybrid_indices, hybrid_values, sparse_array.shape).coalesce()
+
+
+def sparse_to_torch_hybrid_old(sparse_array: sparse.SparseArray):
+    nonempty_coords = sparse_array.any(-1).coords
+    values = [sparse_array[*coords].todense() for coords in nonempty_coords.T]
+    values = np.stack(values)
+    return torch.sparse_coo_tensor(
+        torch.as_tensor(nonempty_coords),
+        torch.as_tensor(values),
+        size=sparse_array.shape,
+    ).coalesce()
+
+
 def _sparse_pad(items: list[sparse.SparseArray]):
-    assert (
-        len({x.shape[1:] for x in items}) == 1
-    )  # only expect the leading dimension to vary
     if len({x.shape for x in items}) > 1:
-        max_channels = max(x.shape[0] for x in items)
-        zero_padding = [(0, 0)] * (items[0].ndim - 1)
+        max_shape = np.stack([item.shape for item in items], 0).max(0)
         items = [
-            sparse.pad(item, [(0, max_channels - item.shape[0]), *zero_padding])
+            sparse.pad(
+                item,
+                [
+                    (0, max_len - item_len)
+                    for max_len, item_len in zip(max_shape, item.shape)
+                ],
+            )
             for item in items
         ]
     return items

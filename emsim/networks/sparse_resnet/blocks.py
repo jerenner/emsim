@@ -120,7 +120,8 @@ class SparseBottleneck(nn.Module):
 class SparseBottleneckV2(spconv.SparseModule):
     def __init__(
         self,
-        conv_type: str,
+        stage_index: int,
+        block_index: int,
         in_chs: int,
         out_chs: int = None,
         bottle_ratio: float = 0.25,
@@ -131,15 +132,6 @@ class SparseBottleneckV2(spconv.SparseModule):
         drop_path_rate: float = 0.0,
     ):
         super().__init__()
-        if conv_type == "sparse":
-            conv_layer = spconv.SparseConv2d
-        elif conv_type == "submanifold":
-            conv_layer = spconv.SubMConv2d
-        else:
-            raise ValueError(
-                "Expected `conv_type` to be either `sparse` or `submanifold`, "
-                f"got {conv_type}"
-            )
         act_layer = act_layer or nn.ReLU
         norm_layer = norm_layer or nn.BatchNorm1d
         out_chs = out_chs or in_chs
@@ -147,7 +139,7 @@ class SparseBottleneckV2(spconv.SparseModule):
         mid_chs = int(out_chs * bottle_ratio)
 
         if in_chs != out_chs or np.prod(stride) > 1:
-            self.downsample = conv_layer(
+            self.downsample = spconv.SparseConv2d(
                 in_chs,
                 out_chs,
                 kernel_size=1,
@@ -161,8 +153,21 @@ class SparseBottleneckV2(spconv.SparseModule):
         norm1 = norm_layer(in_chs)
         act1 = act_layer()
         self.preact = spconv.SparseSequential(norm1, act1)
-        self.conv1 = conv_layer(in_chs, mid_chs, 1)
+        self.conv1 = spconv.SubMConv2d(
+            in_chs,
+            mid_chs,
+            1,
+            indice_key=f"1x1_subm_{stage_index-1}"
+            if stride > 1
+            else f"1x1_subm_{stage_index}",
+        )
 
+        if stride > 1:
+            conv_layer = spconv.SparseConv2d
+            indice_key = f"down_3x3_{stage_index}"
+        else:
+            conv_layer = spconv.SubMConv2d
+            indice_key = f"3x3_{stage_index}"
         self.norm_relu_conv_2 = spconv.SparseSequential(
             norm_layer(mid_chs),
             act_layer(),
@@ -173,10 +178,13 @@ class SparseBottleneckV2(spconv.SparseModule):
                 stride=stride,
                 dilation=dilation,
                 padding=get_padding(3, stride=stride, dilation=dilation),
+                indice_key=indice_key,
             ),
         )
         self.norm_relu_conv_3 = spconv.SparseSequential(
-            norm_layer(mid_chs), act_layer(), conv_layer(mid_chs, out_chs, 1)
+            norm_layer(mid_chs),
+            act_layer(),
+            spconv.SubMConv2d(mid_chs, out_chs, 1, indice_key=f"1x1_subm_{stage_index}"),
         )
 
         self.drop_path = (
@@ -205,7 +213,7 @@ class SparseBottleneckV2(spconv.SparseModule):
 class SparseResnetV2Stage(spconv.SparseModule):
     def __init__(
         self,
-        conv_layer: str,
+        stage_index: int,
         in_chs: int,
         out_chs: int,
         stride: int,
@@ -226,7 +234,8 @@ class SparseResnetV2Stage(spconv.SparseModule):
             self.blocks.add_module(
                 str(block_index),
                 SparseBottleneckV2(
-                    conv_layer,
+                    stage_index,
+                    block_index,
                     prev_chs,
                     out_chs,
                     bottle_ratio=bottle_ratio,
@@ -235,7 +244,7 @@ class SparseResnetV2Stage(spconv.SparseModule):
                     act_layer=act_layer,
                     norm_layer=norm_layer,
                     drop_path_rate=drop_path_rate,
-                )
+                ),
             )
             prev_chs = out_chs
             # first_dilation = dilation

@@ -48,7 +48,7 @@ class SparseResnetV2(nn.Module):
                 dilation *= stride
                 stride = 1
             stage = SparseResnetV2Stage(
-                conv_layer,
+                stage_index,
                 prev_chs,
                 out_chs,
                 stride=stride,

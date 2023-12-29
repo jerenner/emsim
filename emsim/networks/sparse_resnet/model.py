@@ -1,19 +1,16 @@
+from typing import Optional
+
 import spconv.pytorch as spconv
-from emsim.networks.sparse_resnet.blocks import SparseResnetV2Stage
-
-
 import torch
 from timm.layers import make_divisible
 from torch import nn
 
-
-from typing import Optional
+from .blocks import SparseResnetV2Stage
 
 
 class SparseResnetV2(nn.Module):
     def __init__(
         self,
-        conv_layer: str,
         layers: list[int],
         channels: list[int] = [32, 64, 128, 256],
         in_chans: int = 1,
@@ -60,7 +57,13 @@ class SparseResnetV2(nn.Module):
             )
             prev_chs = out_chs
             curr_stride *= stride
-            self.feature_info += [dict(num_chs=prev_chs, reduction=curr_stride, module=f"stages.{stage_index}")]
+            self.feature_info += [
+                dict(
+                    num_chs=prev_chs,
+                    reduction=curr_stride,
+                    module=f"stages.{stage_index}",
+                )
+            ]
             self.stages.append(stage)
 
         self.num_features = prev_chs

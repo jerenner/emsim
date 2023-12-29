@@ -139,16 +139,18 @@ class SparseBottleneckV2(spconv.SparseModule):
         mid_chs = int(out_chs * bottle_ratio)
 
         if in_chs != out_chs or np.prod(stride) > 1:
-            self.downsample = spconv.SparseConv2d(
+            assert block_index == 0
+            self.downsample_shortcut = spconv.SparseConv2d(
                 in_chs,
                 out_chs,
                 kernel_size=1,
                 stride=stride,
                 dilation=dilation,
                 padding=get_padding(1, stride=stride, dilation=dilation),
+                indice_key=f"down_1x1_{stage_index}",
             )
         else:
-            self.downsample = None
+            self.downsample_shortcut = None
 
         norm1 = norm_layer(in_chs)
         act1 = act_layer()
@@ -184,7 +186,9 @@ class SparseBottleneckV2(spconv.SparseModule):
         self.norm_relu_conv_3 = spconv.SparseSequential(
             norm_layer(mid_chs),
             act_layer(),
-            spconv.SubMConv2d(mid_chs, out_chs, 1, indice_key=f"1x1_subm_{stage_index}"),
+            spconv.SubMConv2d(
+                mid_chs, out_chs, 1, indice_key=f"1x1_subm_{stage_index}"
+            ),
         )
 
         self.drop_path = (
@@ -194,8 +198,8 @@ class SparseBottleneckV2(spconv.SparseModule):
     def forward(self, x):
         x_preact = self.preact(x)
 
-        if self.downsample is not None:
-            shortcut = self.downsample(x_preact)
+        if self.downsample_shortcut is not None:
+            shortcut = self.downsample_shortcut(x_preact)
         else:
             shortcut = x
 

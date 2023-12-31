@@ -35,9 +35,12 @@ class InverseSparseBottleneckV2(spconv.SparseModule):
 
         if block_index == 0:
             assert encoder_skip_chs is not None
-            self.upsample = spconv.SparseInverseConv2d(
-                in_chs, in_chs, 3, indice_key=f"down_3x3_{encoder_skip_stage}"
-            )
+            if encoder_skip_stage > 0:
+                self.upsample = spconv.SparseInverseConv2d(
+                    in_chs, in_chs, 3, indice_key=f"down_3x3_{encoder_skip_stage}"
+                )
+            else:
+                self.upsample = None
             conv1_in_chs = in_chs + encoder_skip_chs
         else:
             assert encoder_skip_chs is None

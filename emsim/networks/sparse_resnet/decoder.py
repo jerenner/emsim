@@ -24,27 +24,35 @@ class SparseUnetDecoder(spconv.SparseModule):
 
         prev_chs = encoder_out_channels
         block_dprs = [
-            x.tolist() for x in torch.linspace(0, drop_path_rate, sum(layers)).split(layers)
+            x.tolist()
+            for x in torch.linspace(0, drop_path_rate, sum(layers)).split(layers)
         ]
         self.stages = nn.ModuleList()
-        for stage_index, (d, c, s, bdpr) in enumerate(zip(layers, channels, encoder_skip_channels, block_dprs)):
+        encoder_skip_indices = reversed(range(len(encoder_skip_channels)))
+        for stage_index, (depth, c, skip_chs, skip_ind, bdpr) in enumerate(
+            zip(
+                layers,
+                channels,
+                encoder_skip_channels,
+                encoder_skip_indices,
+                block_dprs,
+            )
+        ):
             out_chs = c
             stage = SparseInverseResnetV2Stage(
                 stage_index,
                 prev_chs,
-                s,
                 out_chs,
-                depth=d,
+                depth=depth,
+                encoder_skip_stage=skip_ind,
+                encoder_skip_chs=skip_chs,
                 block_dpr=bdpr,
                 act_layer=act_layer,
                 norm_layer=norm_layer,
             )
             prev_chs = out_chs
             self.feature_info += [
-                dict(
-                    num_chs=prev_chs,
-                    module=f"stages.{stage_index}"
-                )
+                dict(num_chs=prev_chs, module=f"stages.{stage_index}")
             ]
             self.stages.append(stage)
 

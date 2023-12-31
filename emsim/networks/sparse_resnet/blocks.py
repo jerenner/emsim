@@ -132,24 +132,34 @@ class SparseBottleneckV2(spconv.SparseModule):
         drop_path_rate: float = 0.0,
     ):
         super().__init__()
+        self.stage_index = stage_index
+        self.block_index = block_index
         act_layer = act_layer or nn.ReLU
         norm_layer = norm_layer or nn.BatchNorm1d
         out_chs = out_chs or in_chs
         # mid_chs = make_divisible(out_chs * bottle_ratio)
         mid_chs = int(out_chs * bottle_ratio)
 
+        if stride > 1:
+            conv_layer = spconv.SparseConv2d
+            indice_key = f"down_3x3_{stage_index}"
+        else:
+            conv_layer = spconv.SubMConv2d
+            indice_key = f"3x3_{stage_index}"
+
         if in_chs != out_chs or np.prod(stride) > 1:
             assert block_index == 0
-            self.downsample_shortcut = spconv.SparseConv2d(
+            self.downsample_shortcut = conv_layer(
                 in_chs,
                 out_chs,
-                kernel_size=1,
+                kernel_size=3,
                 stride=stride,
                 dilation=dilation,
-                padding=get_padding(1, stride=stride, dilation=dilation),
-                indice_key=f"down_1x1_{stage_index}",
+                padding=get_padding(3, stride=stride, dilation=dilation),
+                indice_key=indice_key,
             )
         else:
+            assert block_index > 0
             self.downsample_shortcut = None
 
         norm1 = norm_layer(in_chs)
@@ -164,12 +174,6 @@ class SparseBottleneckV2(spconv.SparseModule):
             else f"1x1_subm_{stage_index}",
         )
 
-        if stride > 1:
-            conv_layer = spconv.SparseConv2d
-            indice_key = f"down_3x3_{stage_index}"
-        else:
-            conv_layer = spconv.SubMConv2d
-            indice_key = f"3x3_{stage_index}"
         self.norm_relu_conv_2 = spconv.SparseSequential(
             norm_layer(mid_chs),
             act_layer(),
@@ -208,6 +212,7 @@ class SparseBottleneckV2(spconv.SparseModule):
         x = self.norm_relu_conv_3(x)
         x = self.drop_path(x)
         if x.indices.shape != shortcut.indices.shape:
+            raise AssertionError
             out = Fsp.sparse_add(x, shortcut)
         else:
             out = x + shortcut
@@ -229,6 +234,7 @@ class SparseResnetV2Stage(spconv.SparseModule):
         norm_layer: Optional[nn.Module] = None,
     ):
         super().__init__()
+        self.stage_index = stage_index
         # first_dilation = 1 if dilation in (1, 2) else 2
         prev_chs = in_chs
         self.blocks = spconv.SparseSequential()

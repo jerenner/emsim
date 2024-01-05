@@ -130,10 +130,14 @@ class SparseBottleneckV2(spconv.SparseModule):
         act_layer: Optional[nn.Module] = None,
         norm_layer: Optional[nn.Module] = None,
         drop_path_rate: float = 0.0,
+        in_reduction: Optional[int] = None,
+        out_reduction: Optional[int] = None,
     ):
         super().__init__()
         self.stage_index = stage_index
         self.block_index = block_index
+        self.in_reduction = in_reduction or 2 ** stage_index
+        self.out_reduction = out_reduction or self.in_reduction
         act_layer = act_layer or nn.ReLU
         norm_layer = norm_layer or nn.BatchNorm1d
         out_chs = out_chs or in_chs
@@ -142,10 +146,10 @@ class SparseBottleneckV2(spconv.SparseModule):
 
         if stride > 1:
             conv_layer = spconv.SparseConv2d
-            indice_key = f"down_3x3_{stage_index}"
+            indice_key_3x3 = f"down_3x3_{in_reduction}to{out_reduction}"
         else:
             conv_layer = spconv.SubMConv2d
-            indice_key = f"3x3_{stage_index}"
+            indice_key_3x3 = f"3x3_{in_reduction}"
 
         if in_chs != out_chs or np.prod(stride) > 1:
             assert block_index == 0
@@ -156,7 +160,7 @@ class SparseBottleneckV2(spconv.SparseModule):
                 stride=stride,
                 dilation=dilation,
                 padding=get_padding(3, stride=stride, dilation=dilation),
-                indice_key=indice_key,
+                indice_key=indice_key_3x3,
             )
         else:
             assert block_index > 0
@@ -169,9 +173,7 @@ class SparseBottleneckV2(spconv.SparseModule):
             in_chs,
             mid_chs,
             1,
-            indice_key=f"1x1_subm_{stage_index-1}"
-            if stride > 1
-            else f"1x1_subm_{stage_index}",
+            indice_key=f"1x1_subm_{in_reduction}"
         )
 
         self.norm_relu_conv_2 = spconv.SparseSequential(
@@ -184,14 +186,14 @@ class SparseBottleneckV2(spconv.SparseModule):
                 stride=stride,
                 dilation=dilation,
                 padding=get_padding(3, stride=stride, dilation=dilation),
-                indice_key=indice_key,
+                indice_key=indice_key_3x3,
             ),
         )
         self.norm_relu_conv_3 = spconv.SparseSequential(
             norm_layer(mid_chs),
             act_layer(),
             spconv.SubMConv2d(
-                mid_chs, out_chs, 1, indice_key=f"1x1_subm_{stage_index}"
+                mid_chs, out_chs, 1, indice_key=f"1x1_subm_{out_reduction}"
             ),
         )
 
@@ -211,11 +213,12 @@ class SparseBottleneckV2(spconv.SparseModule):
         x = self.norm_relu_conv_2(x)
         x = self.norm_relu_conv_3(x)
         x = self.drop_path(x)
-        if x.indices.shape != shortcut.indices.shape:
-            raise AssertionError
-            out = Fsp.sparse_add(x, shortcut)
-        else:
-            out = x + shortcut
+        # if x.indices.shape != shortcut.indices.shape:
+        #     out = Fsp.sparse_add(x, shortcut)
+        # else:
+        #     out = x + shortcut
+        assert x.indices.shape == shortcut.indices.shape
+        out = x + shortcut
         return out
 
 
@@ -228,6 +231,8 @@ class SparseResnetV2Stage(spconv.SparseModule):
         stride: int,
         dilation: int,
         depth: int,
+        in_reduction: int,
+        out_reduction: int,
         bottle_ratio: float = 0.25,
         block_dpr: Optional[list[float]] = None,
         act_layer: Optional[nn.Module] = None,
@@ -235,6 +240,8 @@ class SparseResnetV2Stage(spconv.SparseModule):
     ):
         super().__init__()
         self.stage_index = stage_index
+        self.in_reduction = in_reduction
+        self.out_reduction = out_reduction
         # first_dilation = 1 if dilation in (1, 2) else 2
         prev_chs = in_chs
         self.blocks = spconv.SparseSequential()
@@ -254,6 +261,8 @@ class SparseResnetV2Stage(spconv.SparseModule):
                     act_layer=act_layer,
                     norm_layer=norm_layer,
                     drop_path_rate=drop_path_rate,
+                    in_reduction=in_reduction if block_index == 0 else out_reduction,
+                    out_reduction=out_reduction,
                 ),
             )
             prev_chs = out_chs

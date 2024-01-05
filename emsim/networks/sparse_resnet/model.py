@@ -51,6 +51,8 @@ class SparseResnetV2(nn.Module):
                 stride=stride,
                 dilation=dilation,
                 depth=d,
+                in_reduction=curr_stride,
+                out_reduction=curr_stride * stride,
                 block_dpr=bdpr,
                 act_layer=act_layer,
                 norm_layer=norm_layer,

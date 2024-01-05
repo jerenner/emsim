@@ -15,46 +15,49 @@ class InverseSparseBottleneckV2(spconv.SparseModule):
         block_index: int,
         in_chs: int,
         out_chs: int,
-        encoder_skip_stage: Optional[int] = None,
+        in_reduction: int,
+        out_reduction: Optional[int] = None,
         encoder_skip_chs: Optional[int] = None,
         bottle_ratio: float = 0.25,
         act_layer: Optional[nn.Module] = None,
         norm_layer: Optional[nn.Module] = None,
         drop_path_rate: float = 0.0,
+
     ):
         super().__init__()
         self.stage_index = stage_index
         self.block_index = block_index
+        self.in_reduction = in_reduction
+        self.out_reduction = out_reduction or self.in_reduction
         act_layer = act_layer or nn.ReLU
         norm_layer = norm_layer or nn.BatchNorm1d
         out_chs = out_chs or in_chs
         # mid_chs = make_divisible(out_chs * bottle_ratio)
         mid_chs = int(out_chs * bottle_ratio)
 
-        # TODO upsample then concat then residual
-
         if block_index == 0:
-            assert encoder_skip_chs is not None
-            if encoder_skip_stage > 0:
+            if out_reduction < in_reduction:
+                assert encoder_skip_chs is not None
                 self.upsample = spconv.SparseInverseConv2d(
-                    in_chs, in_chs, 3, indice_key=f"down_3x3_{encoder_skip_stage}"
+                    in_chs, in_chs, 3, indice_key=f"down_3x3_{out_reduction}to{in_reduction}"
                 )
             else:
                 self.upsample = None
-            conv1_in_chs = in_chs + encoder_skip_chs
+            conv1_in_chs = (
+                in_chs + encoder_skip_chs if encoder_skip_chs is not None else in_chs
+            )
         else:
             assert encoder_skip_chs is None
             self.upsample = None
             conv1_in_chs = in_chs
 
         if conv1_in_chs != out_chs:
-            assert encoder_skip_chs is not None
             assert block_index == 0
             self.shortcut = spconv.SubMConv2d(
                 conv1_in_chs,
                 out_chs,
                 1,
-                indice_key=f"1x1_subm_{encoder_skip_stage}",
+                indice_key=f"1x1_subm_{out_reduction}",
             )
         else:
             self.shortcut = None
@@ -66,7 +69,7 @@ class InverseSparseBottleneckV2(spconv.SparseModule):
             conv1_in_chs,
             mid_chs,
             1,
-            indice_key=f"1x1_subm_{encoder_skip_stage}",
+            indice_key=f"1x1_subm_{out_reduction}",
         )
 
         self.norm_relu_conv_2 = spconv.SparseSequential(
@@ -77,7 +80,7 @@ class InverseSparseBottleneckV2(spconv.SparseModule):
                 mid_chs,
                 kernel_size=3,
                 padding=get_padding(3, 1, 1),
-                indice_key=f"3x3_{encoder_skip_stage-1}",
+                indice_key=f"3x3_{out_reduction}",
             ),
         )
 
@@ -85,7 +88,7 @@ class InverseSparseBottleneckV2(spconv.SparseModule):
             norm_layer(mid_chs),
             act_layer(),
             spconv.SubMConv2d(
-                mid_chs, out_chs, 1, indice_key=f"1x1_subm_{encoder_skip_stage}"
+                mid_chs, out_chs, 1, indice_key=f"1x1_subm_{out_reduction}"
             ),
         )
 
@@ -116,11 +119,12 @@ class InverseSparseBottleneckV2(spconv.SparseModule):
         x = self.norm_relu_conv_2(x)
         x = self.norm_relu_conv_3(x)
         x = self.drop_path(x)
-        if x.indices.shape != shortcut.indices.shape:
-            assert False
-            out = Fsp.sparse_add(x, shortcut)
-        else:
-            out = x + shortcut
+        # if x.indices.shape != shortcut.indices.shape:
+        #     out = Fsp.sparse_add(x, shortcut)
+        # else:
+        #     out = x + shortcut
+        assert x.indices.shape == shortcut.indices.shape
+        out = x + shortcut
         return out
 
 
@@ -131,7 +135,8 @@ class SparseInverseResnetV2Stage(spconv.SparseModule):
         in_chs: int,
         out_chs: int,
         depth: int,
-        encoder_skip_stage: Optional[int] = None,
+        in_reduction: int,
+        out_reduction: int,
         encoder_skip_chs: Optional[int] = None,
         bottle_ratio: float = 0.25,
         block_dpr: Optional[list[float]] = None,
@@ -152,7 +157,8 @@ class SparseInverseResnetV2Stage(spconv.SparseModule):
                     block_index,
                     prev_chs,
                     out_chs,
-                    encoder_skip_stage=encoder_skip_stage,
+                    in_reduction=in_reduction,
+                    out_reduction=out_reduction,
                     encoder_skip_chs=encoder_skip_chs,
                     bottle_ratio=bottle_ratio,
                     act_layer=act_layer,

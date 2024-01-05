@@ -11,40 +11,54 @@ class SparseUnetDecoder(spconv.SparseModule):
     def __init__(
         self,
         layers: list[int],
-        encoder_out_channels: int,
-        encoder_skip_channels: list[int],
+        encoder_channels: list[int],
+        encoder_strides: list[int] = None,
         channels: list[int] = [256, 128, 64, 32],
         act_layer: nn.Module = nn.ReLU,
         norm_layer: nn.Module = nn.BatchNorm1d,
         drop_path_rate=0.0,
     ):
+        assert len(layers) == len(channels)
         super().__init__()
+
+        prev_chs = encoder_channels[0]
+        encoder_skip_channels = encoder_channels[1:]
+        if encoder_strides is None:
+            encoder_strides = [2**i for i in range(len(encoder_channels))][::-1]
 
         self.feature_info = []
 
-        prev_chs = encoder_out_channels
         block_dprs = [
             x.tolist()
             for x in torch.linspace(0, drop_path_rate, sum(layers)).split(layers)
         ]
         self.stages = nn.ModuleList()
-        encoder_skip_indices = reversed(range(len(encoder_skip_channels)))
-        for stage_index, (depth, c, skip_chs, skip_ind, bdpr) in enumerate(
+        for stage_index, (depth, c, bdpr) in enumerate(
             zip(
                 layers,
                 channels,
-                encoder_skip_channels,
-                encoder_skip_indices,
                 block_dprs,
             )
         ):
             out_chs = c
+            skip_chs = (
+                encoder_skip_channels[stage_index]
+                if stage_index < len(encoder_skip_channels)
+                else None
+            )
+            in_reduction = encoder_strides[stage_index]
+            out_reduction = (
+                encoder_strides[stage_index + 1]
+                if stage_index + 1 < len(encoder_strides)
+                else 1
+            )
             stage = SparseInverseResnetV2Stage(
                 stage_index,
                 prev_chs,
                 out_chs,
                 depth=depth,
-                encoder_skip_stage=skip_ind,
+                in_reduction=in_reduction,
+                out_reduction=out_reduction,
                 encoder_skip_chs=skip_chs,
                 block_dpr=bdpr,
                 act_layer=act_layer,

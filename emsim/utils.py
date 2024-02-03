@@ -36,6 +36,17 @@ def torch_sparse_to_spconv(tensor: torch.Tensor):
     return spconv.SparseConvTensor(features_th, indices_th, spatial_shape, batch_size)
 
 
+def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor):
+    assert isinstance(tensor, spconv.SparseConvTensor)
+    size = [tensor.batch_size] + tensor.spatial_shape + [tensor.features.shape[-1]]
+    indices = tensor.indices.transpose(0, 1)
+    values = tensor.features
+    return torch.sparse_coo_tensor(
+        indices, values, size, device=tensor.features.device, dtype=tensor.features.dtype,
+        requires_grad=tensor.features.requires_grad
+    )
+
+
 def tensors_same_size(tensors: list[torch.Tensor]) -> bool:
     shapes = [x.shape for x in tensors]
     return len(set(shapes)) <= 1
@@ -54,13 +65,13 @@ def sparsearray_from_pixels(
         x_indices.append(x_index)
         y_indices.append(y_index)
         data.append(p.data)
-    x_indices = np.array(x_indices)
-    y_indices = np.array(y_indices)
+    x_indices = np.array(x_indices)  # columns
+    y_indices = np.array(y_indices)  # rows
     if offset_x is not None:
         x_indices = x_indices - offset_x
     if offset_y is not None:
         y_indices = y_indices - offset_y
-    array = sparse.coo_array((np.array(data, dtype=dtype), (x_indices, y_indices)), shape=shape)
+    array = sparse.coo_array((np.array(data, dtype=dtype), (y_indices, x_indices)), shape=shape)
     return array.tocsr()
 
 

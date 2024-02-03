@@ -39,6 +39,25 @@ class AbsolutePositionalEncodingFourier(nn.Module):
         return out
 
 
+class RelativePositionalEncodingMLP(nn.Module):
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        act_layer: nn.Module = nn.ReLU
+    ):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            act_layer(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, x: Tensor):
+        return self.net(x)
+
+
 class RelativePositionalEncoding(nn.Module):
     def __init__(
         self,

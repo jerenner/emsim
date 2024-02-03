@@ -111,6 +111,7 @@ class GeantElectronDataset(IterableDataset):
                 [self.pixel_to_mm, self.pixel_to_mm]
             )
             batch["pixel_patches"] = patches.astype(np.float32)
+            batch["patch_coords"] = patch_coords.astype(int)
 
             # actual point the geant electron hit the detector surface
             incidence_points = np.stack(
@@ -218,30 +219,30 @@ def get_pixel_patches(
             electron.pixels, key=lambda x: x.ionization_electrons
         )
 
-        x_min = peak_pixel.x - patch_size // 2
-        x_max = peak_pixel.x + patch_size // 2 + 1
-        y_min = peak_pixel.y - patch_size // 2
-        y_max = peak_pixel.y + patch_size // 2 + 1
-        patch_coordinates.append(np.array([x_min, y_min, x_max, y_max]))
+        row_min = peak_pixel.y - patch_size // 2
+        row_max = peak_pixel.y + patch_size // 2 + 1
+        col_min = peak_pixel.x - patch_size // 2
+        col_max = peak_pixel.x + patch_size // 2 + 1
+        patch_coordinates.append(np.array([col_min, row_min, col_max, row_max]))
 
         # compute padding if any
-        if x_min < 0:
-            pad_x_left = -x_min
-            x_min = 0
+        if row_min < 0:
+            pad_top = -row_min
+            row_min = 0
         else:
-            pad_x_left = 0
-        if y_min < 0:
-            pad_y_top = -y_min
-            y_min = 0
+            pad_top = 0
+        if col_min < 0:
+            pad_left = -col_min
+            col_min = 0
         else:
-            pad_y_top = 0
+            pad_left = 0
 
-        pad_y_bottom = max(0, x_max - image.shape[-2])
-        pad_x_right = max(0, y_max - image.shape[-1])
+        pad_bottom = max(0, row_max - image.shape[-2])
+        pad_right = max(0, col_max - image.shape[-1])
 
-        patch = image[..., x_min:x_max, y_min:y_max]
+        patch = image[..., row_min:row_max, col_min:col_max]
         patch = np.pad(
-            patch, ((0, 0), (pad_x_left, pad_x_right), (pad_y_top, pad_y_bottom))
+            patch, ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right))
         )
 
         patches.append(patch)
@@ -254,9 +255,6 @@ def charge_2d_center_of_mass(patches: np.ndarray, com_patch_size=3):
     if patches.ndim == 2:
         # add batch dim
         patches = np.expand_dims(patches, 0)
-
-    # permute from rows by columns to x by y
-    patches = patches.transpose(0, 1, 3, 2)
 
     patch_x_len = patches.shape[-2]
     patch_y_len = patches.shape[-1]
@@ -393,9 +391,15 @@ def plot_pixel_patch_and_points(
     pixel_patch: np.ndarray,
     points: list[np.ndarray],
     point_labels: Optional[list[str]] = None,
-    contour: Optional[np.ndarray] = None,
+    ellipse_mean: Optional[np.ndarray] = None,
+    ellipse_cov: Optional[np.ndarray] = None,
+    ellipse_n_stds: list[int] = [1.0, 2.0, 3.0],
+    ellipse_facecolor: str = "none",
+    ellipse_colors: list[str] = ["blue", "purple", "red"],
+    ellipse_kwargs: Optional[dict] = None
 ):
     import matplotlib.pyplot as plt
+    ellipse_kwargs = ellipse_kwargs or {}
 
     pixel_patch = pixel_patch.squeeze()
     fig, ax = plt.subplots()
@@ -404,17 +408,48 @@ def plot_pixel_patch_and_points(
         extent=(0, pixel_patch.shape[0], pixel_patch.shape[1], 0),
         interpolation=None,
     )
-    fig.colorbar(map, ax=ax)
+    fig.colorbar(map, ax=ax, label="Charge")
+    ax.set_xlabel("Pixel")
+    ax.set_ylabel("Pixel")
     for point in points:
         ax.scatter(*point)
     if point_labels is not None:
         ax.legend(point_labels)
-    if contour is not None:
-        ax.contour(
-            np.linspace(0, pixel_patch.shape[0], contour.shape[0]),
-            np.linspace(0, pixel_patch.shape[1], contour.shape[1]),
-            contour,
-            levels=[1 - 0.997, 1 - 0.95, 1 - 0.68],  # 3, 2, 1 std devs
-            colors="k",
-        )
+    if ellipse_mean is not None and ellipse_cov is not None:
+        for n_std, color in zip(ellipse_n_stds, ellipse_colors):
+            plot_ellipse(ax, ellipse_mean, ellipse_cov, n_std, ellipse_facecolor, ellipse_color=color, **ellipse_kwargs)
     return fig, ax
+
+
+def eigsorted(cov):
+    if cov.ndim == 2:
+        squeeze_cov = True
+        cov = np.expand_dims(cov, 0)
+    else:
+        squeeze_cov = False
+    evals, evecs = np.linalg.eigh(cov)
+    order = evals.argsort(-1)[:,::-1]
+    sorted_evals = np.stack([val[ord] for val, ord in zip(evals, order)])
+    sorted_evecs = np.stack([vec[:, ord] for vec, ord in zip(evecs, order)])
+    if squeeze_cov:
+        sorted_evals, sorted_evecs = sorted_evals.squeeze(0), sorted_evecs.squeeze(0)
+    return sorted_evals, sorted_evecs
+
+
+def plot_ellipse(ax, mean, cov, n_std=1.0, facecolor="none", ellipse_color="red", **kwargs):
+    # https://matplotlib.org/stable/gallery/statistics/confidence_ellipse.html
+    import matplotlib.transforms as transforms
+    from matplotlib.patches import Ellipse
+
+    evals, evecs = eigsorted(cov)
+    evals_sqrt = np.sqrt(evals)
+    first_evec = evecs[:, 0]
+    angle = np.degrees(np.arctan2(*first_evec[::-1]))
+    # angle = 0
+    ellipse = Ellipse(
+        mean,
+        width=evals_sqrt[0] * 2 * n_std,
+        height=evals_sqrt[1] * 2 * n_std,
+        angle=angle,
+        edgecolor=ellipse_color, linestyle="--", facecolor=facecolor, **kwargs)
+    ax.add_patch(ellipse)

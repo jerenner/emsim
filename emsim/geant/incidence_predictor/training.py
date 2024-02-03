@@ -18,7 +18,7 @@ def fit_gaussian_patch_predictor(
 
     def make_loader():
         return iter(
-            DataLoader(dataset, collate_fn=electron_collate_fn, pin_memory=True)
+            DataLoader(dataset, collate_fn=electron_collate_fn)
         )
 
     losses = []
@@ -65,7 +65,7 @@ def fit_pointwise_patch_predictor(model: nn.Module, dataset: GeantElectronDatase
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def make_loader():
-        return iter(DataLoader(dataset, collate_fn=electron_collate_fn, pin_memory=True))
+        return iter(DataLoader(dataset, collate_fn=electron_collate_fn))
 
     losses = []
     optim = torch.optim.AdamW(model.parameters())

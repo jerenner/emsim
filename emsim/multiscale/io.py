@@ -1,7 +1,7 @@
 from typing import List, Tuple
 
 from emsim.dataclasses import Event, Rectangle, IncidencePoint, IonizationElectronPixel
-from emsim.multiscale.dataclasses import PixelSet
+from emsim.multiscale.dataclasses import MultiscalePixelSet
 
 
 def read_multiscale_data(
@@ -11,7 +11,7 @@ def read_multiscale_data(
     lowres_shape: Tuple[int],
     mm_x_range: Tuple[float],
     mm_y_range: Tuple[float]
-) -> List[PixelSet]:
+) -> List[MultiscalePixelSet]:
     highres_data: List[Event] = parse_pixel_file(highres_filename)
     lowres_data: List[Event] = parse_pixel_file(lowres_filename)
     assert len(highres_data) == len(lowres_data)
@@ -19,7 +19,7 @@ def read_multiscale_data(
     multiscale_events = []
     for high, low in zip(highres_data, lowres_data):
         assert high.incidence == low.incidence
-        event = PixelSet(
+        event = MultiscalePixelSet(
             high.incidence,
             lowres_image_size=Rectangle(0, 0, lowres_shape[0], lowres_shape[1]),
             highres_image_size=Rectangle(0, 0, highres_shape[0], highres_shape[1]),

@@ -137,13 +137,6 @@ class BoundingBox(Rectangle):
     def asarray(self):
         return np.asarray([self.xmin, self.ymin, self.xmax, self.ymax])
 
-    def aslist(self):
-        return [self.xmin, self.ymin, self.xmax, self.ymax]
-
-    def corners_format(self):
-        """[top_left_x, top_left_y, bottom_right_x, bottom_right_y]"""
-        return np.asarray([self.xmin, self.ymax, self.xmax, self.ymin])
-
     def center_format(self):
         """center_x, center_y, width, height"""
         return np.asarray([

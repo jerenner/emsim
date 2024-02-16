@@ -77,7 +77,7 @@ class MultiscaleFrame:
 
 
 @dataclass
-class PixelSet:
+class MultiscalePixelSet:
     incidence: IncidencePoint
     lowres_image_size: Rectangle
     highres_image_size: Rectangle

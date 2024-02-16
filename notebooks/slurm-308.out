@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/basch/emsim/notebooks/resnet_mnist.py", line 51, in <module>
+    train_loader, val_loader = get_data_loaders(32, 6) # put your data loader here
+                               ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/emsim/notebooks/resnet_mnist.py", line 24, in get_data_loaders
+    mnist = MNIST(download=False, train=True, root=".").train_data.float()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/miniconda3/envs/emsim/lib/python3.11/site-packages/torchvision/datasets/mnist.py", line 102, in __init__
+    raise RuntimeError("Dataset not found. You can use download=True to download it")
+RuntimeError: Dataset not found. You can use download=True to download it

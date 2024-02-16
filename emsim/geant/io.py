@@ -138,6 +138,10 @@ def read_trajectory_file(filename: str) -> List[Trajectory]:
                     )
                 )
             else:
+                if len(line.split(" ")) != 7:
+                    print(line.split(" "))
+                    print(filename)
+
                 x, y, z, edep, electron_id, x0, y0 = line.split(" ")
                 assert int(electron_id) == traj[0].electron_id
                 assert float(x0) == float(traj[0].x0)

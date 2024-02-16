@@ -1,0 +1,9 @@
+mkdir: cannot create directory ‘test_output’: File exists
+device is cuda
+Traceback (most recent call last):
+  File "/home/basch/emsim/notebooks/geant_localization.py", line 136, in <module>
+    main(backbone_types, noise_levels)
+  File "/home/basch/emsim/notebooks/geant_localization.py", line 58, in main
+    test_batch = next(iter(test_loader)).to(device)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'dict' object has no attribute 'to'

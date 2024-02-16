@@ -44,8 +44,8 @@ def main(backbone_types, noise_levels):
     else:
         device = "cpu"
 
-    pixels_file = "../segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt"
-    trajectory_file = "../segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt"
+    pixels_file = "/global/homes/b/basch/emsim/segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt"
+    trajectory_file = "/global/homes/b/basch/emsim/B1-build/test_20k/e300keV_thinned_4um_back_20k.txt"
     for backbone_type in backbone_types:
         for noise_std in noise_levels:
 
@@ -82,7 +82,7 @@ def main(backbone_types, noise_levels):
 
             timing_gaussian = timeit.timeit('result = model(test_batch["pixel_patches"].to(device))', globals=globals())
 
-            with open(f"test_output/{backbone}_noise_{noise_std}", "w") as f:
+            with open(f"/global/homes/b/basch/emsim/notebooks/test_output/{backbone}_noise_{noise_std}", "w") as f:
                 f.write(f"Pointwise NN mean distances: {nn_distances_pointwise.mean()}")
                 f.write(f"Pointwise COM mean distances: {com_distances_pointwise.mean()}")
                 f.write(f"Pointwise Model Time: {timing_pointwise}")
@@ -98,7 +98,7 @@ if __name__ == "__main__":
     noise_levels = []
     backbone_types = []
 
-    os.system("mkdir test_output")
+    os.system("mkdir /global/homes/b/basch/emsim/notebooks/test_output")
 
     i = 2
     if arguments[1] != "-m":

@@ -149,6 +149,25 @@ class GeantElectronDataset(IterableDataset):
                     "local_trajectories_pixels": local_trajectories_pixels
                 }
 
+    def make_composite_image(self, elecs: list[GeantElectron]) -> np.ndarray:
+        arrays = [
+            sparsearray_from_pixels(
+                elec.pixels, (self.grid.xmax_pixel, self.grid.ymax_pixel)
+            )
+            for elec in elecs
+        ]
+        image = np.array(sum(arrays).todense(), dtype=np.float32)
+
+        if float(self.noise_std) > 0:
+            image = image + np.random.normal(
+                0.0, float(self.noise_std), size=image.shape
+            ).astype(np.float32)
+
+        # add channel dimension
+        image = np.expand_dims(image, 0)
+
+        return image
+
 class MaskElectronDataset(IterableDataset):
     def __init__(
         self,

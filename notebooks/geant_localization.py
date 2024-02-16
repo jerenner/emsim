@@ -102,7 +102,7 @@ if __name__ == "__main__":
     noise_levels = []
     backbone_types = []
 
-    os.system("mkdir test_output")
+    os.system("mkdir /global/homes/b/basch/emsim/notebooks/test_output")
 
     i = 2
     if arguments[1] != "-m":

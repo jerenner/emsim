@@ -172,9 +172,9 @@ class GeantElectronDataset(IterableDataset):
         ]
         image = np.array(sum(arrays).todense(), dtype=np.float32)
 
-        if self.noise_std > 0:
+        if float(self.noise_std) > 0:
             image = image + np.random.normal(
-                0.0, self.noise_std, size=image.shape
+                0.0, float(self.noise_std), size=image.shape
             ).astype(np.float32)
 
         # add channel dimension

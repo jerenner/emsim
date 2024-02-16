@@ -40,19 +40,21 @@ def is_num(source):
 
 def main(backbone_types, noise_levels):
     if torch.cuda.is_available():
-        device = "cuda"
+        print("device is cuda")
+        device = torch.device("cuda")
     else:
+        print("device is cpu")
         device = "cpu"
 
     pixels_file = "../segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt"
-    trajectory_file = "../segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt"
+    trajectory_file = "../B1-build/test_20k/e300keV_thinned_4um_back_20k.txt"
     for backbone_type in backbone_types:
         for noise_std in noise_levels:
 
-            dataset = GeantElectronDataset(pixels_file, [128, 129], 7, noise_std=noise_std, trajectory_file=trajectory_file)
-            test_dataset = GeantElectronDataset(pixels_file, [128, 129], 7, noise_std=noise_std, trajectory_file=trajectory_file, split="test")
+            dataset = GeantElectronDataset(pixels_file, [128, 129], 7, noise_std=float(noise_std), trajectory_file=trajectory_file)
+            test_dataset = GeantElectronDataset(pixels_file, [128, 129], 7, noise_std=float(noise_std), trajectory_file=trajectory_file, split="test")
 
-            test_loader = DataLoader(test_dataset, 1, collate_fn=electron_collate_fn)
+            test_loader = DataLoader(test_dataset, 1, collate_fn=electron_collate_fn, pin_memory=True)
             test_batch = next(iter(test_loader))
 
             backbone = timm.create_model(backbone_type, in_chans=1, num_classes=0)
@@ -68,7 +70,8 @@ def main(backbone_types, noise_levels):
 
             test_batch_input = test_batch["pixel_patches"].to(device)
 
-            timing_pointwise = timeit.timeit('result = model(test_batch["pixel_patches"].to(device))', globals=globals())
+            timing_pointwise = timeit.timeit(lambda: model(test_batch["pixel_patches"].to(device)), number=1, globals=globals())
+            print(timing_pointwise)
 
             backbone = timm.create_model("resnet18", in_chans=1, num_classes=0)
             model2 = GaussianIncidencePointPredictor(backbone).to(device)
@@ -80,16 +83,17 @@ def main(backbone_types, noise_levels):
             print(f"{nn_distances_gaussian.mean()=}")
             print(f"{com_distances_gaussian.mean()=}")
 
-            timing_gaussian = timeit.timeit('result = model(test_batch["pixel_patches"].to(device))', globals=globals())
+            timing_gaussian = timeit.timeit(lambda: model2(test_batch["pixel_patches"].to(device)), number=1, globals=globals())
+            print(timing_gaussian)
 
-            with open(f"test_output/{backbone}_noise_{noise_std}", "w") as f:
-                f.write(f"Pointwise NN mean distances: {nn_distances_pointwise.mean()}")
-                f.write(f"Pointwise COM mean distances: {com_distances_pointwise.mean()}")
-                f.write(f"Pointwise Model Time: {timing_pointwise}")
+            with open(f"test_output/{backbone_type}_noise_{noise_std}", "w") as f:
+                f.write(f"Pointwise NN mean distances: {nn_distances_pointwise.mean()}\n")
+                f.write(f"Pointwise COM mean distances: {com_distances_pointwise.mean()}\n")
+                f.write(f"Pointwise Model Time: {timing_pointwise}\n")
 
-                f.write(f"Gaussian NN mean distances: {nn_distances_gaussian.mean()}")
-                f.write(f"Gaussian COM mean distances: {com_distances_gaussian.mean()}")
-                f.write(f"Gaussian Model Time: {timing_gaussian}")
+                f.write(f"Gaussian NN mean distances: {nn_distances_gaussian.mean()}\n")
+                f.write(f"Gaussian COM mean distances: {com_distances_gaussian.mean()}\n")
+                f.write(f"Gaussian Model Time: {timing_gaussian}\n")
 
 
 if __name__ == "__main__":

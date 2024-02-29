@@ -3,7 +3,6 @@ from random import shuffle
 from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
-from scipy import sparse
 import sparse
 import torch
 import torch.nn.functional as F
@@ -203,10 +202,6 @@ def sparse_single_electron_arrays(electrons: list[GeantElectron], dtype=np.float
         )
         for electron in electrons
     ]
-    # convert to "sparse" package objects
-    single_electron_arrays = [
-        sparse.COO.from_scipy_sparse(array) for array in single_electron_arrays
-    ]
     sparse_array = sparse.stack(single_electron_arrays, -1)
     return sparse_array
 
@@ -230,8 +225,13 @@ def sparsearray_from_pixels(
         x_indices = x_indices - offset_x
     if offset_y is not None:
         y_indices = y_indices - offset_y
-    array = sparse.coo_array((np.array(data, dtype=dtype), (y_indices, x_indices)), shape=shape)
-    return array.tocsr()
+    # array = scipy.sparse.coo_array((np.array(data, dtype=dtype), (y_indices, x_indices)), shape=shape)
+    array = sparse.COO(
+        np.stack([y_indices, x_indices], 0),
+        np.array(data, dtype=dtype),
+        shape=shape
+    )
+    return array
 
 
 def normalize_boxes(boxes: list[BoundingBox], image_width: int, image_height: int):

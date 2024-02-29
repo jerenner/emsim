@@ -26,8 +26,12 @@ def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor):
     indices = tensor.indices.transpose(0, 1)
     values = tensor.features
     return torch.sparse_coo_tensor(
-        indices, values, size, device=tensor.features.device, dtype=tensor.features.dtype,
-        requires_grad=tensor.features.requires_grad
+        indices,
+        values,
+        size,
+        device=tensor.features.device,
+        dtype=tensor.features.dtype,
+        requires_grad=tensor.features.requires_grad,
     )
 
 
@@ -47,20 +51,25 @@ def gather_from_sparse_tensor(sparse_tensor: Tensor, index_tensor: Tensor):
         Tensor: Tensor of dimension ..., M; where the leading dimensions are
         the same as the batch dimensions from `index_tensor`
     """
-    sparse_shape = sparse_tensor.shape[:sparse_tensor.sparse_dim()]
+    sparse_shape = sparse_tensor.shape[: sparse_tensor.sparse_dim()]
     dim_linear_offsets = index_tensor.new_tensor(
-        [np.prod(sparse_shape[i+1:] + (1,)) for i in range(len(sparse_shape))]
+        [np.prod(sparse_shape[i + 1 :] + (1,)) for i in range(len(sparse_shape))]
     )
 
-    sparse_tensor_indices_linear = (sparse_tensor.indices() * dim_linear_offsets.unsqueeze(-1)).sum(0, keepdim=True)
-    linear_shape = tuple(np.prod(sparse_shape, keepdims=True)) + sparse_tensor.shape[-sparse_tensor.dense_dim():]
+    sparse_tensor_indices_linear = (
+        sparse_tensor.indices() * dim_linear_offsets.unsqueeze(-1)
+    ).sum(0, keepdim=True)
+    linear_shape = (
+        tuple(np.prod(sparse_shape, keepdims=True))
+        + sparse_tensor.shape[-sparse_tensor.dense_dim() :]
+    )
     sparse_tensor_linearized = torch.sparse_coo_tensor(
         sparse_tensor_indices_linear,
         sparse_tensor.values(),
         linear_shape,
         dtype=sparse_tensor.dtype,
         device=sparse_tensor.device,
-        requires_grad=sparse_tensor.requires_grad
+        requires_grad=sparse_tensor.requires_grad,
     )
 
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
@@ -69,9 +78,13 @@ def gather_from_sparse_tensor(sparse_tensor: Tensor, index_tensor: Tensor):
 
     index_tensor_shape = index_tensor.shape
     index_tensor_linearized = (index_tensor * dim_linear_offsets).sum(-1)
-    index_tensor_linearized = index_tensor_linearized.reshape(-1, )
+    index_tensor_linearized = index_tensor_linearized.reshape(
+        -1,
+    )
 
-    selected = sparse_tensor_linearized.index_select(0, index_tensor_linearized).to_dense()
+    selected = sparse_tensor_linearized.index_select(
+        0, index_tensor_linearized
+    ).to_dense()
     selected = selected.reshape(*index_tensor_shape[:-1], selected.shape[-1])
     return selected
 

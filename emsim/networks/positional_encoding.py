@@ -45,7 +45,7 @@ class RelativePositionalEncodingMLP(nn.Module):
         in_dim: int,
         hidden_dim: int,
         out_dim: int,
-        act_layer: nn.Module = nn.ReLU
+        act_layer: nn.Module = nn.GELU
     ):
         super().__init__()
         self.net = nn.Sequential(
@@ -58,7 +58,7 @@ class RelativePositionalEncodingMLP(nn.Module):
         return self.net(x)
 
 
-class RelativePositionalEncoding(nn.Module):
+class RelativePositionalEncodingTableInterpolate(nn.Module):
     def __init__(
         self,
         dim: int,

@@ -2,16 +2,17 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributions import MultivariateNormal
+from math import log
 
 
 class GaussianIncidencePointPredictor(nn.Module):
-    def __init__(self, backbone, hidden_dim=512, mean_parameterization="sigmoid", diagonal_covariance=False, eps=1e-6, max_cov=1e6):
+    def __init__(self, backbone, hidden_dim=512, mean_parameterization="sigmoid", diagonal_covariance=False, eps=1e-6, max_cov=1e5):
         super().__init__()
         self.mean_parameterization = mean_parameterization
         self.backbone = backbone
         self.diagonal_covariance = diagonal_covariance
         self.eps = eps
-        self.max_cov = max_cov
+        self.log_max_cov = log(max_cov)
 
         if diagonal_covariance:
             out_dim = 4
@@ -35,8 +36,9 @@ class GaussianIncidencePointPredictor(nn.Module):
         else:
             mean_vector, cholesky_diagonal, cholesky_offdiag = torch.split(x, [2, 2, 1], -1)
 
+        cholesky_diagonal = torch.clamp_max(cholesky_diagonal, self.log_max_cov)
         cholesky_diagonal = cholesky_diagonal.exp()
-        cholesky_diagonal = torch.clamp(cholesky_diagonal, self.eps, self.max_cov)
+        cholesky_diagonal = torch.clamp_min(cholesky_diagonal, self.eps)
         cholesky = torch.diag_embed(cholesky_diagonal)
         if not self.diagonal_covariance:
             tril_indices = torch.tril_indices(2, 2, offset=-1, device=x.device)
@@ -47,9 +49,9 @@ class GaussianIncidencePointPredictor(nn.Module):
             mean_vector = F.sigmoid(mean_vector)
             # scale the mean vector to the size of the patch
             scaling_matrix = torch.diag_embed(patch_shape)
-            inverse_scaling_matrix = torch.diag_embed(1 / patch_shape)
+            # inverse_scaling_matrix = torch.diag_embed(1 / patch_shape)
             mean_vector = torch.squeeze(scaling_matrix @ mean_vector.unsqueeze(-1), -1)
-            cholesky = inverse_scaling_matrix @ cholesky
+            # cholesky = inverse_scaling_matrix @ cholesky
 
         return MultivariateNormal(mean_vector, scale_tril=cholesky)
 

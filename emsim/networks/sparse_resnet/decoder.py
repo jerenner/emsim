@@ -73,7 +73,9 @@ class SparseUnetDecoder(spconv.SparseModule):
     def forward(self, x: list[spconv.SparseConvTensor]):
         skips = x[1:]
         x = x[0]
+        outputs = []
         for i, stage in enumerate(self.stages):
             skip = skips[i] if i < len(skips) else None
             x = stage(x, skip)
-        return x
+            outputs.append(x)
+        return outputs

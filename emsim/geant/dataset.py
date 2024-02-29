@@ -1,21 +1,20 @@
 from math import ceil, floor
 from random import shuffle
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
+from scipy import sparse
 import sparse
 import torch
 import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 
-from emsim.dataclasses import IonizationElectronPixel
-from emsim.geant.dataclasses import GeantElectron, Trajectory
+from emsim.dataclasses import BoundingBox, IonizationElectronPixel, PixelSet
+from emsim.geant.dataclasses import GeantElectron, Trajectory, GeantGridsize
 from emsim.geant.io import read_files
-from emsim.utils import (
+from emsim.utils.misc_utils import (
     random_chunks,
-    normalize_boxes,
-    sparsearray_from_pixels,
 )
 
 # keys in here will not be batched in the collate fn
@@ -25,7 +24,16 @@ _KEYS_TO_NOT_BATCH = ("local_trajectories_pixels", "hybrid_sparse_tensors")
 _TO_DEFAULT_COLLATE = ("image", "batch_size")
 
 # these sparse arrays get stacked with an extra batch dimension
-_SPARSE_STACK = ("segmentation_background", "image_sparsified", "segmentation_mask")
+_SPARSE_STACK = (
+    "segmentation_background",
+    "image_sparsified",
+    "segmentation_mask",
+    "electron_count_map_1/1",
+    "electron_count_map_1/2",
+    "electron_count_map_1/4",
+    "electron_count_map_1/8",
+    "electron_count_map_1/16",
+)
 
 # these sparse arrays get concatenated, with no batch dimension
 _SPARSE_CONCAT = []
@@ -89,8 +97,11 @@ class GeantElectronDataset(IterableDataset):
             batch["batch_size"] = len(elecs)
             batch["hybrid_sparse_tensors"] = self.hybrid_sparse_tensors
 
+            # stacked sparse arrays of single electron strikes
+            stacked_sparse_arrays = sparse_single_electron_arrays(elecs)
+
             # composite electron image
-            batch["image"] = self.make_composite_image(elecs)
+            batch["image"] = self.make_composite_image(stacked_sparse_arrays)
 
             # bounding boxes
             boxes = [elec.pixels.get_bounding_box() for elec in elecs]
@@ -111,31 +122,32 @@ class GeantElectronDataset(IterableDataset):
                 [self.pixel_to_mm, self.pixel_to_mm]
             )
             batch["pixel_patches"] = patches.astype(np.float32)
-            batch["patch_coords"] = patch_coords.astype(int)
+            batch["patch_coords_xyxy"] = patch_coords.astype(int)
 
             # actual point the geant electron hit the detector surface
-            incidence_points = np.stack(
+            incidence_points_xy = np.stack(
                 [
                     np.array([elec.incidence.x, elec.incidence.y], dtype=np.float32)
                     for elec in elecs
                 ]
             )
-            local_incidence_points_mm = incidence_points - patch_coords_mm[:, :2]
+            local_incidence_points_mm = incidence_points_xy - patch_coords_mm[:, :2]
             local_incidence_points_pixels = (
                 local_incidence_points_mm / self.pixel_to_mm.astype(np.float32)
             )
-            batch["incidence_points"] = incidence_points.astype(np.float32)
-            batch[
-                "local_incidence_points_pixels"
-            ] = local_incidence_points_pixels.astype(np.float32)
+            batch["incidence_points_xy"] = incidence_points_xy.astype(np.float32)
+            batch["local_incidence_points_pixels_xy"] = (
+                local_incidence_points_pixels.astype(np.float32)
+            )
 
             # center of mass for each patch
             local_centers_of_mass_pixels = charge_2d_center_of_mass(patches)
-            batch["local_centers_of_mass_pixels"] = local_centers_of_mass_pixels.astype(
+            batch["local_centers_of_mass_pixels_xy"] = local_centers_of_mass_pixels.astype(
                 np.float32
             )
 
             # whole trajectories, if trajectory file is given
+            # Note: could have x/y out of order, need to check if needed
             if self.trajectory_file is not None:
                 local_trajectories = [
                     elec.trajectory.localize(coords[0], coords[1]).as_array()
@@ -150,9 +162,15 @@ class GeantElectronDataset(IterableDataset):
                 batch["local_trajectories_pixels"] = local_trajectories_pixels
 
             # per-electron segmentation mask
-            segmentation_mask, background = make_soft_segmentation_mask(elecs)
+            segmentation_mask, background = make_soft_segmentation_mask(stacked_sparse_arrays)
             batch["segmentation_mask"] = segmentation_mask
             batch["segmentation_background"] = background
+
+            # multiscale incidence count maps
+            incidence_points_rc = incidence_points_xy[...,::-1]
+            incidence_map = incident_pixel_map(incidence_points_rc, elecs[0].grid)
+            count_maps = multiscale_electron_count_maps(incidence_map)
+            batch.update(count_maps)
 
             if self.processor is not None:
                 batch = self.processor(batch)
@@ -162,19 +180,14 @@ class GeantElectronDataset(IterableDataset):
 
             yield batch
 
-    def make_composite_image(self, elecs: list[GeantElectron]) -> np.ndarray:
-        arrays = [
-            sparsearray_from_pixels(
-                elec.pixels, (self.grid.xmax_pixel, self.grid.ymax_pixel)
-            )
-            for elec in elecs
-        ]
-        image = np.array(sum(arrays).todense(), dtype=np.float32)
+    def make_composite_image(self, stacked_sparse_arrays: sparse.SparseArray) -> np.ndarray:
+        summed = stacked_sparse_arrays.sum(-1)
+        image = summed.todense()
 
         if self.noise_std > 0:
             image = image + np.random.normal(
                 0.0, self.noise_std, size=image.shape
-            ).astype(np.float32)
+            ).astype(image.dtype)
 
         # add channel dimension
         image = np.expand_dims(image, 0)
@@ -182,7 +195,7 @@ class GeantElectronDataset(IterableDataset):
         return image
 
 
-def make_soft_segmentation_mask(electrons: list[GeantElectron], dtype=np.float32):
+def sparse_single_electron_arrays(electrons: list[GeantElectron], dtype=np.float32):
     grid = electrons[0].grid
     single_electron_arrays = [
         sparsearray_from_pixels(
@@ -190,20 +203,89 @@ def make_soft_segmentation_mask(electrons: list[GeantElectron], dtype=np.float32
         )
         for electron in electrons
     ]
-
     # convert to "sparse" package objects
     single_electron_arrays = [
         sparse.COO.from_scipy_sparse(array) for array in single_electron_arrays
     ]
     sparse_array = sparse.stack(single_electron_arrays, -1)
-    sparse_sum = sparse_array.sum(-1, keepdims=True)
+    return sparse_array
+
+
+def sparsearray_from_pixels(
+    pixelset: PixelSet,
+    shape: Tuple[int],
+    offset_x: Optional[int] = None,
+    offset_y: Optional[int] = None,
+    dtype=None
+):
+    x_indices, y_indices, data = [], [], []
+    for p in pixelset:
+        x_index, y_index = p.index()
+        x_indices.append(x_index)
+        y_indices.append(y_index)
+        data.append(p.data)
+    x_indices = np.array(x_indices)  # columns
+    y_indices = np.array(y_indices)  # rows
+    if offset_x is not None:
+        x_indices = x_indices - offset_x
+    if offset_y is not None:
+        y_indices = y_indices - offset_y
+    array = sparse.coo_array((np.array(data, dtype=dtype), (y_indices, x_indices)), shape=shape)
+    return array.tocsr()
+
+
+def normalize_boxes(boxes: list[BoundingBox], image_width: int, image_height: int):
+    center_format_boxes = np.stack([box.center_format() for box in boxes], 0)
+    center_format_boxes /= np.array(
+        [image_width, image_height, image_width, image_height]
+    )
+    return center_format_boxes
+
+
+def make_soft_segmentation_mask(stacked_sparse_arrays: sparse.SparseArray):
+    sparse_sum = stacked_sparse_arrays.sum(-1, keepdims=True)
 
     background = ~sparse_sum.astype(bool)
     denom = sparse_sum + background
 
-    sparse_soft_segmap = sparse_array / denom
+    sparse_soft_segmap = stacked_sparse_arrays / denom
 
     return sparse_soft_segmap, background
+
+
+def incident_pixel_map(
+    incidence_points: np.ndarray, grid: GeantGridsize
+) -> sparse.SparseArray:
+    incidence_pixels = incidence_points // (grid.pixel_size_um / np.array(1000))
+    incidence_pixels = incidence_pixels.astype(int)
+    pixels, counts = np.unique(incidence_pixels, return_counts=True, axis=0)
+    out = sparse.COO(pixels.T, counts, shape=(grid.xmax_pixel, grid.ymax_pixel))
+    return out
+
+
+def multiscale_electron_count_maps(
+    incidence_map: sparse.SparseArray,
+    downscaling_levels: list[int] = [1, 2, 4, 8, 16],
+) -> list[sparse.SparseArray]:
+    width, height = incidence_map.shape
+
+    out = {}
+    for ds in downscaling_levels:
+        array = incidence_map.copy()
+
+        if ds > 1:
+            # prune the last row/column if not evenly divisible
+
+            width_remainder = width % ds
+            height_remainder = height % ds
+            array = array[: width - width_remainder, : height - height_remainder]
+
+            # sum up over windows
+            array = array.reshape([width // ds, ds, height // ds, ds]).sum([1, 3])
+
+        out[f"electron_count_map_1/{ds}"] = array
+
+    return out
 
 
 def get_pixel_patches(
@@ -241,9 +323,7 @@ def get_pixel_patches(
         pad_right = max(0, col_max - image.shape[-1])
 
         patch = image[..., row_min:row_max, col_min:col_max]
-        patch = np.pad(
-            patch, ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right))
-        )
+        patch = np.pad(patch, ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right)))
 
         patches.append(patch)
     return np.stack(patches, 0), np.stack(patch_coordinates, 0)
@@ -256,32 +336,32 @@ def charge_2d_center_of_mass(patches: np.ndarray, com_patch_size=3):
         # add batch dim
         patches = np.expand_dims(patches, 0)
 
-    patch_x_len = patches.shape[-2]
-    patch_y_len = patches.shape[-1]
+    patch_r_len = patches.shape[-2]
+    patch_c_len = patches.shape[-1]
     coord_grid = np.stack(
         np.meshgrid(
             np.arange(0.5, patches.shape[-2], 1), np.arange(0.5, patches.shape[-1], 1)
         )
     )
 
-    patch_x_mid = patch_x_len / 2
-    patch_y_mid = patch_y_len / 2
+    patch_r_mid = patch_r_len / 2
+    patch_c_mid = patch_c_len / 2
 
     patch_radius = com_patch_size // 2
 
     patches = patches[
         ...,
-        floor(patch_x_mid) - patch_radius : ceil(patch_x_mid) + patch_radius,
-        floor(patch_y_mid) - patch_radius : ceil(patch_y_mid) + patch_radius,
+        floor(patch_r_mid) - patch_radius : ceil(patch_r_mid) + patch_radius,
+        floor(patch_c_mid) - patch_radius : ceil(patch_c_mid) + patch_radius,
     ]
     coord_grid = coord_grid[
         ...,
-        floor(patch_x_mid) - patch_radius : ceil(patch_x_mid) + patch_radius,
-        floor(patch_y_mid) - patch_radius : ceil(patch_y_mid) + patch_radius,
+        floor(patch_r_mid) - patch_radius : ceil(patch_r_mid) + patch_radius,
+        floor(patch_c_mid) - patch_radius : ceil(patch_c_mid) + patch_radius,
     ]
 
-    # patches: batch * 1 * x * y
-    # coord grid: 1 * 2 * x * y
+    # patches: batch * 1 * r * c
+    # coord grid: 1 * 2 * r * c
     coord_grid = np.expand_dims(coord_grid, 0)
 
     weighted_grid = patches * coord_grid
@@ -311,6 +391,13 @@ def electron_collate_fn(
             for to_default, electron in zip(to_default_collate, batch):
                 to_default[key] = electron[key]
         else:
+            # if isinstance(first[key], (list, tuple)):
+            #     sub_batch = [
+            #         {
+            #             str(i):
+            #         }
+            #     ]
+            #     batch[key] = e[{}]
             lengths = [len(sample[key]) for sample in batch]
             if isinstance(first[key], sparse.SparseArray):
                 if key in _SPARSE_CONCAT:
@@ -396,9 +483,10 @@ def plot_pixel_patch_and_points(
     ellipse_n_stds: list[int] = [1.0, 2.0, 3.0],
     ellipse_facecolor: str = "none",
     ellipse_colors: list[str] = ["blue", "purple", "red"],
-    ellipse_kwargs: Optional[dict] = None
+    ellipse_kwargs: Optional[dict] = None,
 ):
     import matplotlib.pyplot as plt
+
     ellipse_kwargs = ellipse_kwargs or {}
 
     pixel_patch = pixel_patch.squeeze()
@@ -417,7 +505,15 @@ def plot_pixel_patch_and_points(
         ax.legend(point_labels)
     if ellipse_mean is not None and ellipse_cov is not None:
         for n_std, color in zip(ellipse_n_stds, ellipse_colors):
-            plot_ellipse(ax, ellipse_mean, ellipse_cov, n_std, ellipse_facecolor, ellipse_color=color, **ellipse_kwargs)
+            plot_ellipse(
+                ax,
+                ellipse_mean,
+                ellipse_cov,
+                n_std,
+                ellipse_facecolor,
+                ellipse_color=color,
+                **ellipse_kwargs,
+            )
     return fig, ax
 
 
@@ -428,7 +524,7 @@ def eigsorted(cov):
     else:
         squeeze_cov = False
     evals, evecs = np.linalg.eigh(cov)
-    order = evals.argsort(-1)[:,::-1]
+    order = evals.argsort(-1)[:, ::-1]
     sorted_evals = np.stack([val[ord] for val, ord in zip(evals, order)])
     sorted_evecs = np.stack([vec[:, ord] for vec, ord in zip(evecs, order)])
     if squeeze_cov:
@@ -436,7 +532,9 @@ def eigsorted(cov):
     return sorted_evals, sorted_evecs
 
 
-def plot_ellipse(ax, mean, cov, n_std=1.0, facecolor="none", ellipse_color="red", **kwargs):
+def plot_ellipse(
+    ax, mean, cov, n_std=1.0, facecolor="none", ellipse_color="red", **kwargs
+):
     # https://matplotlib.org/stable/gallery/statistics/confidence_ellipse.html
     import matplotlib.transforms as transforms
     from matplotlib.patches import Ellipse
@@ -451,5 +549,9 @@ def plot_ellipse(ax, mean, cov, n_std=1.0, facecolor="none", ellipse_color="red"
         width=evals_sqrt[0] * 2 * n_std,
         height=evals_sqrt[1] * 2 * n_std,
         angle=angle,
-        edgecolor=ellipse_color, linestyle="--", facecolor=facecolor, **kwargs)
+        edgecolor=ellipse_color,
+        linestyle="--",
+        facecolor=facecolor,
+        **kwargs,
+    )
     ax.add_patch(ellipse)

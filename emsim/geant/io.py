@@ -25,14 +25,15 @@ def read_files(pixels_file: str, trajectory_file: str = None) -> List[GeantElect
 
     electrons = []
     for event, trajectory in zip(pixel_events, trajectories):
-        elec = GeantElectron(
-            id=event.incidence.id,
-            incidence=event.incidence,
-            pixels=event.pixelset,
-            grid=grid,
-            trajectory=trajectory,
-        )
-        electrons.append(elec)
+        if len(event.pixelset._pixels) > 0:
+            elec = GeantElectron(
+                id=event.incidence.id,
+                incidence=event.incidence,
+                pixels=event.pixelset,
+                grid=grid,
+                trajectory=trajectory,
+            )
+            electrons.append(elec)
 
     return electrons
 

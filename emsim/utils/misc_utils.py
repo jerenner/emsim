@@ -1,24 +1,19 @@
-from copy import copy
-from random import randint
+import numpy as np
 from typing import Any, List
 
 import torch
 
 
 def random_chunks(x: List[Any], min_size: int, max_size: int):
-    out = []
-    x = copy(x)
-    while x:
-        part = []
-        out.append(part)
-        partition_size = randint(min_size, max_size)
-        while len(part) < partition_size:
-            try:
-                part.append(x.pop(0))
-            except IndexError:
-                return out
-
-    return out
+    chunk_sizes = np.concatenate(
+        [[0], np.random.randint(min_size, max_size, size=len(x) // min_size)], 0
+    )
+    start_indices = np.cumsum(chunk_sizes)
+    chunked = [
+        x[start:stop] for start, stop in zip(start_indices[:-1], start_indices[1:])
+    ]
+    chunked = [c for c in chunked if len(c) > 0]
+    return chunked
 
 
 def tensors_same_size(tensors: list[torch.Tensor]) -> bool:

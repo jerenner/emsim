@@ -2,7 +2,7 @@ import numpy as np
 import sparse
 import torch
 import torch.nn.functional as F
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import grey_dilation
 
 
 class NSigmaSparsifyTransform:
@@ -78,10 +78,10 @@ def numpy_sigma_energy_threshold_sparsify(
         raise ValueError(f"Expected an odd `window_size`, got {window_size=}")
     if image.ndim == 4:
         reduce_dims = (-1, -2, -3)
-        kernel = np.ones((1, 1, window_size, window_size), dtype=bool)
+        kernel_size = (1, 1, window_size, window_size)
     elif image.ndim == 3:
         reduce_dims = (-1, -2)
-        kernel = np.ones((1, window_size, window_size), dtype=bool)
+        kernel_size = (1, window_size, window_size)
     else:
         raise ValueError
 
@@ -89,7 +89,7 @@ def numpy_sigma_energy_threshold_sparsify(
     std = np.std(image, reduce_dims, keepdims=True)
     thresholded = image > mean + background_threshold_n_sigma * std
 
-    conved = binary_dilation(thresholded, kernel)
+    conved = grey_dilation(thresholded, kernel_size)
     indices = conved.nonzero()
     values = image[indices]
     out = sparse.COO(indices, values, shape=image.shape)

@@ -1,5 +1,4 @@
 from math import ceil, floor
-from random import shuffle
 from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
@@ -53,7 +52,8 @@ class GeantElectronDataset(IterableDataset):
         processor: Callable = None,
         transform: Callable = None,
         noise_std: float = 1.0,
-        shuffle=True,
+        shuffle: bool = True,
+        seed: Optional[int] = None,
     ):
         assert 0 < train_percentage <= 1
         assert split in ("train", "test")
@@ -82,11 +82,12 @@ class GeantElectronDataset(IterableDataset):
         self.shuffle = shuffle
         self.processor = processor
         self.transform = transform
+        self._rng = np.random.default_rng(seed=seed)
 
     def __iter__(self):
         elec_indices = list(range(len(self.electrons)))
         if self.shuffle:
-            shuffle(elec_indices)
+            self._rng.shuffle(elec_indices)
         chunks = random_chunks(elec_indices, *self.events_per_image_range)
 
         for chunk in chunks:
@@ -184,7 +185,7 @@ class GeantElectronDataset(IterableDataset):
         image = summed.todense()
 
         if self.noise_std > 0:
-            image = image + np.random.normal(
+            image = image + self._rng.normal(
                 0.0, self.noise_std, size=image.shape
             ).astype(image.dtype)
 

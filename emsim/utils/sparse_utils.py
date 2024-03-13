@@ -1,10 +1,11 @@
-from .batching_utils import batch_dim_to_leading_index
+import re
+
 import numpy as np
-from torch import Tensor
 import spconv.pytorch as spconv
-
-
 import torch
+from torch import Tensor
+
+from .batching_utils import batch_dim_to_leading_index
 
 
 def torch_sparse_to_spconv(tensor: torch.Tensor):
@@ -33,6 +34,40 @@ def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor):
         dtype=tensor.features.dtype,
         requires_grad=tensor.features.requires_grad,
     )
+
+
+def unpack_sparse_tensors(batch: dict[str, Tensor]):
+    prefixes_indices = [
+        match[0]
+        for match in [re.match(".+(?=_indices$)", key) for key in batch.keys()]
+        if match is not None
+    ]
+    prefixes_values = [
+        match[0]
+        for match in [re.match(".+(?=_values$)", key) for key in batch.keys()]
+        if match is not None
+    ]
+    prefixes_shape = [
+        match[0]
+        for match in [re.match(".+(?=_shape$)", key) for key in batch.keys()]
+        if match is not None
+    ]
+    prefixes = list(set(prefixes_indices) & set(prefixes_values) & set(prefixes_shape))
+    for prefix in prefixes:
+        shape = batch[prefix + "_shape"]
+        if isinstance(shape, Tensor):
+            shape = shape.tolist()
+        batch[prefix] = torch.sparse_coo_tensor(
+            batch[prefix + "_indices"],
+            batch[prefix + "_values"],
+            shape,
+            dtype=batch[prefix + "_values"].dtype,
+            device=batch[prefix + "_values"].device
+        ).coalesce()
+        del batch[prefix + "_indices"]
+        del batch[prefix + "_values"]
+        del batch[prefix + "_shape"]
+    return batch
 
 
 def gather_from_sparse_tensor(sparse_tensor: Tensor, index_tensor: Tensor):

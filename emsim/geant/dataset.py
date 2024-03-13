@@ -409,12 +409,9 @@ def electron_collate_fn(
                     to_stack = _sparse_pad([sample[key] for sample in batch])
                     sparse_batched = sparse.stack(to_stack, axis=0)
 
-                if first.get("hybrid_sparse_tensors", False):
-                    out_batch[key] = sparse_to_torch_hybrid(sparse_batched)
-                else:
-                    out_batch[key] = torch.sparse_coo_tensor(
-                        sparse_batched.coords, sparse_batched.data, sparse_batched.shape
-                    ).coalesce()
+                out_batch[key + "_indices"] = torch.tensor(sparse_batched.coords)
+                out_batch[key + "_values"] = torch.tensor(sparse_batched.data)
+                out_batch[key + "_shape"] = sparse_batched.shape
 
                 # batch offsets for the nonzero points in the sparse tensor
                 # (can find this later by finding first appearance of each batch

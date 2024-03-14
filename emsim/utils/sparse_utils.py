@@ -9,6 +9,14 @@ from .batching_utils import batch_dim_to_leading_index
 
 
 def torch_sparse_to_spconv(tensor: torch.Tensor):
+    """Converts a sparse torch.Tensor to an equivalent spconv SparseConvTensor
+
+    Args:
+        tensor (torch.Tensor): Sparse tensor to be converted
+
+    Returns:
+        SparseConvTensor: Converted spconv tensor
+    """
     assert tensor.is_sparse
     spatial_shape = tensor.shape[1:-1]
     batch_size = tensor.shape[0]
@@ -22,6 +30,14 @@ def torch_sparse_to_spconv(tensor: torch.Tensor):
 
 
 def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor):
+    """Converts an spconv SparseConvTensor to a sparse torch.Tensor
+
+    Args:
+        tensor (spconv.SparseConvTensor): spconv tensor to be converted
+
+    Returns:
+        torch.Tensor: Converted sparse torch.Tensor
+    """
     assert isinstance(tensor, spconv.SparseConvTensor)
     size = [tensor.batch_size] + tensor.spatial_shape + [tensor.features.shape[-1]]
     indices = tensor.indices.transpose(0, 1)
@@ -37,6 +53,17 @@ def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor):
 
 
 def unpack_sparse_tensors(batch: dict[str, Tensor]):
+    """
+    Takes in a batch dict and converts packed sparse tensors (with separate
+    indices and values tensors, and shape tuple) into sparse torch.Tensors
+
+    Args:
+        batch (dict[str, Tensor]): Input batch dict
+
+    Returns:
+        dict[str, Tensor]: Input batch dict with sparse tensors unpacked into
+        sparse torch.Tensor format
+    """
     prefixes_indices = [
         match[0]
         for match in [re.match(".+(?=_indices$)", key) for key in batch.keys()]

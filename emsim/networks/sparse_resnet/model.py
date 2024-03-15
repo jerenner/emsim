@@ -3,10 +3,10 @@ from typing import Optional
 import spconv.pytorch as spconv
 import torch
 from timm.layers import make_divisible
-from torch import nn
+from torch import nn, Tensor
 
 from .blocks import SparseResnetV2Stage
-
+from ...utils.sparse_utils import torch_sparse_to_spconv
 
 class SparseResnetV2(nn.Module):
     def __init__(
@@ -72,6 +72,9 @@ class SparseResnetV2(nn.Module):
         self.norm = norm_layer(self.num_features)
 
     def forward(self, x):
+        if isinstance(x, Tensor):
+            assert x.is_sparse
+            x = torch_sparse_to_spconv(x)
         out = []
         x = self.stem(x)
         out.append(x)

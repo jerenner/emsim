@@ -8,7 +8,13 @@ from ..utils.sparse_utils import spconv_to_torch_sparse, torch_sparse_to_spconv
 
 
 class OccupancyPredictor(nn.Module):
-    def __init__(self, in_features, out_classes, kernel_size=1, map_list_index=-1):
+    def __init__(
+        self,
+        in_features: int,
+        out_classes: int,
+        kernel_size: int = 1,
+        map_list_index: int = -1,
+    ):
         super().__init__()
         self.predictor = spconv.SubMConv2d(in_features, out_classes, kernel_size)
         self.map_list_index = map_list_index
@@ -62,7 +68,9 @@ def occupancy_loss(
             zeros_correct = torch.sum(max_prob[zero_mask] == 0)
             zeros_acc = zeros_correct / zero_mask.sum()
             nonzero_mask = groundtruth_unioned.values() != 0
-            nonzeros_correct = torch.sum(max_prob[nonzero_mask] == groundtruth_unioned.values()[nonzero_mask])
+            nonzeros_correct = torch.sum(
+                max_prob[nonzero_mask] == groundtruth_unioned.values()[nonzero_mask]
+            )
             nonzeros_acc = nonzeros_correct / nonzero_mask.sum()
 
             # probs = torch.sparse.softmax(predicted_unioned, -1)

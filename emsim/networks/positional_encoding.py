@@ -1,82 +1,92 @@
 from typing import Optional
+from contextlib import ExitStack
 
 import torch
 from torch import Tensor, nn
+import torch.nn.functional as F
 
 
-class AbsolutePositionalEncodingFourier(nn.Module):
-    # https://arxiv.org/pdf/2106.02795.pdf
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        normalize: bool = True,
-    ):
+class FourierEncoding(nn.Module):
+    def __init__(self, in_features, out_features):
         super().__init__()
         self.in_dim = in_features
         assert out_features % 2 == 0
         self.out_dim = out_features
-        self.normalize = normalize
 
-        self.weight = nn.Parameter(
-            torch.zeros([in_features, out_features // 2], dtype=torch.float)
-        )
-        self.reset_parameters()
+        self.weight = nn.Linear(in_features, out_features // 2, bias=False)
         self._scaling = self.out_dim ** (-0.5)
 
     def reset_parameters(self):
-        nn.init.normal_(self.weight)
+        self.weight.reset_parameters()
 
-    def forward(self, positions: Tensor, input_spatial_range: Optional[Tensor] = None):
-        if self.normalize:
-            assert input_spatial_range is not None
-            positions = positions / input_spatial_range
-
+    def forward(self, positions: Tensor):
         positions *= 2 * torch.pi
-        proj = positions @ self.weight
-        out = torch.cat([proj.sin(), proj.cos()], dim=-1)
+        proj = self.weight(positions)
+        out = torch.cat([proj.sin(), proj.cos()], -1)
         out *= self._scaling
         return out
 
 
-class RelativePositionalEncodingMLP(nn.Module):
-    def __init__(
-        self,
-        in_dim: int,
-        hidden_dim: int,
-        out_dim: int,
-        act_layer: nn.Module = nn.GELU
-    ):
+class PixelPositionalEncoding(nn.Module):
+    def __init__(self, out_features):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            act_layer(),
-            nn.Linear(hidden_dim, out_dim),
-        )
+        self.encoding = FourierEncoding(2, out_features)
 
-    def forward(self, x: Tensor):
-        return self.net(x)
+    def forward(self, pixel_indices: Tensor, image_size: Tensor):
+        positions = pixel_indices / image_size
+        out = self.encoding(positions)
+        return out
 
 
-class RelativePositionalEncodingTableInterpolate(nn.Module):
+class SubpixelPositionalEncoding(nn.Module):
+    def __init__(self, out_features):
+        super().__init__()
+        self.encoding = FourierEncoding(2, out_features)
+
+    def forward(self, subpixel_positions: Tensor):
+        out = self.encoding(subpixel_positions)
+        return out
+
+
+class RelativePositionalEncodingTableInterpolate2D(nn.Module):
     def __init__(
         self,
-        dim: int,
         features: int,
-        max_distance: int,
+        table_rows: int,
+        table_columns: int,
     ):
         super().__init__()
-        self.dim = dim
         self.features = features
-        self.max_distance = max_distance
+        self.table_rows = table_rows
+        self.table_columns = table_columns
 
-        param_shape = [max_distance] * dim + [features]
-        self.weight = nn.Parameter(torch.zeros(param_shape), dtype=torch.float)
+        param_shape = [features, table_rows, table_columns]
+        self.rpe_table = nn.Parameter(torch.zeros(param_shape, dtype=torch.float))
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.normal_(self.weight)
+        nn.init.normal_(self.rpe_table)
 
-    def forward(self, x: Tensor):
-        assert x.ndim == self.dim + 1
-        raise NotImplementedError
+    def forward(self, query_subpixel_positions: Tensor, key_relative_indices: Tensor):
+        assert query_subpixel_positions.ndim == 2
+        assert key_relative_indices.ndim == 3
+        n_queries = query_subpixel_positions.shape[0]
+        qk_fractional_offsets = (
+            query_subpixel_positions.view(n_queries, 1, 1, 2)
+            - 0.5
+            + key_relative_indices.unsqueeze(0)
+        )
+        qk_fractional_offsets /= qk_fractional_offsets.new_tensor(
+            [self.table_rows / 2, self.table_columns / 2]
+        )
+        with ExitStack() as stack:
+            # https://github.com/pytorch/pytorch/issues/88380
+            if qk_fractional_offsets.shape[0] >= 65536:
+                stack.enter_context(torch.backends.cudnn.flags(enabled=False))
+            out = F.grid_sample(
+                self.rpe_table.unsqueeze(0).expand(n_queries, -1, -1, -1),
+                qk_fractional_offsets,
+                "bilinear",
+                align_corners=True,
+            )
+        return out

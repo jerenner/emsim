@@ -1,4 +1,4 @@
-from typing import Optional
+import time
 
 import torch
 from torch import nn, Tensor
@@ -10,6 +10,7 @@ from ..positional_encoding import (
     PixelPositionalEncoding,
 )
 from ...utils.sparse_utils import gather_from_sparse_tensor
+from ...utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
 
 
 class TransformerDecoder(nn.Module):
@@ -19,6 +20,7 @@ class TransformerDecoder(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
+        key_patch_size: int = 5,
         dropout: float = 0.1,
         activation_fn: str = "gelu",
         norm_first: bool = True,
@@ -34,7 +36,13 @@ class TransformerDecoder(nn.Module):
 
         self.layers = nn.ModuleList(
             TransformerDecoderLayer(
-                d_model, n_heads, dim_feedforward, dropout, activation_fn, norm_first
+                d_model,
+                n_heads,
+                dim_feedforward,
+                key_patch_size,
+                dropout,
+                activation_fn,
+                norm_first,
             )
             for _ in range(n_layers)
         )
@@ -47,14 +55,16 @@ class TransformerDecoder(nn.Module):
 
             delta_position = self.delta_pos_decoder(x)
             new_positions = (
-                query_dict["indices"]
+                query_dict["indices"][..., 1:]
                 + query_dict["subpixel_coordinates"]
                 + delta_position
             )
-            new_indices = torch.floor(new_positions)
+            new_indices = torch.floor(new_positions).to(query_dict["indices"])
             new_subpixel_coordinates = torch.frac(new_positions)
 
-            query_dict["indices"] = new_indices
+            query_dict["indices"] = torch.cat(
+                [query_dict["indices"][:, :1], new_indices], -1
+            )
             query_dict["subpixel_coordinates"] = new_subpixel_coordinates
 
         return query_dict
@@ -66,6 +76,7 @@ class TransformerDecoderLayer(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
+        key_patch_size: int = 5,
         dropout: float = 0.1,
         activation_fn="relu",
         norm_first=True,
@@ -79,7 +90,7 @@ class TransformerDecoderLayer(nn.Module):
             d_model, n_heads, dropout, norm_first=norm_first
         )
         self.cross_attn = CrossAttentionBlock(
-            d_model, n_heads, dropout, norm_first=norm_first
+            d_model, n_heads, key_patch_size, dropout, norm_first=norm_first
         )
         self.ffn = FFN(d_model, dim_feedforward, dropout, activation_fn=activation_fn)
 
@@ -94,14 +105,23 @@ class TransformerDecoderLayer(nn.Module):
 
         x = query_dict["queries"] + pixel_encoding + subpixel_encoding
 
-        x = self.self_attn(x)
+        t0 = time.time()
+        x = self.self_attn(x, query_dict["batch_offsets"])
+        torch.cuda.synchronize()
+        print(f"SA block time = {time.time() - t0}")
+        t0 = time.time()
         x = self.cross_attn(
             x,
             query_dict["indices"],
             query_dict["subpixel_coordinates"],
             image_feature_tensor,
         )
+        torch.cuda.synchronize()
+        print(f"CA block time = {time.time() - t0}")
+        t0 = time.time()
         x = self.ffn(x)
+        torch.cuda.synchronize()
+        print(f"FFN block time = {time.time() - t0}")
         return x
 
 
@@ -120,7 +140,7 @@ class FFN(nn.Module):
         if activation_fn == "relu":
             activation = nn.ReLU
         elif activation_fn == "gelu":
-            activation == nn.GELU
+            activation = nn.GELU
 
         self.mlp = nn.Sequential(
             nn.Linear(d_model, hidden_dim),
@@ -149,22 +169,37 @@ class SelfAttentionBlock(nn.Module):
         norm_first: bool = True,
     ):
         super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
         self.norm_first = norm_first
 
         self.attn = nn.MultiheadAttention(
             d_model, n_heads, dropout=dropout, bias=bias, batch_first=True
         )
+        self.in_proj = nn.Linear(d_model, d_model * 3, bias=bias)
+
+        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
+
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, batch_offsets: Tensor):
+        # Add batch dimension for self-attention computation
+        x, pad_mask = deconcat_add_batch_dim(x, batch_offsets)
+
         if self.norm_first:
             residual = x
             x = self.norm(x)
-            x = residual + self.dropout(self.attn(x, x, x, need_weights=False))
+            x = self.attn(x, x, x, key_padding_mask=pad_mask, need_weights=False)[0]
+            x = self.dropout(x)
+            x = residual + x
         else:
-            x = x + self.dropout(self.attn(x, x, x, need_weights=False))
+            x = x + self.dropout(self.attn(x, x, x, need_weights=False)[0])
             x = self.norm(x)
+
+        # remove batch dimension and return to stacked format
+        x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
+        assert torch.equal(batch_offsets, batch_offsets_2)
         return x
 
 
@@ -199,10 +234,13 @@ class CrossAttentionBlock(nn.Module):
 
         self.key_patch_size = key_patch_size
 
-    def forward(self, query_dict: dict[str, Tensor], image_feature_tensor: Tensor):
-        queries = query_dict["queries"]
-        query_indices = query_dict["indices"]
-        query_subpixel_coordinates = query_dict["subpixel_coordinates"]
+    def forward(
+        self,
+        queries: Tensor,
+        query_indices: Tensor,
+        query_subpixel_coordinates: Tensor,
+        image_feature_tensor: Tensor,
+    ):
         if self.norm_first:
             residual = queries
             x = self.norm(queries)
@@ -282,7 +320,7 @@ class CrossAttentionBlock(nn.Module):
         k = k.permute(0, 2, 1, 3)  # query x head x key x head dim
         v = v.permute(0, 2, 1, 3)
 
-        attn = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
+        attn = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout.p)
         attn = attn.permute(0, 2, 1, 3).reshape(-1, self.n_heads * self.head_dim)
 
         out = self.out_proj(attn)

@@ -1,16 +1,14 @@
-import time
-
 import torch
-from torch import nn, Tensor
 import torch.nn.functional as F
+from torch import Tensor, nn
 
-from ..positional_encoding import (
+from ..utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
+from ..utils.sparse_utils import gather_from_sparse_tensor
+from .positional_encoding import (
+    PixelPositionalEncoding,
     RelativePositionalEncodingTableInterpolate2D,
     SubpixelPositionalEncoding,
-    PixelPositionalEncoding,
 )
-from ...utils.sparse_utils import gather_from_sparse_tensor
-from ...utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
 
 
 class TransformerDecoder(nn.Module):

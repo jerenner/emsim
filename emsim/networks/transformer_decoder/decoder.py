@@ -105,23 +105,14 @@ class TransformerDecoderLayer(nn.Module):
 
         x = query_dict["queries"] + pixel_encoding + subpixel_encoding
 
-        t0 = time.time()
         x = self.self_attn(x, query_dict["batch_offsets"])
-        torch.cuda.synchronize()
-        print(f"SA block time = {time.time() - t0}")
-        t0 = time.time()
         x = self.cross_attn(
             x,
             query_dict["indices"],
             query_dict["subpixel_coordinates"],
             image_feature_tensor,
         )
-        torch.cuda.synchronize()
-        print(f"CA block time = {time.time() - t0}")
-        t0 = time.time()
         x = self.ffn(x)
-        torch.cuda.synchronize()
-        print(f"FFN block time = {time.time() - t0}")
         return x
 
 

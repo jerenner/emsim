@@ -2,8 +2,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..utils.window_utils import windowed_keys_for_queries
+
 from ..utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
-from ..utils.sparse_utils import gather_from_sparse_tensor
 from .positional_encoding import (
     PixelPositionalEncoding,
     RelativePositionalEncodingTableInterpolate2D,
@@ -56,6 +57,12 @@ class TransformerDecoder(nn.Module):
                 query_dict["indices"][..., 1:]
                 + query_dict["subpixel_coordinates"]
                 + delta_position
+            )
+            new_positions[:, 0] = torch.clamp(
+                new_positions[:, 0], 0, image_feature_tensor.shape[1]
+            )
+            new_positions[:, 1] = torch.clamp(
+                new_positions[:, 1], 0, image_feature_tensor.shape[2]
             )
             new_indices = torch.floor(new_positions).to(query_dict["indices"])
             new_subpixel_coordinates = torch.frac(new_positions)
@@ -261,23 +268,16 @@ class CrossAttentionBlock(nn.Module):
         image_feature_tensor: Tensor,
     ):
         n_queries = queries.shape[0]
-        key_offsets = key_offset_grid(
-            self.key_patch_size, self.key_patch_size, query_indices.device
+
+        keys, _, key_offsets, key_pad_mask = windowed_keys_for_queries(
+            query_indices,
+            image_feature_tensor,
+            self.key_patch_size,
+            self.key_patch_size,
         )
         qk_rel_posn_encoding = self.rel_pos_encoding(
             query_subpixel_coordinates, key_offsets
         )  # query x H x W x feat
-
-        key_pixels = key_index_grid(query_indices, key_offsets)
-        key_pixels[..., 1] = torch.clamp(
-            key_pixels[..., 1], 0, image_feature_tensor.shape[1]
-        )
-        key_pixels[..., 2] = torch.clamp(
-            key_pixels[..., 2], 0, image_feature_tensor.shape[2]
-        )
-
-        # queries x H x W x feat
-        keys = gather_from_sparse_tensor(image_feature_tensor, key_pixels)
 
         # queries x HW x feat
         keys = keys.view(
@@ -305,36 +305,18 @@ class CrossAttentionBlock(nn.Module):
             self.n_heads,
             self.head_dim,
         )
+        key_pad_mask = key_pad_mask.reshape(
+            n_queries, 1, 1, self.key_patch_size * self.key_patch_size
+        ).expand(-1, self.n_heads, -1, -1)
+        key_pad_mask = key_pad_mask.logical_not()
 
         k = k.permute(0, 2, 1, 3)  # query x head x key x head dim
         v = v.permute(0, 2, 1, 3)
 
-        attn = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout.p)
+        attn = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=key_pad_mask, dropout_p=self.dropout.p
+        )
         attn = attn.permute(0, 2, 1, 3).reshape(-1, self.n_heads * self.head_dim)
 
         out = self.out_proj(attn)
         return out
-
-
-def key_offset_grid(window_height: int, window_width: int, device=None):
-    assert window_height % 2 == 1
-    assert window_width % 2 == 1
-    offsets_y, offsets_x = torch.meshgrid(
-        torch.arange(-(window_height // 2), window_height // 2 + 1, device=device),
-        torch.arange(-(window_width // 2), window_width // 2 + 1, device=device),
-        indexing="ij",
-    )
-    offsets = torch.stack([offsets_y, offsets_x], -1)
-    return offsets
-
-
-def key_index_grid(query_indices: Tensor, key_offsets: int):
-    # add batch dim with 0 batch offset
-    key_offsets = torch.cat(
-        [
-            key_offsets.new_zeros([key_offsets.shape[0], key_offsets.shape[1], 1]),
-            key_offsets,
-        ],
-        -1,
-    )
-    return query_indices.unsqueeze(1).unsqueeze(1) + key_offsets

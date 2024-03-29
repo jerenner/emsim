@@ -38,7 +38,7 @@ def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] =
     batch_offsets = torch.cat(
         [nonpadded_batch_sizes.new_zeros([1]), nonpadded_batch_sizes.cumsum(-1)]
     )
-    out = tensor.new_zeros(nonpadded_batch_sizes.sum(), *tensor.shape[2:])
+    out = tensor.new_zeros(nonpadded_batch_sizes.sum().item(), *tensor.shape[2:])
 
     assert len(tensor) == len(batch_offsets[:-1])
 

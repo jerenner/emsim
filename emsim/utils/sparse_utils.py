@@ -157,6 +157,8 @@ def gather_from_sparse_tensor(sparse_tensor: Tensor, index_tensor: Tensor):
         -1,
     )
 
+    assert index_tensor_linearized.min() >= 0
+    assert index_tensor_linearized.max() < sparse_tensor_linearized.shape[0]
     selected = sparse_tensor_linearized.index_select(
         0, index_tensor_linearized
     ).to_dense()

@@ -7,6 +7,7 @@ from ..utils.sparse_utils import spconv_to_torch_sparse
 
 import spconv.pytorch as spconv
 
+
 class PredictionHead(nn.Module):
     def __init__(
         self,
@@ -53,22 +54,38 @@ class PredictionHead(nn.Module):
             self.mask_window_size,
         )
         mask_keys = self.pixel_mask_head(mask_keys)
-        mask_logits = torch.einsum("qf,qhwf->qhw", decoded_query_dict["queries"], mask_keys)
-        mask_logits = mask_logits + mask_logits.new_zeros(mask_logits.shape).masked_fill(key_pad_mask, -torch.inf)
+        mask_logits = torch.einsum(
+            "qf,qhwf->qhw", decoded_query_dict["queries"], mask_keys
+        )
+        mask_logits = mask_logits + mask_logits.new_zeros(
+            mask_logits.shape
+        ).masked_fill(key_pad_mask, -torch.inf)
 
         # Number the queries in each batch element
-        mask_batch_offsets = torch.unique_consecutive(key_indices[:,0,0,0], return_counts=True)[-1].cumsum(0)
-        mask_batch_offsets = torch.cat([mask_batch_offsets.new_zeros([1]), mask_batch_offsets])
-        per_batch_mask_index = torch.cat([
-            torch.arange(end-start, device=mask_batch_offsets.device) for start, end in zip(mask_batch_offsets[:-1], mask_batch_offsets[1:])
-        ])
+        mask_batch_offsets = torch.unique_consecutive(
+            key_indices[:, 0, 0, 0], return_counts=True
+        )[-1].cumsum(0)
+        mask_batch_offsets = torch.cat(
+            [mask_batch_offsets.new_zeros([1]), mask_batch_offsets]
+        )
+        per_batch_mask_index = torch.cat(
+            [
+                torch.arange(end - start, device=mask_batch_offsets.device)
+                for start, end in zip(mask_batch_offsets[:-1], mask_batch_offsets[1:])
+            ]
+        )
 
         # Append the query number to the mask index so each mask logit has an index of
         # batch * y * x * mask
-        sparse_mask_indices = torch.cat([
-            key_indices,
-            per_batch_mask_index.reshape(-1, 1, 1, 1).expand(-1, *key_indices.shape[1:-1], -1)
-        ], -1)
+        sparse_mask_indices = torch.cat(
+            [
+                key_indices,
+                per_batch_mask_index.reshape(-1, 1, 1, 1).expand(
+                    -1, *key_indices.shape[1:-1], -1
+                ),
+            ],
+            -1,
+        )
 
         # Find the individual mask pixels corresponding to a zero pixel
         flat_mask_logits = mask_logits.flatten()
@@ -76,9 +93,9 @@ class PredictionHead(nn.Module):
 
         # Finally create the predicted segmentation mask logits
         predicted_mask_logit_tensor = torch.sparse_coo_tensor(
-            sparse_mask_indices.flatten(0,-2)[nonempty_pixel_indices].T,
+            sparse_mask_indices.flatten(0, -2)[nonempty_pixel_indices].T,
             flat_mask_logits[nonempty_pixel_indices],
-            size=[*image_feature_tensor.shape[:-1], per_batch_mask_index.max()]
+            size=[*image_feature_tensor.shape[:-1], per_batch_mask_index.max()],
         )
 
         return predicted_mask_logit_tensor

@@ -1,5 +1,6 @@
 import re
 
+import sparse
 import numpy as np
 import spconv.pytorch as spconv
 import torch
@@ -56,6 +57,18 @@ def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor):
     ).coalesce()
 
 
+def torch_sparse_to_pydata_sparse(tensor: Tensor):
+    assert tensor.is_sparse
+    tensor = tensor.detach().coalesce().cpu()
+    assert tensor.is_coalesced
+    return sparse.COO(
+        tensor.indices(),
+        tensor.values(),
+        tensor.shape,
+        has_duplicates=False,
+    )
+
+
 def unpack_sparse_tensors(batch: dict[str, Tensor]):
     """
     Takes in a batch dict and converts packed sparse tensors (with separate
@@ -93,7 +106,7 @@ def unpack_sparse_tensors(batch: dict[str, Tensor]):
             batch[prefix + "_values"],
             shape,
             dtype=batch[prefix + "_values"].dtype,
-            device=batch[prefix + "_values"].device
+            device=batch[prefix + "_values"].device,
         ).coalesce()
         del batch[prefix + "_indices"]
         del batch[prefix + "_values"]
@@ -122,7 +135,7 @@ def gather_from_sparse_tensor(sparse_tensor: Tensor, index_tensor: Tensor):
             "Expected last dim of `index_tensor` to be the same as "
             f"`sparse_tensor.sparse_dim()`, got {index_tensor.shape[-1]=} "
             f"and {sparse_tensor.sparse_dim()=}"
-            )
+        )
     sparse_shape = sparse_tensor.shape[: sparse_tensor.sparse_dim()]
     dim_linear_offsets = index_tensor.new_tensor(
         [np.prod(sparse_shape[i + 1 :] + (1,)) for i in range(len(sparse_shape))]

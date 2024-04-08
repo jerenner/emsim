@@ -14,6 +14,7 @@ from ..utils.sparse_utils import (
 # arbitrarily high value, will likely OOM if this many queries are actually generated
 MAX_QUERIES_PER_BATCH = int(1e7)
 
+
 class QueryGenerator(nn.Module):
     def __init__(
         self,
@@ -51,7 +52,9 @@ class QueryGenerator(nn.Module):
         predicted_occupancy_logits: Tensor,
     ):
         query_indices = get_query_indices(
-            predicted_occupancy_logits, self.count_cdf_threshold, self.max_queries_per_batch
+            predicted_occupancy_logits,
+            self.count_cdf_threshold,
+            self.max_queries_per_batch,
         ).T
         vae_params = spconv_to_torch_sparse(self.vae_encoder(pixel_features))
         query_pixel_vae_params = gather_from_sparse_tensor(vae_params, query_indices)
@@ -99,6 +102,7 @@ def cdf_threshold_min_predicted_electrons(
 
         return electron_counts
 
+
 def queries_for_thresold(cdf, threshold):
     cdf_over_threshold = cdf > threshold
     temp = torch.arange(
@@ -113,7 +117,9 @@ def indices_and_counts_to_indices_with_duplicates(indices, counts):
     return torch.repeat_interleave(indices, counts, -1)
 
 
-def get_query_indices(count_logits: Tensor, count_cdf_threshold: float, max_queries_per_batch: int):
+def get_query_indices(
+    count_logits: Tensor, count_cdf_threshold: float, max_queries_per_batch: int
+):
     thresholded_electron_counts = cdf_threshold_min_predicted_electrons(
         count_logits, count_cdf_threshold, max_queries_per_batch
     )
@@ -122,3 +128,27 @@ def get_query_indices(count_logits: Tensor, count_cdf_threshold: float, max_quer
         count_logits.indices(), thresholded_electron_counts, -1
     )
     return query_pixels
+
+
+def split_queries_by_batch(query_dict: dict[str, Tensor]):
+    batch_offsets = query_dict["batch_offsets"]
+    batch_offsets = torch.cat(
+        [batch_offsets, batch_offsets.new_tensor([query_dict["queries"].shape[0]])]
+    )
+
+    return [
+        {
+            key: value[batch_start:batch_end]
+            for key, value in query_dict.items()
+            if key != "batch_offsets"
+        }
+        for batch_start, batch_end in zip(batch_offsets[:-1], batch_offsets[1:])
+    ]
+
+
+def batch_merge_query_dicts(query_dicts: list[dict[str, Tensor]]):
+    out_dict = {
+        key: torch.cat([in_dict[key] for in_dict in query_dicts]) for key in query_dicts[0]
+    }
+    out_dict["batch_offsets"] = batch_offsets_from_sparse_tensor_indices(out_dict["indices"].T)
+    return out_dict

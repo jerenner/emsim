@@ -47,7 +47,9 @@ class PredictionHead(nn.Module):
         if isinstance(image_feature_tensor, spconv.SparseConvTensor):
             image_feature_tensor = spconv_to_torch_sparse(image_feature_tensor)
 
-        binary_mask_logits, portion_logits = self.predict_masks(decoded_query_dict, image_feature_tensor)
+        binary_mask_logits, portion_logits = self.predict_masks(
+            decoded_query_dict, image_feature_tensor
+        )
 
     def predict_masks(
         self, decoded_query_dict: dict[str, Tensor], image_feature_tensor: Tensor
@@ -60,10 +62,11 @@ class PredictionHead(nn.Module):
             image_feature_tensor (Tensor): Output of backbone
 
         Returns:
-            predicted_masks: Boolean sparse Tensor of size batch x height x width x query
-            with True if the pixel is part of that query's mask
-            pixel_portions: Sparse FloatTensor of shape batch x height x width x query
-            where specified
+            dict[str, Tensor]: decoded_query_dict with new elements:
+                binary_mask_logits
+                portion_logits
+                key_indices
+                nonzero_key_mask
         """
         # Compute the mask logits: query feature dotted with MLPed pixel feature
         mask_keys, key_indices, _, key_pad_mask = windowed_keys_for_queries(
@@ -88,53 +91,13 @@ class PredictionHead(nn.Module):
         binary_mask_logits = binary_mask_logits + pad_mask_bias
         portion_logits = portion_logits + pad_mask_bias
 
-        # Number the queries in each batch element
-        mask_batch_offsets = torch.unique_consecutive(
-            key_indices[:, 0, 0, 0], return_counts=True
-        )[-1].cumsum(0)
-        mask_batch_offsets = torch.cat(
-            [mask_batch_offsets.new_zeros([1]), mask_batch_offsets]
-        )
-        per_batch_mask_index = torch.cat(
-            [
-                torch.arange(end - start, device=mask_batch_offsets.device)
-                for start, end in zip(mask_batch_offsets[:-1], mask_batch_offsets[1:])
-            ]
-        )
+        decoded_query_dict["binary_mask_logits"] = binary_mask_logits
+        decoded_query_dict["portion_logits"] = portion_logits
+        decoded_query_dict["key_indices"] = key_indices
+        # Boolean mask corresponding to nonzero pixels in the sparse image
+        decoded_query_dict["nonzero_key_mask"] = mask_keys.any(-1)
 
-        # Append the query number to the mask index so each mask logit has an index of
-        # batch * y * x * query
-        sparse_mask_indices = torch.cat(
-            [
-                key_indices,
-                per_batch_mask_index.reshape(-1, 1, 1, 1).expand(
-                    -1, *key_indices.shape[1:-1], -1
-                ),
-            ],
-            -1,
-        )
-
-        # Find the indices corresponding to empty pixels
-        nonzero_keys = mask_keys.any(-1)
-
-        # Finally create the sparse logit tensors
-        sparse_indices = sparse_mask_indices[nonzero_keys].T
-        sparse_tensor_shape = [
-            *image_feature_tensor.shape[:-1],
-            per_batch_mask_index.max(),
-        ]
-        predicted_mask_logit_tensor = torch.sparse_coo_tensor(
-            sparse_indices,
-            binary_mask_logits[nonzero_keys],
-            size=sparse_tensor_shape,
-        ).coalesce()
-        predicted_portion_logit_tensor = torch.sparse_coo_tensor(
-            sparse_indices,
-            portion_logits[nonzero_keys],
-            size=sparse_tensor_shape,
-        ).coalesce()
-
-        return predicted_mask_logit_tensor, predicted_portion_logit_tensor
+        return decoded_query_dict
 
     def compute_electron_energies(
         self,
@@ -143,6 +106,57 @@ class PredictionHead(nn.Module):
         mask_logit_tensor: Tensor,
     ):
         mask_portions = torch.sparse.softmax(mask_logit_tensor, -1)
+
+
+def _batched_query_key_map_to_sparse_tensors(
+    batched_tensors: list[Tensor],
+    key_indices: Tensor,
+    nonzero_key_mask: Tensor,
+    sparse_tensor_shape,
+):
+    if isinstance(batched_tensors, Tensor):
+        batched_tensors = [batched_tensors]
+
+    # Number the queries in each batch element
+    mask_batch_offsets = torch.unique_consecutive(
+        key_indices[:, 0, 0, 0], return_counts=True
+    )[-1].cumsum(0)
+    mask_batch_offsets = torch.cat(
+        [mask_batch_offsets.new_zeros([1]), mask_batch_offsets]
+    )
+    per_batch_mask_index = torch.cat(
+        [
+            torch.arange(end - start, device=mask_batch_offsets.device)
+            for start, end in zip(mask_batch_offsets[:-1], mask_batch_offsets[1:])
+        ]
+    )
+
+    # Append the query number to the mask index so each mask logit has an index of
+    # batch, y, x, query
+    sparse_mask_indices = torch.cat(
+        [
+            key_indices,
+            per_batch_mask_index.reshape(-1, 1, 1, 1).expand(
+                -1, *key_indices.shape[1:-1], -1
+            ),
+        ],
+        -1,
+    )
+
+    # Finally create the sparse logit tensors
+    sparse_indices = sparse_mask_indices[nonzero_key_mask].T
+    sparse_tensor_shape = [
+        *sparse_tensor_shape,
+        per_batch_mask_index.max(),
+    ]
+    out_tensors = [
+        torch.sparse_coo_tensor(
+            sparse_indices, tensor[nonzero_key_mask], size=sparse_tensor_shape
+        ).coalesce()
+        for tensor in batched_tensors
+    ]
+
+    return out_tensors
 
 
 def _sparse_sigmoid_threshold(sparse_tensor):

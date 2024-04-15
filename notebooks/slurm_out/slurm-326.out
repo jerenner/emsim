@@ -1,0 +1,2 @@
+mkdir: cannot create directory ‘/global/homes/b/basch/emsim/notebooks/test_output’: No such file or directory
+slurmstepd: error: *** JOB 326 ON n0000.catscan0 CANCELLED AT 2024-02-16T01:35:45 ***

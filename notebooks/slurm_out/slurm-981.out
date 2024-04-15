@@ -1,0 +1,5 @@
+/home/basch/emsim/notebooks/main.py:110: UserWarning: nccl backend >=2.5 requires GPU count>1, see https://github.com/NVIDIA/nccl/issues/103 perhaps use 'gloo'
+  warnings.warn("nccl backend >=2.5 requires GPU count>1, see https://github.com/NVIDIA/nccl/issues/103 perhaps use 'gloo'")
+=> creating model 'resnet18'
+=> Dummy data is used!
+slurmstepd: error: *** JOB 981 ON n0000.catscan0 CANCELLED AT 2024-04-07T01:29:49 ***

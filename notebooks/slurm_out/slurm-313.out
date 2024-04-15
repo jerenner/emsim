@@ -1,0 +1,20 @@
+Downloading http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz
+Failed to download (trying next):
+<urlopen error [Errno 101] Network is unreachable>
+
+Downloading https://ossci-datasets.s3.amazonaws.com/mnist/train-images-idx3-ubyte.gz
+Failed to download (trying next):
+<urlopen error [Errno 110] Connection timed out>
+
+Traceback (most recent call last):
+  File "/home/basch/emsim/notebooks/resnet_mnist.py", line 51, in <module>
+    train_loader, val_loader = get_data_loaders(32, 6) # put your data loader here
+                               ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/emsim/notebooks/resnet_mnist.py", line 24, in get_data_loaders
+    mnist = MNIST(download=True, train=True, root=".").train_data.float()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/miniconda3/envs/emsim/lib/python3.11/site-packages/torchvision/datasets/mnist.py", line 99, in __init__
+    self.download()
+  File "/home/basch/miniconda3/envs/emsim/lib/python3.11/site-packages/torchvision/datasets/mnist.py", line 195, in download
+    raise RuntimeError(f"Error downloading {filename}")
+RuntimeError: Error downloading train-images-idx3-ubyte.gz

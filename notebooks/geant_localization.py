@@ -45,6 +45,8 @@ def main(backbone_types, noise_levels):
     else:
         print("device is cpu")
         device = "cpu"
+	
+    device = torch.device("cpu")
 
     pixels_file = "../segmentation/pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt"
     trajectory_file = "../B1-build/test_20k/e300keV_thinned_4um_back_20k.txt"
@@ -54,7 +56,7 @@ def main(backbone_types, noise_levels):
             dataset = GeantElectronDataset(pixels_file, [128, 129], 7, noise_std=float(noise_std), trajectory_file=trajectory_file)
             test_dataset = GeantElectronDataset(pixels_file, [128, 129], 7, noise_std=float(noise_std), trajectory_file=trajectory_file, split="test")
 
-            test_loader = DataLoader(test_dataset, 1, collate_fn=electron_collate_fn, pin_memory=True)
+            test_loader = DataLoader(test_dataset, 1, collate_fn=electron_collate_fn)
             test_batch = next(iter(test_loader))
 
             backbone = timm.create_model(backbone_type, in_chans=1, num_classes=0)

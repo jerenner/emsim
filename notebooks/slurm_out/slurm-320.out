@@ -1,0 +1,69 @@
+mkdir: cannot create directory ‘/global/homes/b/basch/emsim/notebooks/test_output’: No such file or directory
+device is cuda
+Traceback (most recent call last):
+  File "/home/basch/emsim/notebooks/geant_localization.py", line 136, in <module>
+    main(backbone_types, noise_levels)
+  File "/home/basch/emsim/notebooks/geant_localization.py", line 58, in main
+    test_batch = next(iter(test_loader))
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/miniconda3/envs/emsim/lib/python3.11/site-packages/torch/utils/data/dataloader.py", line 631, in __next__
+    data = self._next_data()
+           ^^^^^^^^^^^^^^^^^
+  File "/home/basch/miniconda3/envs/emsim/lib/python3.11/site-packages/torch/utils/data/dataloader.py", line 677, in _next_data
+    data = _utils.pin_memory.pin_memory(data, self._pin_memory_device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/miniconda3/envs/emsim/lib/python3.11/site-packages/torch/utils/data/_utils/pin_memory.py", line 62, in pin_memory
+    return type(data)({k: pin_memory(sample, device) for k, sample in data.items()})  # type: ignore[call-arg]
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/miniconda3/envs/emsim/lib/python3.11/site-packages/torch/utils/data/_utils/pin_memory.py", line 62, in <dictcomp>
+    return type(data)({k: pin_memory(sample, device) for k, sample in data.items()})  # type: ignore[call-arg]
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/miniconda3/envs/emsim/lib/python3.11/site-packages/torch/utils/data/_utils/pin_memory.py", line 57, in pin_memory
+    return data.pin_memory(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+NotImplementedError: Could not run 'aten::_pin_memory' with arguments from the 'SparseCUDA' backend. This could be because the operator doesn't exist for this backend, or was omitted during the selective/custom build process (if using custom build). If you are a Facebook employee using PyTorch on mobile, please visit https://fburl.com/ptmfixes for possible resolutions. 'aten::_pin_memory' is only available for these backends: [CUDA, Meta, NestedTensorCPU, NestedTensorCUDA, BackendSelect, Python, FuncTorchDynamicLayerBackMode, Functionalize, Named, Conjugate, Negative, ZeroTensor, ADInplaceOrView, AutogradOther, AutogradCPU, AutogradCUDA, AutogradHIP, AutogradXLA, AutogradMPS, AutogradIPU, AutogradXPU, AutogradHPU, AutogradVE, AutogradLazy, AutogradMTIA, AutogradPrivateUse1, AutogradPrivateUse2, AutogradPrivateUse3, AutogradMeta, AutogradNestedTensor, Tracer, AutocastCPU, AutocastCUDA, FuncTorchBatched, BatchedNestedTensor, FuncTorchVmapMode, Batched, VmapMode, FuncTorchGradWrapper, PythonTLSSnapshot, FuncTorchDynamicLayerFrontMode, PreDispatch, PythonDispatcher].
+
+CUDA: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/build/aten/src/ATen/RegisterCUDA.cpp:44456 [kernel]
+Meta: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/core/MetaFallbackKernel.cpp:23 [backend fallback]
+NestedTensorCPU: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/build/aten/src/ATen/RegisterNestedTensorCPU.cpp:775 [kernel]
+NestedTensorCUDA: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/build/aten/src/ATen/RegisterNestedTensorCUDA.cpp:931 [kernel]
+BackendSelect: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/build/aten/src/ATen/RegisterBackendSelect.cpp:807 [kernel]
+Python: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/core/PythonFallbackKernel.cpp:154 [backend fallback]
+FuncTorchDynamicLayerBackMode: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/functorch/DynamicLayer.cpp:498 [backend fallback]
+Functionalize: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/FunctionalizeFallbackKernel.cpp:324 [backend fallback]
+Named: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/core/NamedRegistrations.cpp:7 [backend fallback]
+Conjugate: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/ConjugateFallback.cpp:17 [backend fallback]
+Negative: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/native/NegateFallback.cpp:18 [backend fallback]
+ZeroTensor: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/ZeroTensorFallback.cpp:86 [backend fallback]
+ADInplaceOrView: fallthrough registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/core/VariableFallbackKernel.cpp:86 [backend fallback]
+AutogradOther: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradCPU: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradCUDA: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradHIP: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradXLA: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradMPS: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradIPU: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradXPU: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradHPU: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradVE: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradLazy: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradMTIA: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradPrivateUse1: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradPrivateUse2: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradPrivateUse3: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradMeta: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+AutogradNestedTensor: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/VariableType_0.cpp:17499 [autograd kernel]
+Tracer: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/torch/csrc/autograd/generated/TraceType_0.cpp:16969 [kernel]
+AutocastCPU: fallthrough registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/autocast_mode.cpp:378 [backend fallback]
+AutocastCUDA: fallthrough registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/autocast_mode.cpp:244 [backend fallback]
+FuncTorchBatched: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:720 [backend fallback]
+BatchedNestedTensor: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:746 [backend fallback]
+FuncTorchVmapMode: fallthrough registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/functorch/VmapModeRegistrations.cpp:28 [backend fallback]
+Batched: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/LegacyBatchingRegistrations.cpp:1075 [backend fallback]
+VmapMode: fallthrough registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/VmapModeRegistrations.cpp:33 [backend fallback]
+FuncTorchGradWrapper: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/functorch/TensorWrapper.cpp:203 [backend fallback]
+PythonTLSSnapshot: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/core/PythonFallbackKernel.cpp:162 [backend fallback]
+FuncTorchDynamicLayerFrontMode: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/functorch/DynamicLayer.cpp:494 [backend fallback]
+PreDispatch: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/core/PythonFallbackKernel.cpp:166 [backend fallback]
+PythonDispatcher: registered at /opt/conda/conda-bld/pytorch_1706427785636/work/aten/src/ATen/core/PythonFallbackKernel.cpp:158 [backend fallback]
+

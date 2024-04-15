@@ -1,0 +1,18 @@
+mkdir: cannot create directory ‘/global/homes/b/basch/emsim/notebooks/test_output’: No such file or directory
+device is cuda
+Traceback (most recent call last):
+  File "/home/basch/emsim/notebooks/geant_localization.py", line 136, in <module>
+    main(backbone_types, noise_levels)
+  File "/home/basch/emsim/notebooks/geant_localization.py", line 54, in main
+    dataset = GeantElectronDataset(pixels_file, [128, 129], 7, noise_std=float(noise_std), trajectory_file=trajectory_file)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/emsim/notebooks/../emsim/geant/dataset.py", line 58, in __init__
+    self.electrons = read_files(
+                     ^^^^^^^^^^^
+  File "/home/basch/emsim/notebooks/../emsim/geant/io.py", line 20, in read_files
+    grid, pixel_events = read_pixelized_geant_output(pixels_file)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/basch/emsim/notebooks/../emsim/geant/io.py", line 43, in read_pixelized_geant_output
+    with open(filename, "r") as f:
+         ^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '../pixelated_1pt25um_tracks_thinned_4um_back_20k_300keV.txt'

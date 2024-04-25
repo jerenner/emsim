@@ -33,6 +33,7 @@ class QueryGenerator(nn.Module):
             ),
             nn.ReLU(),
             spconv.SubMConv2d(vae_hidden_dim, 2 * query_dim + 4, 1),
+            nn.LayerNorm(2 * query_dim + 4),
         )
         self.count_cdf_threshold = count_cdf_threshold
         self.max_queries_per_batch = max_queries_per_batch or MAX_QUERIES_PER_BATCH
@@ -57,7 +58,10 @@ class QueryGenerator(nn.Module):
             self.max_queries_per_batch,
         ).T
         vae_params = spconv_to_torch_sparse(self.vae_encoder(pixel_features))
-        query_pixel_vae_params = gather_from_sparse_tensor(vae_params, query_indices)
+        query_pixel_vae_params, is_specified_mask = gather_from_sparse_tensor(
+            vae_params, query_indices
+        )
+        assert is_specified_mask.all()
 
         # Split VAE params
         mu, logvar, log_beta_params = torch.split(
@@ -65,23 +69,25 @@ class QueryGenerator(nn.Module):
             [self.query_dim, self.query_dim, 4],
             -1,
         )
-        x_alpha, x_beta, y_alpha, y_beta = torch.split(
-            log_beta_params.exp(), [1, 1, 1, 1], -1
+        y_alpha, y_beta, x_alpha, x_beta = torch.split(
+            log_beta_params.clamp_max(10).exp(), [1, 1, 1, 1], -1
         )
 
         # Generate queries from VAE
         queries = torch.distributions.Normal(mu, logvar.exp()).rsample()
 
         # Generate fractional offsets
-        x = torch.distributions.Beta(x_alpha, x_beta).rsample()
         y = torch.distributions.Beta(y_alpha, y_beta).rsample()
+        x = torch.distributions.Beta(x_alpha, x_beta).rsample()
 
-        query_fractional_offsets = torch.cat([x, y], -1)
+        query_fractional_offsets = torch.cat([y, x], -1)
         return {
             "queries": queries,
             "indices": query_indices,
             "subpixel_coordinates": query_fractional_offsets,
+            "positions": query_indices[..., 1:] + query_fractional_offsets,
             "batch_offsets": batch_offsets_from_sparse_tensor_indices(query_indices.T),
+            "occupancy_logits": predicted_occupancy_logits,
         }
 
 
@@ -148,7 +154,10 @@ def split_queries_by_batch(query_dict: dict[str, Tensor]):
 
 def batch_merge_query_dicts(query_dicts: list[dict[str, Tensor]]):
     out_dict = {
-        key: torch.cat([in_dict[key] for in_dict in query_dicts]) for key in query_dicts[0]
+        key: torch.cat([in_dict[key] for in_dict in query_dicts])
+        for key in query_dicts[0]
     }
-    out_dict["batch_offsets"] = batch_offsets_from_sparse_tensor_indices(out_dict["indices"].T)
+    out_dict["batch_offsets"] = batch_offsets_from_sparse_tensor_indices(
+        out_dict["indices"].T
+    )
     return out_dict

@@ -55,5 +55,5 @@ def windowed_keys_for_queries(
     )
 
     # queries x H x W x feat
-    keys = gather_from_sparse_tensor(image_feature_tensor, key_indices)
-    return keys, key_indices, key_offsets, key_pad_mask
+    keys, is_specified_mask = gather_from_sparse_tensor(image_feature_tensor, key_indices)
+    return keys, key_indices, key_offsets, key_pad_mask, is_specified_mask

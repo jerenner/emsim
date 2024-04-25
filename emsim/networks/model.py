@@ -1,8 +1,11 @@
 import torch
 from torch import nn
 
+import spconv.pytorch as spconv
+
 from .sparse_resnet.unet import SparseResnetUnet
 from .decoder import EMTransformerDecoder
+from .occupancy import OccupancyPredictor
 
 class EMModel(nn.Module):
     def __init__(
@@ -16,6 +19,7 @@ class EMModel(nn.Module):
         unet_norm_layer: nn.Module = nn.BatchNorm1d,
         unet_encoder_drop_path_rate: float = 0.0,
         unet_decoder_drop_path_rate: float = 0.0,
+        pixel_max_occupancy: int = 5,
         transformer_num_queries: int = 2048,
         transformer_layers: int = 6,
         transformer_d_model: int = 256,
@@ -37,8 +41,13 @@ class EMModel(nn.Module):
             decoder_drop_path_rate=unet_decoder_drop_path_rate,
         )
 
+        self.occupancy_predictor = OccupancyPredictor(
+            self.unet.decoder.feature_info[-1]["num_chs"],
+            pixel_max_occupancy+1
+        )
+
         self.decoder = EMTransformerDecoder()
 
-    def forward(self, batch):
+    def forward(self, batch: dict):
         image = batch["image_sparsified"]
         features = self.unet(image)

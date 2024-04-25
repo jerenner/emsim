@@ -1,3 +1,4 @@
+from emsim.utils.sparse_utils import union_sparse_indices
 import spconv.pytorch as spconv
 import torch
 import torch.nn.functional as F
@@ -37,7 +38,7 @@ def occupancy_loss(
     assert predicted_occupancy_logits.is_sparse
     assert groundtruth_occupancy.is_sparse
 
-    predicted_unioned, groundtruth_unioned = union_occupancy_indices(
+    predicted_unioned, groundtruth_unioned = union_sparse_indices(
         predicted_occupancy_logits, groundtruth_occupancy
     )
 
@@ -85,56 +86,3 @@ def occupancy_loss(
 
         return loss, acc, zeros_acc, nonzeros_acc
     return loss
-
-
-def union_occupancy_indices(
-    predicted_occupancy_logits: Tensor, groundtruth_occupancy: Tensor
-):
-    assert groundtruth_occupancy.is_sparse
-    assert predicted_occupancy_logits.is_sparse
-
-    if not groundtruth_occupancy.is_coalesced():
-        groundtruth_occupancy = groundtruth_occupancy.coalesce()
-    if not predicted_occupancy_logits.is_coalesced():
-        predicted_occupancy_logits = predicted_occupancy_logits.coalesce()
-
-    groundtruth_indices = groundtruth_occupancy.indices()
-    groundtruth_values = groundtruth_occupancy.values()
-    predicted_indices = predicted_occupancy_logits.indices()
-    predicted_values = predicted_occupancy_logits.values()
-
-    indices_gt_gt_predicted = torch.cat(
-        [groundtruth_indices, groundtruth_indices, predicted_indices], -1
-    )
-    uniques, counts = torch.unique(indices_gt_gt_predicted, dim=-1, return_counts=True)
-    predicted_exclusives = uniques[:, counts == 1]
-    groundtruth_exclusives = uniques[:, counts == 2]
-
-    groundtruth_unioned = torch.sparse_coo_tensor(
-        torch.cat([groundtruth_indices, predicted_exclusives], -1),
-        torch.cat(
-            [
-                groundtruth_values,
-                groundtruth_values.new_zeros(
-                    predicted_exclusives.shape[-1], dtype=torch.long
-                ),
-            ],
-            0,
-        ),
-        size=groundtruth_occupancy.shape[:3],
-        device=groundtruth_occupancy.device,
-        dtype=torch.long,
-    ).coalesce()
-
-    stacked_zero_logits = predicted_values.new_zeros(
-        [groundtruth_exclusives.shape[-1], predicted_values.shape[-1]], dtype=torch.long
-    )
-    stacked_zero_logits[:, 0] = 1
-    predicted_unioned = torch.sparse_coo_tensor(
-        torch.cat([predicted_indices, groundtruth_exclusives], -1),
-        torch.cat([predicted_values, stacked_zero_logits], 0),
-        size=predicted_occupancy_logits.shape,
-        device=predicted_occupancy_logits.device,
-    ).coalesce()
-
-    return predicted_unioned, groundtruth_unioned

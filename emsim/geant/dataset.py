@@ -131,19 +131,23 @@ class GeantElectronDataset(IterableDataset):
                     for elec in elecs
                 ]
             )
+            incidence_points_pixels_rc = np.fliplr(
+                incidence_points_xy
+            ) / self.pixel_to_mm.astype(np.float32)
             local_incidence_points_mm = incidence_points_xy - patch_coords_mm[:, :2]
             local_incidence_points_pixels = (
                 local_incidence_points_mm / self.pixel_to_mm.astype(np.float32)
             )
             batch["incidence_points_xy"] = incidence_points_xy.astype(np.float32)
+            batch["incidence_points_pixels_rc"] = incidence_points_pixels_rc
             batch["local_incidence_points_pixels_xy"] = (
                 local_incidence_points_pixels.astype(np.float32)
             )
 
             # center of mass for each patch
             local_centers_of_mass_pixels = charge_2d_center_of_mass(patches)
-            batch["local_centers_of_mass_pixels_xy"] = local_centers_of_mass_pixels.astype(
-                np.float32
+            batch["local_centers_of_mass_pixels_xy"] = (
+                local_centers_of_mass_pixels.astype(np.float32)
             )
 
             # whole trajectories, if trajectory file is given
@@ -162,12 +166,14 @@ class GeantElectronDataset(IterableDataset):
                 batch["local_trajectories_pixels"] = local_trajectories_pixels
 
             # per-electron segmentation mask
-            segmentation_mask, background = make_soft_segmentation_mask(stacked_sparse_arrays)
+            segmentation_mask, background = make_soft_segmentation_mask(
+                stacked_sparse_arrays
+            )
             batch["segmentation_mask"] = segmentation_mask
             batch["segmentation_background"] = background
 
             # multiscale incidence count maps
-            incidence_points_rc = incidence_points_xy[...,::-1]
+            incidence_points_rc = incidence_points_xy[..., ::-1]
             incidence_map = incident_pixel_map(incidence_points_rc, elecs[0].grid)
             count_maps = multiscale_electron_count_maps(incidence_map)
             batch.update(count_maps)
@@ -180,7 +186,9 @@ class GeantElectronDataset(IterableDataset):
 
             yield batch
 
-    def make_composite_image(self, stacked_sparse_arrays: sparse.SparseArray) -> np.ndarray:
+    def make_composite_image(
+        self, stacked_sparse_arrays: sparse.SparseArray
+    ) -> np.ndarray:
         summed = stacked_sparse_arrays.sum(-1)
         image = summed.todense()
 
@@ -212,7 +220,7 @@ def sparsearray_from_pixels(
     shape: Tuple[int],
     offset_x: Optional[int] = None,
     offset_y: Optional[int] = None,
-    dtype=None
+    dtype=None,
 ):
     x_indices, y_indices, data = [], [], []
     for p in pixelset:
@@ -228,9 +236,7 @@ def sparsearray_from_pixels(
         y_indices = y_indices - offset_y
     # array = scipy.sparse.coo_array((np.array(data, dtype=dtype), (y_indices, x_indices)), shape=shape)
     array = sparse.COO(
-        np.stack([y_indices, x_indices], 0),
-        np.array(data, dtype=dtype),
-        shape=shape
+        np.stack([y_indices, x_indices], 0), np.array(data, dtype=dtype), shape=shape
     )
     return array
 
@@ -293,7 +299,7 @@ def get_pixel_patches(
     image: np.ndarray,
     electrons: list[GeantElectron],
     patch_size: int,
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     patches = []
     patch_coordinates = []
 
@@ -424,15 +430,19 @@ def electron_collate_fn(
                     np.concatenate([sample[key] for sample in batch], axis=0)
                 )
 
-            if key not in _SPARSE_STACK + _TO_DEFAULT_COLLATE:
-                out_batch[key + "_batch_index"] = torch.cat(
-                    [
-                        torch.repeat_interleave(torch.as_tensor(i), length)
-                        for i, length in enumerate(lengths)
-                    ]
-                )
+            # if key not in _SPARSE_STACK + _TO_DEFAULT_COLLATE:
+            #     out_batch[key + "_batch_index"] = torch.cat(
+            #         [
+            #             torch.repeat_interleave(torch.as_tensor(i), length)
+            #             for i, length in enumerate(lengths)
+            #         ]
+            #     )
 
     out_batch.update(default_collate_fn(to_default_collate))
+
+    out_batch["electron_batch_offsets"] = torch.as_tensor(
+        np.cumsum([0] + [len(item["electron_ids"]) for item in batch][:-1])
+    )
 
     return out_batch
 

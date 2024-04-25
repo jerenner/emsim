@@ -20,10 +20,10 @@ class FourierEncoding(nn.Module):
         self.weight.reset_parameters()
 
     def forward(self, positions: Tensor):
-        positions *= 2 * torch.pi
+        positions = positions * 2 * torch.pi
         proj = self.weight(positions)
         out = torch.cat([proj.sin(), proj.cos()], -1)
-        out *= self._scaling
+        out = out * self._scaling
         return out
 
 

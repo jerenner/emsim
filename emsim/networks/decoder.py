@@ -23,6 +23,7 @@ class TransformerDecoder(nn.Module):
         dropout: float = 0.1,
         activation_fn: str = "gelu",
         norm_first: bool = True,
+        return_intermediate_outputs: bool = False,
     ):
         super().__init__()
 
@@ -30,7 +31,7 @@ class TransformerDecoder(nn.Module):
         # self.subpixel_pos_encoding = SubpixelPositionalEncoding(d_model)
 
         self.delta_pos_decoder = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, 2)
+            nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, 2), nn.Tanh()
         )
 
         self.layers = nn.ModuleList(
@@ -45,34 +46,47 @@ class TransformerDecoder(nn.Module):
             )
             for _ in range(n_layers)
         )
+        self.return_intermediate_outputs = return_intermediate_outputs
 
-    def forward(self, query_dict: dict[str, Tensor], image_feature_tensor: Tensor):
+    def forward(self, in_query_dict: dict[str, Tensor], image_feature_tensor: Tensor):
+        if self.return_intermediate_outputs:
+            intermediates = []
+
         for i, layer in enumerate(self.layers):
-            x = layer(query_dict, image_feature_tensor)
+            if self.return_intermediate_outputs:
+                intermediates.append(in_query_dict)
+            x = layer(in_query_dict, image_feature_tensor)
 
-            query_dict["queries"] = x
+            out_query_dict = {}
+            out_query_dict["occupancy_logits"] = in_query_dict["occupancy_logits"]
+            out_query_dict["batch_offsets"] = in_query_dict["batch_offsets"]
+
+            out_query_dict["queries"] = x
 
             delta_position = self.delta_pos_decoder(x)
-            new_positions = (
-                query_dict["indices"][..., 1:]
-                + query_dict["subpixel_coordinates"]
-                + delta_position
+            new_positions = in_query_dict["positions"] + delta_position
+            new_positions = torch.clamp(
+                new_positions,
+                new_positions.new_tensor(0.0),
+                new_positions.new_tensor(
+                    [[image_feature_tensor.shape[1], image_feature_tensor.shape[2]]]
+                ),
             )
-            new_positions[:, 0] = torch.clamp(
-                new_positions[:, 0], 0, image_feature_tensor.shape[1]
-            )
-            new_positions[:, 1] = torch.clamp(
-                new_positions[:, 1], 0, image_feature_tensor.shape[2]
-            )
-            new_indices = torch.floor(new_positions).to(query_dict["indices"])
+            new_indices = torch.floor(new_positions).to(in_query_dict["indices"])
             new_subpixel_coordinates = torch.frac(new_positions)
 
-            query_dict["indices"] = torch.cat(
-                [query_dict["indices"][:, :1], new_indices], -1
+            out_query_dict["positions"] = new_positions
+            out_query_dict["indices"] = torch.cat(
+                [in_query_dict["indices"][:, :1], new_indices], -1
             )
-            query_dict["subpixel_coordinates"] = new_subpixel_coordinates
+            out_query_dict["subpixel_coordinates"] = new_subpixel_coordinates
 
-        return query_dict
+            in_query_dict = out_query_dict
+
+        if self.return_intermediate_outputs:
+            return out_query_dict, intermediates
+        else:
+            return out_query_dict
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -269,7 +283,7 @@ class CrossAttentionBlock(nn.Module):
     ):
         n_queries = queries.shape[0]
 
-        keys, _, key_offsets, key_pad_mask = windowed_keys_for_queries(
+        keys, _, key_offsets, key_pad_mask, _ = windowed_keys_for_queries(
             query_indices,
             image_feature_tensor,
             self.key_patch_size,

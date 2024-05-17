@@ -330,6 +330,8 @@ class CrossAttentionBlock(nn.Module):
         attn = F.scaled_dot_product_attention(
             q, k, v, attn_mask=key_pad_mask, dropout_p=self.dropout.p
         )
+        if torch.any(attn.isinf()):
+            raise ValueError("Got inf attention output")
         attn = attn.permute(0, 2, 1, 3).reshape(-1, self.n_heads * self.head_dim)
 
         out = self.out_proj(attn)

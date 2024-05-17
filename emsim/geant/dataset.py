@@ -109,9 +109,12 @@ class GeantElectronDataset(IterableDataset):
                 boxes, self.grid.xmax_pixel, self.grid.ymax_pixel
             )
             boxes_array = [box.asarray() for box in boxes]
-            batch["bounding_boxes"] = boxes_normalized.astype(np.float32)
-            batch["bounding_boxes_unnormalized"] = np.array(
-                boxes_array, dtype=np.float32
+            batch["bounding_boxes_pixels_xyxy"] = np.array(boxes_array, dtype=np.float32)
+            batch["bounding_boxes_normalized_xyxy"] = np.array(
+                boxes_normalized, dtype=np.float32
+            )
+            batch["bounding_boxes_pixels_cxcywh"] = np.array(
+                [box.center_format() for box in boxes], dtype=np.float32
             )
 
             # patches centered on high-energy pixels

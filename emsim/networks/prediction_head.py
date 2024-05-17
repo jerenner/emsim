@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from math import log
 
 from ..utils.window_utils import windowed_keys_for_queries
 from ..utils.sparse_utils import spconv_to_torch_sparse, gather_from_sparse_tensor
@@ -146,11 +147,12 @@ class PredictionHead(nn.Module):
         return binary_mask_logits, portion_logits, key_indices, is_specified_mask
 
     def predict_position_std_dev_cholesky(
-        self, decoded_query_dict: dict[str, Tensor], epsilon: float = 1e-6
+        self, decoded_query_dict: dict[str, Tensor], epsilon: float = 1e-6, max_cov: float = 1e5,
     ):
         logdiag, offdiag = self.position_std_dev_head(
             decoded_query_dict["queries"]
         ).split([2, 1], -1)
+        logdiag = logdiag.clamp_max(log(max_cov))
         diag = logdiag.exp() + epsilon
 
         cholesky = torch.diag_embed(diag)

@@ -40,7 +40,8 @@ class SparseResnetV2(nn.Module):
         for stage_index, (d, c, bdpr) in enumerate(zip(layers, channels, block_dprs)):
             # out_chs = make_divisible(c)
             out_chs = c
-            stride = 1 if stage_index == 0 else 2
+            # stride = 1 if stage_index == 0 else 2
+            stride = 2
             if curr_stride >= output_stride:
                 dilation *= stride
                 stride = 1

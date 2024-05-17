@@ -5,6 +5,10 @@ import torch
 from torch import Tensor
 
 
+def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor):
+    return torch.tensor_split(tensor, batch_offsets[1:].cpu())
+
+
 def deconcat_add_batch_dim(tensor: Tensor, batch_offsets: Tensor):
     assert batch_offsets.ndim == 1
     if batch_offsets[-1] != len(tensor):

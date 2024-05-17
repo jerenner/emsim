@@ -14,6 +14,7 @@ class Criterion(nn.Module):
         loss_coef_mask_bce: float = 1.0,
         loss_coef_mask_dice: float = 1.0,
         loss_coef_incidence_nll: float = 1.0,
+        loss_coef_incidence_mse: float = 1.0,
         loss_coef_total_energy: float = 1.0,
         loss_coef_occupancy: float = 1.0,
         no_electron_weight: float = 0.1,
@@ -28,6 +29,7 @@ class Criterion(nn.Module):
         self.loss_coef_mask_bce = loss_coef_mask_bce
         self.loss_coef_mask_dice = loss_coef_mask_dice
         self.loss_coef_incidence_nll = loss_coef_incidence_nll
+        self.loss_coef_incidence_mse = loss_coef_incidence_mse
         self.loss_coef_total_energy = loss_coef_total_energy
         self.loss_coef_occupancy = loss_coef_occupancy
         self.no_electron_weight = no_electron_weight
@@ -72,7 +74,7 @@ class Criterion(nn.Module):
             [matched[0] for matched in matched_indices],
         ).coalesce()
 
-        bce_loss = self.get_mask_bce_loss(
+        bce_loss, binary_acc = self.get_mask_bce_loss(
             true_segmap,
             binary_logit_segmap,
             matched_indices,
@@ -98,6 +100,7 @@ class Criterion(nn.Module):
         occupancy_loss, occupancy_acc = self.get_occupancy_loss(
             predicted_dict, target_dict
         )
+        oracle_com_mse = self.get_oracle_com_mse(target_dict)
 
         loss_weights = torch.stack(
             [
@@ -107,11 +110,19 @@ class Criterion(nn.Module):
                 torch.tensor(
                     self.loss_coef_incidence_nll, device=distance_nll_loss.device
                 ),
+                torch.tensor(self.loss_coef_incidence_mse, device=mse_loss.device),
                 torch.tensor(self.loss_coef_occupancy, device=occupancy_loss.device),
             ]
         )
         loss_terms = torch.stack(
-            [class_loss, bce_loss, dice_loss, distance_nll_loss, occupancy_loss]
+            [
+                class_loss,
+                bce_loss,
+                dice_loss,
+                distance_nll_loss,
+                mse_loss,
+                occupancy_loss,
+            ]
         )
 
         loss = torch.dot(loss_weights, loss_terms)
@@ -121,9 +132,11 @@ class Criterion(nn.Module):
             "electron_acc": electron_acc.detach().item(),
             "no_electron_acc": no_electron_acc.detach().item(),
             "bce_loss": bce_loss.detach().item(),
+            "binary_acc": binary_acc.detach().item(),
             "dice_loss": dice_loss.detach().item(),
             "incidence_nll_loss": distance_nll_loss.detach().item(),
             "incidence_mse_loss": mse_loss.detach().item(),
+            "oracle_com_mse": oracle_com_mse.detach().item(),
             "occupancy_loss": occupancy_loss.detach().item(),
             "occupancy_acc": occupancy_acc.detach().item(),
             "total_loss": loss.detach().item(),
@@ -232,11 +245,18 @@ class Criterion(nn.Module):
         #     true_specified_mask, predicted_specified_mask
         # )
 
-        return F.binary_cross_entropy_with_logits(
+        loss = F.binary_cross_entropy_with_logits(
             predicted_logits,
             true_values.float(),
             # weight=predicted_specified_mask.float(),
         )
+        with torch.no_grad():
+            acc = (
+                torch.count_nonzero(true_values == (predicted_logits > 0.0))
+                / true_values.numel()
+            )
+
+        return loss, acc
 
     def get_mask_dice_loss(
         self, reordered_true_segmap: Tensor, reordered_portion_logit_segmap: Tensor
@@ -344,6 +364,13 @@ class Criterion(nn.Module):
             / gathered_targets.numel()
         )
         return loss, acc
+
+    def get_oracle_com_mse(self, target_dict: dict[str, Tensor]):
+        with torch.no_grad():
+            return F.mse_loss(
+                target_dict["local_centers_of_mass_pixels_xy"],
+                target_dict["local_incidence_points_pixels_xy"],
+            )
 
 
 def _safe_gaussian_log_prob(mean: Tensor, std_dev_cholesky: Tensor, point: Tensor):

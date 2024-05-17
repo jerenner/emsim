@@ -20,13 +20,30 @@ class OccupancyPredictor(nn.Module):
         self.predictor = spconv.SubMConv2d(in_features, out_classes, kernel_size)
         self.map_list_index = map_list_index
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, *args):
         if isinstance(x, list):
             x = x[self.map_list_index]
         if isinstance(x, Tensor) and x.is_sparse:
             x = torch_sparse_to_spconv(x)
         x = self.predictor(x)
         return spconv_to_torch_sparse(x)
+
+
+class CheatingOccupancyPredictor(nn.Module):
+    def __init__(self, out_classes: int):
+        super().__init__()
+        self.out_classes = out_classes
+
+    def forward(self, x: Tensor, groundtruth_occupancy: Tensor):
+        assert groundtruth_occupancy.is_sparse
+        groundtruth_onehot = F.one_hot(
+            groundtruth_occupancy.values(), self.out_classes
+        ).float()
+        return torch.sparse_coo_tensor(
+            groundtruth_occupancy.indices(),
+            groundtruth_onehot,
+            size=groundtruth_occupancy.shape + (groundtruth_onehot.shape[1],),
+        ).coalesce()
 
 
 def occupancy_loss(

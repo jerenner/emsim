@@ -197,11 +197,18 @@ def gather_from_sparse_tensor_old(sparse_tensor: Tensor, index_tensor: Tensor):
 
 def _gather_from_sparse_tensor_shared(sparse_tensor: Tensor, index_tensor: Tensor):
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
-        raise ValueError(
-            "Expected last dim of `index_tensor` to be the same as "
-            f"`sparse_tensor.sparse_dim()`, got {index_tensor.shape[-1]=} "
-            f"and {sparse_tensor.sparse_dim()=}"
-        )
+        if (
+            sparse_tensor.sparse_dim() - 1 == index_tensor.shape[-1]
+            and sparse_tensor.shape[-1] == 1
+            and sparse_tensor.dense_dim() == 0
+        ):
+            sparse_tensor = sparse_tensor[..., 0].coalesce()
+        else:
+            raise ValueError(
+                "Expected last dim of `index_tensor` to be the same as "
+                f"`sparse_tensor.sparse_dim()`, got {index_tensor.shape[-1]=} "
+                f"and {sparse_tensor.sparse_dim()=}"
+            )
     sparse_shape = sparse_tensor.shape[: sparse_tensor.sparse_dim()]
     dim_linear_offsets = index_tensor.new_tensor(
         [np.prod((sparse_shape + (1,))[i + 1 :]) for i in range(len(sparse_shape))]
@@ -241,7 +248,7 @@ def _gather_from_sparse_tensor_shared(sparse_tensor: Tensor, index_tensor: Tenso
     )
 
     assert index_tensor_linearized.min() >= 0
-    assert index_tensor_linearized.max() < sparse_tensor_linearized.shape[0]
+    assert index_tensor_linearized.max() <= sparse_tensor_linearized.shape[0]
 
     return (
         sparse_tensor_linearized,

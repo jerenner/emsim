@@ -48,6 +48,16 @@ class SubpixelPositionalEncoding(nn.Module):
         return out
 
 
+# class PixelSubpixelAdditiveEncoding(nn.Module):
+#     def __init__(self, out_features):
+#         super().__init__()
+#         self.pixel_encoding = PixelPositionalEncoding()
+#         self.subpixel_encoding = SubpixelPositionalEncoding()
+
+#     def forward(self, pixel_indices: Tensor, image_size: Tensor, subpixel_positions: Tensor):
+#         positions =
+
+
 class RelativePositionalEncodingTableInterpolate2D(nn.Module):
     def __init__(
         self,

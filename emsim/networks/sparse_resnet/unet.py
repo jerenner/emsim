@@ -31,17 +31,19 @@ class SparseResnetUnet(nn.Module):
             drop_path_rate=encoder_drop_path_rate,
         )
 
-        encoder_strides = [
-            info["reduction"]
-            for info in self.encoder.feature_info
-            if "stages" in info["module"]
-        ][::-1]
+        encoder_strides = []
+        encoder_skip_channels = []
+        for info in self.encoder.feature_info[::-1]:
+            encoder_strides.append(info["reduction"])
+            encoder_skip_channels.append(info["num_chs"])
+            if encoder_strides[-1] == 1:
+                break
 
         self.decoder = SparseUnetDecoder(
             decoder_layers,
-            encoder_channels[::-1],
+            encoder_skip_channels,
             encoder_strides,
-            decoder_channels,
+            channels=decoder_channels,
             act_layer=act_layer,
             norm_layer=norm_layer,
             drop_path_rate=decoder_drop_path_rate,
@@ -49,11 +51,11 @@ class SparseResnetUnet(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x = self.encoder(x)
-        x = [  # don't use the stem output
-            x_i
-            for x_i, f_i in zip(x, self.encoder.feature_info)
-            if "stages" in f_i["module"]
-        ]
+        # x = [  # don't use the stem output
+        #     x_i
+        #     for x_i, f_i in zip(x, self.encoder.feature_info)
+        #     if "stages" in f_i["module"]
+        # ]
         x.reverse()
         x = self.decoder(x)
         return x

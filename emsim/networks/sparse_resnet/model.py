@@ -69,6 +69,8 @@ class SparseResnetV2(nn.Module):
             ]
             self.stages.append(stage)
 
+        indice_keys = [stage.blocks[0].indice_key_3x3 for stage in self.stages]
+        self.downsample_indice_keys = [key for key in indice_keys if "down" in key]
         self.num_features = prev_chs
         self.norm = norm_layer(self.num_features)
 

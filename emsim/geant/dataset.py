@@ -19,7 +19,11 @@ from emsim.utils.misc_utils import (
 _KEYS_TO_NOT_BATCH = ("local_trajectories_pixels", "hybrid_sparse_tensors")
 
 # these keys get passed to the default collate_fn, everything else uses custom batching logic
-_TO_DEFAULT_COLLATE = ("image", "batch_size")
+_TO_DEFAULT_COLLATE = (
+    "image",
+    "batch_size",
+    "noiseless_image",
+)
 
 # these sparse arrays get stacked with an extra batch dimension
 _SPARSE_STACK = (
@@ -31,6 +35,13 @@ _SPARSE_STACK = (
     "electron_count_map_1/4",
     "electron_count_map_1/8",
     "electron_count_map_1/16",
+    "peak_normalized_noiseless_image_1/1",
+    "peak_normalized_noiseless_image_1/2",
+    "peak_normalized_noiseless_image_1/4",
+    "peak_normalized_noiseless_image_1/8",
+    "peak_normalized_noiseless_image_1/16",
+    "peak_normalized_noiseless_image_1/32",
+    "peak_normalized_noiseless_image_1/64",
 )
 
 # these sparse arrays get concatenated, with no batch dimension
@@ -97,11 +108,32 @@ class GeantElectronDataset(IterableDataset):
             batch["batch_size"] = len(elecs)
             batch["hybrid_sparse_tensors"] = self.hybrid_sparse_tensors
 
+            # ionization electron statistics
+            ionization_electrons = [
+                np.array(
+                    [pixel.ionization_electrons for pixel in elec.pixels],
+                    dtype=np.float32,
+                )
+                for elec in elecs
+            ]
+            batch["total_ionization_electrons"] = np.array(
+                [ions.sum() for ions in ionization_electrons]
+            )
+            batch["peak_ionization_electrons"] = np.array(
+                [ions.max() for ions in ionization_electrons]
+            )
+
             # stacked sparse arrays of single electron strikes
             stacked_sparse_arrays = sparse_single_electron_arrays(elecs)
 
             # composite electron image
-            batch["image"] = self.make_composite_image(stacked_sparse_arrays)
+            batch["image"] = self.make_composite_image(
+                stacked_sparse_arrays, self.noise_std
+            )
+            batch["noiseless_image"] = self.make_composite_image(
+                stacked_sparse_arrays, 0.0
+            )
+            batch.update(multiscale_peak_normalized_maps(stacked_sparse_arrays))
 
             # bounding boxes
             boxes = [elec.pixels.get_bounding_box() for elec in elecs]
@@ -109,7 +141,9 @@ class GeantElectronDataset(IterableDataset):
                 boxes, self.grid.xmax_pixel, self.grid.ymax_pixel
             )
             boxes_array = [box.asarray() for box in boxes]
-            batch["bounding_boxes_pixels_xyxy"] = np.array(boxes_array, dtype=np.float32)
+            batch["bounding_boxes_pixels_xyxy"] = np.array(
+                boxes_array, dtype=np.float32
+            )
             batch["bounding_boxes_normalized_xyxy"] = np.array(
                 boxes_normalized, dtype=np.float32
             )
@@ -190,12 +224,12 @@ class GeantElectronDataset(IterableDataset):
             yield batch
 
     def make_composite_image(
-        self, stacked_sparse_arrays: sparse.SparseArray
+        self, stacked_sparse_arrays: sparse.SparseArray, noise_std: float = 0.0
     ) -> np.ndarray:
         summed = stacked_sparse_arrays.sum(-1)
         image = summed.todense()
 
-        if self.noise_std > 0:
+        if noise_std > 0:
             image = image + self._rng.normal(
                 0.0, self.noise_std, size=image.shape
             ).astype(image.dtype)
@@ -277,23 +311,47 @@ def multiscale_electron_count_maps(
     incidence_map: sparse.SparseArray,
     downscaling_levels: list[int] = [1, 2, 4, 8, 16],
 ) -> list[sparse.SparseArray]:
-    width, height = incidence_map.shape
+    height, width = incidence_map.shape
 
     out = {}
     for ds in downscaling_levels:
         array = incidence_map.copy()
 
         if ds > 1:
-            # prune the last row/column if not evenly divisible
+            # prune the last row/columns if not evenly divisible
 
-            width_remainder = width % ds
             height_remainder = height % ds
-            array = array[: width - width_remainder, : height - height_remainder]
+            width_remainder = width % ds
+            array = array[: height - height_remainder, : width - width_remainder]
 
             # sum up over windows
-            array = array.reshape([width // ds, ds, height // ds, ds]).sum([1, 3])
+            array = array.reshape([height // ds, ds, width // ds, ds]).sum([1, 3])
 
         out[f"electron_count_map_1/{ds}"] = array
+
+    return out
+
+
+def multiscale_peak_normalized_maps(
+    stacked_sparse_arrays: sparse.SparseArray,
+    downscaling_levels: list[int] = [1, 2, 4, 8, 16, 32, 64],
+) -> list[sparse.SparseArray]:
+    height, width, n_elecs = stacked_sparse_arrays.shape
+    out = {}
+    for ds in downscaling_levels:
+        array = stacked_sparse_arrays.copy()
+        if ds > 1:
+            height_remainder = height % ds
+            width_remainder = width % ds
+            array = array[: height - height_remainder, : width - width_remainder]
+
+            array = array.reshape([height // ds, ds, width // ds, ds, n_elecs]).sum(
+                [1, 3]
+            )
+
+        peaks = array.max([0, 1]).todense()
+        array = array / peaks
+        out[f"peak_normalized_noiseless_image_1/{ds}"] = array.max(-1)
 
     return out
 

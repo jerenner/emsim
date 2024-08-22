@@ -1,18 +1,22 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from timm.models.layers import DropPath
 
-from ..utils.window_utils import windowed_keys_for_queries
+from emsim.networks.transformer.blocks import FFNBlock
 
-from ..utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
-from .positional_encoding import (
+from ...utils.window_utils import windowed_keys_for_queries
+
+from ...utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
+from ..positional_encoding import (
     PixelPositionalEncoding,
     RelativePositionalEncodingTableInterpolate2D,
     SubpixelPositionalEncoding,
 )
+from ..ms_deform_attn import SparseMSDeformableAttention
 
 
-class TransformerDecoder(nn.Module):
+class EMTransformerDecoder(nn.Module):
     def __init__(
         self,
         n_layers: int,
@@ -97,8 +101,9 @@ class TransformerDecoderLayer(nn.Module):
         dim_feedforward: int,
         key_patch_size: int = 5,
         dropout: float = 0.1,
-        activation_fn="relu",
-        norm_first=True,
+        activation_fn: str = "relu",
+        norm_first: bool = True,
+        attn_proj_bias: bool = False,
     ):
         super().__init__()
 
@@ -111,7 +116,7 @@ class TransformerDecoderLayer(nn.Module):
         self.cross_attn = CrossAttentionBlock(
             d_model, n_heads, key_patch_size, dropout, norm_first=norm_first
         )
-        self.ffn = FFN(d_model, dim_feedforward, dropout, activation_fn=activation_fn)
+        self.ffn = FFNBlock(d_model, dim_feedforward, dropout, activation_fn=activation_fn)
 
     def forward(self, query_dict: dict[str, Tensor], image_feature_tensor: Tensor):
         image_size = query_dict["indices"].new_tensor(image_feature_tensor.shape[1:-1])
@@ -135,40 +140,6 @@ class TransformerDecoderLayer(nn.Module):
         return x
 
 
-class FFN(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        hidden_dim: int,
-        dropout: float = 0.0,
-        activation_fn: str = "gelu",
-        norm_first: bool = True,
-    ):
-        assert activation_fn in ["gelu", "relu"]
-        super().__init__()
-        self.norm_first = norm_first
-        if activation_fn == "relu":
-            activation = nn.ReLU
-        elif activation_fn == "gelu":
-            activation = nn.GELU
-
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, hidden_dim),
-            activation(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, d_model),
-            nn.Dropout(dropout),
-        )
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, x: Tensor):
-        if self.norm_first:
-            x = x + self.mlp(self.norm(x))
-        else:
-            x = self.norm(x + self.mlp(x))
-        return x
-
-
 class SelfAttentionBlock(nn.Module):
     def __init__(
         self,
@@ -186,10 +157,6 @@ class SelfAttentionBlock(nn.Module):
         self.attn = nn.MultiheadAttention(
             d_model, n_heads, dropout=dropout, bias=bias, batch_first=True
         )
-        self.in_proj = nn.Linear(d_model, d_model * 3, bias=bias)
-
-        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
-
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 

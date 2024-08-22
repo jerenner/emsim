@@ -19,3 +19,10 @@ def random_chunks(x: List[Any], min_size: int, max_size: int):
 def tensors_same_size(tensors: list[torch.Tensor]) -> bool:
     shapes = [x.shape for x in tensors]
     return len(set(shapes)) <= 1
+
+
+def inverse_sigmoid(x, eps: float = 1e-6):
+    x = x.clamp(min=0, max=1)
+    x1 = x.clamp(min=eps)
+    x2 = (1 - x).clamp(min=eps)
+    return torch.log(x1 / x2)

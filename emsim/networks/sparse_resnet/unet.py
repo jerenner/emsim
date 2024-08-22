@@ -59,3 +59,11 @@ class SparseResnetUnet(nn.Module):
         x.reverse()
         x = self.decoder(x)
         return x
+
+    @property
+    def feature_info(self):
+        return self.decoder.feature_info
+
+    @property
+    def downsample_indice_keys(self):
+        return self.encoder.downsample_indice_keys[:-1]

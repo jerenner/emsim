@@ -32,6 +32,12 @@ def deconcat_add_batch_dim(tensor: Tensor, batch_offsets: Tensor):
     return out, padding_mask
 
 
+def concatted_to_nested_tensor(tensor: Tensor, batch_offsets: Tensor):
+    assert batch_offsets.ndim == 1
+    split_tensor = split_batch_concatted_tensor(tensor, batch_offsets)
+    return torch.nested.as_nested_tensor(list(*split_tensor))
+
+
 def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] = None):
     batch_size = tensor.shape[0]
     max_len = tensor.shape[1]
@@ -41,7 +47,7 @@ def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] =
     nonpadded_batch_sizes = padding_mask.shape[-1] - padding_mask.sum(-1)
     batch_offsets = torch.cat(
         [nonpadded_batch_sizes.new_zeros([1]), nonpadded_batch_sizes.cumsum(-1)]
-    )
+    ).to("cpu")
     out = tensor.new_zeros(nonpadded_batch_sizes.sum().item(), *tensor.shape[2:])
 
     assert len(tensor) == len(batch_offsets[:-1])

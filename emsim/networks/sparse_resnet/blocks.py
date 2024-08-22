@@ -150,6 +150,7 @@ class SparseBottleneckV2(spconv.SparseModule):
         else:
             conv_layer = spconv.SubMConv2d
             indice_key_3x3 = f"3x3_{in_reduction}"
+        self.indice_key_3x3 = indice_key_3x3
 
         if in_chs != out_chs or np.prod(stride) > 1:
             assert block_index == 0

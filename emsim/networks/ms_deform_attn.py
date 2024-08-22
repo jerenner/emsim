@@ -7,103 +7,91 @@ from torch.nn.init import constant_, xavier_uniform_
 
 from ..utils.batching_utils import split_batch_concatted_tensor
 from ..utils.sparse_utils import gather_from_sparse_tensor, spconv_to_torch_sparse
+from ..utils.misc_utils import inverse_sigmoid
 
 
 # @torch.jit.script
 def multi_scale_deformable_attention(
-    sparse_values: list[Tensor],
+    stacked_value_tensors: Tensor,
     value_spatial_shapes: Tensor,
     sampling_locations: Tensor,
     query_offsets: Tensor,
     attention_weights: Tensor,
 ):
-    assert all(t.is_sparse for t in sparse_values)
-    sparse_values = [
-        sp.unbind(0) for sp in sparse_values
-    ]  # split feature maps on batch dimension
+    assert isinstance(stacked_value_tensors, Tensor)
+    assert stacked_value_tensors.is_sparse
+    assert stacked_value_tensors.ndim == 5  # (batch, height, width, level, feature)
 
-    n_queries, n_heads, n_levels, n_points, _ = sampling_locations.shape
-    embed_dim = sparse_values[0][0].shape[-1]
-    sampling_locations = split_batch_concatted_tensor(sampling_locations, query_offsets)
+    n_queries, n_levels, n_points, n_heads, _ = sampling_locations.shape
+    embed_dim = stacked_value_tensors.shape[-1]
 
-    sampled_values = []
-    for batch_index, locations in enumerate(sampling_locations):
-        element_sampled_values = []
-        for level, level_feature_maps in enumerate(sparse_values):
-            locations_level = locations[:, :, level]  # query x heads x points x 2
-            value_level = level_feature_maps[batch_index].coalesce()
+    stacked_value_tensors = sparse_split_heads(stacked_value_tensors, n_heads)
+    # now (batch, height, width, level, heads, head_dim)
 
-            # split heads in value tensor
-            n_specified_elements = value_level.indices().shape[-1]
-            repeated_indices = torch.repeat_interleave(
-                value_level.indices(), n_heads, 1
-            )
-            new_indices = torch.cat(
-                [
-                    repeated_indices,
-                    torch.arange(n_heads, device=value_level.device)
-                    .repeat(n_specified_elements)
-                    .unsqueeze(0),
-                ]
-            )
-            new_values = (
-                value_level.values()
-                .reshape(n_specified_elements, n_heads, embed_dim // n_heads)
-                .transpose(1, 2)
-                .reshape(n_specified_elements * n_heads, embed_dim // n_heads)
-            )
-            value_level = torch.sparse_coo_tensor(
-                new_indices,
-                new_values,
-                (
-                    value_level.shape[0],
-                    value_level.shape[1],
-                    n_heads,
-                    embed_dim // n_heads,
-                ),
-            )
+    sampling_locations = sampling_locations * 2 - 1  # rescale to (-1, 1)
 
-            batch_n_queries = locations.shape[0]
-            head_features = []
-            for h, (locations_level_head, value_level_head) in enumerate(
-                zip(locations_level.unbind(1), value_level.unbind(-2))
-            ):
-                level_head_sampled_values = sparse_interp(
-                    value_level_head.coalesce(),
-                    locations_level_head.reshape(batch_n_queries * n_points, 2),
-                )  # n_queries*points, head_dim
-                level_head_sampled_values = level_head_sampled_values.reshape(
-                    batch_n_queries, n_points, embed_dim // n_heads
-                )
-                head_features.append(level_head_sampled_values)
-            level_sampled_values = torch.stack(
-                head_features, 1
-            )  # n_queries, n_heads, n_points, head_dim
-            # locations_level_with_head_index = torch.cat([
-            #     locations_level,
-            #     torch.arange(n_heads, device=locations_level).view(1, n_heads, 1, 1).expand(batch_n_queries,-1, n_points, -1)
-            # ], -1)
-            # level_sampled_values = sparse_interp(
-            #     value_level, locations_level_with_head_index.reshape(batch_n_queries*n_heads*n_points, 3)
-            # )
-            # level_sampled_values = level_sampled_values.reshape(
-            #     batch_n_queries, n_heads, n_points, embed_dim
-            # )
-            element_sampled_values.append(level_sampled_values)
-        sampled_values.append(torch.stack(element_sampled_values, 2))
-    sampled_values = torch.cat(sampled_values, 0)  # re-stack the batch
+    batch_sizes = torch.diff(torch.cat([query_offsets, torch.tensor([n_queries])]))
+    xy_batch_indices = torch.cat(
+        [
+            torch.full([size], i, device=sampling_locations.device, dtype=torch.long)
+            for i, size in enumerate(batch_sizes)
+        ]
+    )
+    xy_batch_indices = xy_batch_indices.view(-1, 1, 1, 1).expand(
+        n_queries, n_levels, n_points, n_heads
+    )
+    xy_level_indices = (
+        torch.arange(n_levels, device=xy_batch_indices.device)
+        .view(1, -1, 1, 1)
+        .expand(n_queries, n_levels, n_points, n_heads)
+    )
+
+    sampled_values = multilevel_sparse_bilinear_grid_sample(
+        stacked_value_tensors,
+        sampling_locations,
+        xy_batch_indices,
+        xy_level_indices,
+        value_spatial_shapes,
+    )
+    sampled_values = sampled_values.float()
 
     assert sampled_values.shape == (
         n_queries,
-        n_heads,
         n_levels,
         n_points,
+        n_heads,
         embed_dim // n_heads,
     )
-    assert attention_weights.shape == (n_queries, n_heads, n_levels, n_points)
+    assert attention_weights.shape == (n_queries, n_levels, n_points, n_heads)
     output = sampled_values * attention_weights.unsqueeze(-1)
-    output = output.sum([2, 3]).view(n_queries, embed_dim)
+    output = output.sum([1, 2]).view(n_queries, embed_dim)
     return output
+
+
+def sparse_split_heads(sparse_tensor: Tensor, n_heads: int):
+    assert isinstance(sparse_tensor, Tensor)
+    assert sparse_tensor.is_sparse
+    assert sparse_tensor.ndim >= 4
+    n_specified_elements = sparse_tensor.indices().shape[1]
+    embed_dim = sparse_tensor.shape[-1]
+    repeated_indices = torch.repeat_interleave(sparse_tensor.indices(), n_heads, 1)
+    new_indices = torch.cat(
+        [
+            repeated_indices,
+            torch.arange(n_heads, device=sparse_tensor.device)
+            .repeat(n_specified_elements)
+            .unsqueeze(0),
+        ]
+    )
+    new_values = sparse_tensor.values().view(
+        n_specified_elements * n_heads, embed_dim // n_heads
+    )
+    new_sparse_tensor = torch.sparse_coo_tensor(
+        new_indices,
+        new_values,
+        (*sparse_tensor.shape[:-1], n_heads, embed_dim // n_heads),
+    ).coalesce()
+    return new_sparse_tensor
 
 
 ## Based on https://github.com/fundamentalvision/Deformable-DETR/blob/main/models/ops/modules/ms_deform_attn.py
@@ -122,18 +110,18 @@ class SparseMSDeformableAttention(nn.Module):
         self.num_heads = num_heads
         self.num_points = num_points
         self.sampling_offsets = nn.Linear(
-            embed_dim, num_heads * num_levels * num_points * 2
+            embed_dim, num_levels * num_points * num_heads * 2, dtype=torch.double
         )
         self.attention_weights = nn.Linear(
-            embed_dim, num_heads * num_levels * num_points
+            embed_dim, num_points * num_levels * num_heads
         )
         self.value_proj = spconv.SubMConv2d(embed_dim, embed_dim, 1)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
-        self._reset_parameters()
+        self.reset_parameters()
 
-    def _reset_parameters(self):
+    def reset_parameters(self):
         constant_(self.sampling_offsets.weight.data, 0.0)
-        thetas = torch.arange(self.num_heads, dtype=torch.float32) * (
+        thetas = torch.arange(self.num_heads, dtype=torch.float64) * (
             2.0 * math.pi / self.num_heads
         )
         grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
@@ -156,9 +144,10 @@ class SparseMSDeformableAttention(nn.Module):
     def forward(
         self,
         query: Tensor,
-        query_offsets: Tensor,
-        reference_points: Tensor,
-        value_tensors: list[spconv.SparseConvTensor],
+        batch_offsets: Tensor,
+        xy_reference_points: Tensor,
+        stacked_value_tensors: Tensor,
+        spatial_shapes: Tensor,
     ):
         """Forward function for SparseMSDeformableAttention
 
@@ -166,44 +155,46 @@ class SparseMSDeformableAttention(nn.Module):
             query (Tensor): Batch-flattened query tensor of shape [n_query x embed_dim]
             query_offsets (Tensor): batchsize-long tensor with the ith element
                 being the start index in the query tensor for batch element i
-            reference_points (Tensor): un-normalized reference points for queries
+            reference_points (Tensor): normalized reference points for queries
                 with shape [n_query x 2], where the last two
-                dimensions are the i, j pixel coordinates in the scale of the
-                input image (i.e., the highest-resolution feature map)
-            value_tensors (list[spconv.SparseConvTensor]): List of feature map
-                sparse tensors from the backbone
+                dimensions are the (x, y) coordinates in the range (0, 1).
+                Should be of dtype double (float64)
+            value_tensors (Tensor): Sparse tensor of all feature maps with the
+                shape [batch x height x width x level x channels]
+            spatial_shapes (Tensor): Tensor of shape [n_levels x 2] with the
+                (height, width) of each level's feature map
         """
+        assert xy_reference_points.dtype == torch.double
         n_total_queries = query.shape[0]
-        value = [spconv_to_torch_sparse(self.value_proj(v)) for v in value_tensors]
 
-        sampling_offsets = self.sampling_offsets(query).view(
-            n_total_queries, self.num_heads, self.num_levels, self.num_points, 2
+        sampling_offsets = self.sampling_offsets(query.double()).view(
+            n_total_queries, self.num_levels, self.num_points, self.num_heads, 2
         )
         attention_weights = self.attention_weights(query).view(
-            n_total_queries, self.num_heads, self.num_levels * self.num_points
+            n_total_queries, self.num_levels * self.num_points, self.num_heads
         )
-        attention_weights = attention_weights.softmax(-1)
+        attention_weights = attention_weights.softmax(-2)
         attention_weights = attention_weights.view(
-            n_total_queries, self.num_heads, self.num_levels, self.num_points
+            n_total_queries, self.num_levels, self.num_points, self.num_heads
         )
 
-        spatial_shapes = torch.stack(
-            [
-                torch.tensor(tensor.spatial_shape, device=sampling_offsets.device)
-                for tensor in value_tensors
-            ],
-            -1,
-        )
-        base_level_shape = spatial_shapes[:, -1]
-        spatial_scaler = spatial_shapes / base_level_shape.unsqueeze(-1)
+        # spatial_scaler = spatial_shapes.flip([1])  # flip i,j to x,y
+        # sampling_locations = xy_reference_points.reshape(
+        #     n_total_queries, 1, 1, 1, 2
+        # ) + sampling_offsets / spatial_scaler.reshape(1, 1, self.num_levels, 1, 2)
 
-        # n_queries, num_heads, num_levels, num_points, 2
-        sampling_locations = (
-            reference_points.reshape(n_total_queries, 1, 1, 1, 2) + sampling_offsets
-        ) * spatial_scaler.transpose(0, 1).reshape(1, 1, self.num_levels, 1, 2)
+        # n_queries, num_levels, num_points, num_heads, 2
+        sampling_locations = torch.sigmoid(
+            inverse_sigmoid(xy_reference_points.view(n_total_queries, 1, 1, 1, 2))
+            + sampling_offsets
+        )
 
         output = multi_scale_deformable_attention(
-            value, spatial_shapes, sampling_locations, query_offsets, attention_weights
+            stacked_value_tensors,
+            spatial_shapes,
+            sampling_locations,
+            batch_offsets,
+            attention_weights,
         )
 
         output = self.output_proj(output)
@@ -257,3 +248,94 @@ def sparse_interp(sparse_tensor: Tensor, pixel_coordinates: Tensor):
         + weight_10 * values_10
         + weight_11 * values_11
     )
+
+
+def multilevel_sparse_bilinear_grid_sample(
+    sparse_tensor: Tensor,
+    xy_coordinates: Tensor,
+    xy_batch_index: Tensor,
+    xy_level_index: Tensor,
+    level_spatial_shapes: Tensor,
+):
+    """Bilinearly samples into a 2D sparse tensor. Similar to F.grid_sample
+    except the sampled tensor is expected to be sparse and the interpolation
+    points are not in a grid. Assumes align_corners=False.
+
+    Args:
+        sparse_tensor (Tensor): torch.sparse.sparse_coo_tensor with shape
+        (batch, height, width, level, head, head_dim)
+        xy_coordinates (Tensor): Sampling point coordinates, with shape
+        (n_queries, n_levels, n_points, n_heads, 2),
+        with the last dimension in order (x, y), with all points within
+        range (-1, 1)
+        xy_batch_index (Tensor): Tensor of shape
+        (n_queries, n_levels, n_points, n_heads) with the index of the batch
+        element for each point in xy_coordinates
+        xy_level_index (Tensor): Tensor of shape
+        (n_queries, n_levels, n_points, n_heads) with the index of the level
+        for each point in xy_coordinates
+        level_spatial_shapes (Tensor): n_levels x 2 tensor with the
+        (height, width) of each level's feature map
+    """
+    assert sparse_tensor.is_sparse
+    assert xy_coordinates.dtype == torch.double
+    bsz, _, _, n_levels, n_heads, head_dim = sparse_tensor.shape
+    n_queries, _, n_points, _, _ = xy_coordinates.shape
+    assert n_levels == xy_coordinates.shape[1]
+    assert n_heads == xy_coordinates.shape[3]
+    assert xy_coordinates.shape[0] == xy_batch_index.shape[0]
+    assert xy_coordinates.shape[0] == xy_level_index.shape[0]
+    assert xy_batch_index.min() >= 0
+    assert xy_batch_index.max() < bsz
+    assert xy_level_index.min() >= 0
+    assert xy_level_index.max() < xy_level_index.shape[0]
+
+    x = xy_coordinates[..., 0]
+    y = xy_coordinates[..., 1]
+
+    head_indices = (
+        torch.arange(n_heads, device=xy_batch_index.device)
+        .view(1, 1, 1, n_heads)
+        .expand_as(xy_batch_index)
+    )
+
+    spatial_shapes_expanded = level_spatial_shapes.view(1, n_levels, 1, 1, 2).expand(
+        n_queries, -1, n_points, n_heads, -1
+    )
+    height = spatial_shapes_expanded[..., 0].contiguous()
+    width = spatial_shapes_expanded[..., 1].contiguous()
+
+    x = ((x + 1) * width - 1) / 2
+    y = ((y + 1) * height - 1) / 2
+
+    # x = x.view(-1)
+    # y = y.view(-1)
+
+    x0 = x.floor().long()
+    y0 = y.floor().long()
+    x1 = x0 + 1
+    y1 = y0 + 1
+
+    x0 = x0.clamp_min(0).clamp_max(width.view_as(x) - 1)
+    x1 = x1.clamp_min(0).clamp_max(width.view_as(x) - 1)
+    y0 = y0.clamp_min(0).clamp_max(height.view_as(y) - 1)
+    y1 = y1.clamp_min(0).clamp_max(height.view_as(y) - 1)
+
+    wa = ((x1 - x) * (y1 - y)).unsqueeze(-1)
+    wb = ((x1 - x) * (y - y0)).unsqueeze(-1)
+    wc = ((x - x0) * (y1 - y)).unsqueeze(-1)
+    wd = ((x - x0) * (y - y0)).unsqueeze(-1)
+
+    x0_y0 = torch.stack([xy_batch_index, x0, y0, xy_level_index, head_indices], -1)
+    x0_y1 = torch.stack([xy_batch_index, x0, x1, xy_level_index, head_indices], -1)
+    x1_y0 = torch.stack([xy_batch_index, x1, y0, xy_level_index, head_indices], -1)
+    x1_y1 = torch.stack([xy_batch_index, x1, y1, xy_level_index, head_indices], -1)
+
+    val_a = gather_from_sparse_tensor(sparse_tensor, x0_y0)[0]
+    val_b = gather_from_sparse_tensor(sparse_tensor, x0_y1)[0]
+    val_c = gather_from_sparse_tensor(sparse_tensor, x1_y0)[0]
+    val_d = gather_from_sparse_tensor(sparse_tensor, x1_y1)[0]
+
+    out = (wa * val_a) + (wb * val_b) + (wc * val_c) + (wd * val_d)
+
+    return out

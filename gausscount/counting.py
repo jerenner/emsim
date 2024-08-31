@@ -34,7 +34,8 @@ def construct_modeled_frame_pytorch(frame_ct, splash_kernel, device='cpu'):
     modeled_frame = F.conv2d(frame_ct_tensor, splash_kernel, padding=splash_kernel.shape[-1]//2)
     
     # Add noise
-    #modeled_frame = modeled_frame + torch.normal(0, noise_sigma, size=frame.shape, device=device)
+    #noise_sigma = 1.0
+    #modeled_frame = modeled_frame + torch.normal(0, noise_sigma, size=modeled_frame.shape, device=device)
     
     # Remove batch and channel dimensions from the output
     modeled_frame = modeled_frame.squeeze(1)

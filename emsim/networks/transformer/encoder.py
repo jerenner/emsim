@@ -12,10 +12,13 @@ from emsim.networks.transformer.blocks import (
     SparseDeformableAttentionBlock,
     SelfAttentionBlock,
 )
+from emsim.networks.positional_encoding import FourierEncoding
+from emsim.networks.positional_encoding import ij_indices_to_normalized_xy
 from emsim.utils.sparse_utils import (
     spconv_to_torch_sparse,
     gather_from_sparse_tensor,
     scatter_to_sparse_tensor,
+    linearize_sparse_and_index_tensors,
 )
 from emsim.utils.batching_utils import (
     deconcat_add_batch_dim,
@@ -132,11 +135,13 @@ class EMTransformerEncoder(nn.Module):
         self.reset_parameters()
 
         self.enhance_score_predictor = score_predictor
+        self.background_embedding = FourierEncoding(3, self.d_model, dtype=torch.double)
 
     def forward(
         self,
         feature_maps: list[spconv.SparseConvTensor],
         position_encoding: list[spconv.SparseConvTensor],
+        spatial_shapes: Tensor,
         token_salience_scores: list[Tensor],  # foreground scores
         token_ij_level_indices: list[Tensor],
         token_normalized_xy_positions: list[Tensor],
@@ -145,13 +150,6 @@ class EMTransformerEncoder(nn.Module):
         # stack the spconv tensors over the batch dimension for faster indexing
         stacked_feature_maps = self.stack_sparse_tensors(feature_maps)
         stacked_pos_encodings = self.stack_sparse_tensors(position_encoding)
-        spatial_shapes = torch.stack(
-            [
-                torch.tensor(feat.spatial_shape, device=stacked_feature_maps.device)
-                for feat in feature_maps
-            ],
-            0,
-        )
         for layer_index, layer in enumerate(self.layers):
             indices_for_layer = [
                 indices[layer_index] for indices in token_layer_subset_indices
@@ -173,10 +171,10 @@ class EMTransformerEncoder(nn.Module):
             batch_offsets = torch.tensor(
                 np.cumsum(np.concatenate([[0], tokens_per_batch]))[:-1]
             )
-            stacked_ij_indices = torch.cat(ij_indices_for_layer, 0)
-            stacked_xy_positions = torch.cat(xy_positions_for_layer, 0)
+            stacked_ij_indices_for_layer = torch.cat(ij_indices_for_layer, 0)
+            stacked_xy_positions_for_layer = torch.cat(xy_positions_for_layer, 0)
             query_for_layer = gather_from_sparse_tensor(
-                stacked_feature_maps, stacked_ij_indices, True
+                stacked_feature_maps, stacked_ij_indices_for_layer, True
             )[0]
             # query_for_layer = torch.nested.as_nested_tensor(
             #     list(
@@ -186,7 +184,7 @@ class EMTransformerEncoder(nn.Module):
             #     )
             # )
             pos_encoding_for_layer = gather_from_sparse_tensor(
-                stacked_pos_encodings, stacked_ij_indices, True
+                stacked_pos_encodings, stacked_ij_indices_for_layer, True
             )[0]
             # pos_encoding_for_layer = torch.nested.as_nested_tensor(
             #     list(
@@ -207,8 +205,8 @@ class EMTransformerEncoder(nn.Module):
             query = layer(
                 query_for_layer,
                 pos_encoding_for_layer,
-                stacked_ij_indices,
-                stacked_xy_positions,
+                stacked_ij_indices_for_layer,
+                stacked_xy_positions_for_layer,
                 batch_offsets,
                 stacked_feature_maps,
                 spatial_shapes,
@@ -217,10 +215,33 @@ class EMTransformerEncoder(nn.Module):
             )
 
             stacked_feature_maps = scatter_to_sparse_tensor(
-                stacked_feature_maps, stacked_ij_indices, query
+                stacked_feature_maps, stacked_ij_indices_for_layer, query
             )
 
-        # TODO learned background embedding?
+        # learned background embedding
+        background_indices = self.get_background_indices(
+            stacked_feature_maps, stacked_ij_indices_for_layer
+        )
+
+        background_ij = background_indices[:, 1:3]
+        background_level = background_indices[:, 3]
+        background_xy = ij_indices_to_normalized_xy(
+            background_ij, spatial_shapes[background_level]
+        )
+        background_xy_level = torch.cat(
+            [
+                background_xy,
+                background_level.unsqueeze(-1).to(background_xy)
+                / (len(feature_maps) - 1),
+            ],
+            -1,
+        )
+
+        background_pos_encoding = self.background_embedding(background_xy_level)
+        background_pos_encoding = background_pos_encoding.float()
+        stacked_feature_maps = scatter_to_sparse_tensor(
+            stacked_feature_maps, background_indices, background_pos_encoding
+        )
 
         return stacked_feature_maps
 
@@ -244,6 +265,23 @@ class EMTransformerEncoder(nn.Module):
             ],
             -2,
         ).coalesce()
+
+    @staticmethod
+    def get_background_indices(stacked_feature_maps, foreground_indices):
+        (
+            sparse_tensor_linearized,
+            index_tensor_linearized,
+            _,
+            _,
+        ) = linearize_sparse_and_index_tensors(stacked_feature_maps, foreground_indices)
+        linear_sparse_indices = sparse_tensor_linearized.indices()
+        background_token_indices = ~torch.isin(
+            linear_sparse_indices, index_tensor_linearized
+        ).squeeze()
+        background_indices = stacked_feature_maps.indices()[
+            :, background_token_indices
+        ].transpose(0, 1)
+        return background_indices
 
     def reset_parameters(self):
         for layer in self.layers:

@@ -1,96 +1,24 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+import copy
 from timm.models.layers import DropPath
 
+from typing import Optional
 from emsim.networks.transformer.blocks import FFNBlock
 
 from ...utils.window_utils import windowed_keys_for_queries
+from ...utils.misc_utils import inverse_sigmoid
 
 from ...utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
 from ..positional_encoding import (
     PixelPositionalEncoding,
     RelativePositionalEncodingTableInterpolate2D,
     SubpixelPositionalEncoding,
+    FourierEncoding,
 )
 from ..ms_deform_attn import SparseMSDeformableAttention
-
-
-class EMTransformerDecoder(nn.Module):
-    def __init__(
-        self,
-        n_layers: int,
-        d_model: int,
-        n_heads: int,
-        dim_feedforward: int,
-        key_patch_size: int = 5,
-        dropout: float = 0.1,
-        activation_fn: str = "gelu",
-        norm_first: bool = True,
-        return_intermediate_outputs: bool = False,
-    ):
-        super().__init__()
-
-        # self.pixel_pos_encoding = PixelPositionalEncoding(d_model)
-        # self.subpixel_pos_encoding = SubpixelPositionalEncoding(d_model)
-
-        self.delta_pos_decoder = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, 2), nn.Tanh()
-        )
-
-        self.layers = nn.ModuleList(
-            TransformerDecoderLayer(
-                d_model,
-                n_heads,
-                dim_feedforward,
-                key_patch_size,
-                dropout,
-                activation_fn,
-                norm_first,
-            )
-            for _ in range(n_layers)
-        )
-        self.return_intermediate_outputs = return_intermediate_outputs
-
-    def forward(self, in_query_dict: dict[str, Tensor], image_feature_tensor: Tensor):
-        if self.return_intermediate_outputs:
-            intermediates = []
-
-        for i, layer in enumerate(self.layers):
-            if self.return_intermediate_outputs:
-                intermediates.append(in_query_dict)
-            x = layer(in_query_dict, image_feature_tensor)
-
-            out_query_dict = {}
-            out_query_dict["occupancy_logits"] = in_query_dict["occupancy_logits"]
-            out_query_dict["batch_offsets"] = in_query_dict["batch_offsets"]
-
-            out_query_dict["queries"] = x
-
-            delta_position = self.delta_pos_decoder(x)
-            new_positions = in_query_dict["positions"] + delta_position
-            new_positions = torch.clamp(
-                new_positions,
-                new_positions.new_tensor(0.0),
-                new_positions.new_tensor(
-                    [[image_feature_tensor.shape[1], image_feature_tensor.shape[2]]]
-                ),
-            )
-            new_indices = torch.floor(new_positions).to(in_query_dict["indices"])
-            new_subpixel_coordinates = torch.frac(new_positions)
-
-            out_query_dict["positions"] = new_positions
-            out_query_dict["indices"] = torch.cat(
-                [in_query_dict["indices"][:, :1], new_indices], -1
-            )
-            out_query_dict["subpixel_coordinates"] = new_subpixel_coordinates
-
-            in_query_dict = out_query_dict
-
-        if self.return_intermediate_outputs:
-            return out_query_dict, intermediates
-        else:
-            return out_query_dict
+from .blocks import SelfAttentionBlock, SparseDeformableAttentionBlock, FFNBlock
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -99,207 +27,176 @@ class TransformerDecoderLayer(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
-        key_patch_size: int = 5,
+        n_deformable_value_levels: int = 4,
+        n_deformable_points: int = 4,
         dropout: float = 0.1,
-        activation_fn: str = "relu",
+        activation_fn: str = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
     ):
         super().__init__()
-
-        self.pixel_pos_encoding = PixelPositionalEncoding(d_model)
-        self.subpixel_pos_encoding = SubpixelPositionalEncoding(d_model)
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.dim_feedforward = dim_feedforward
 
         self.self_attn = SelfAttentionBlock(
-            d_model, n_heads, dropout, norm_first=norm_first
+            d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
         )
-        self.cross_attn = CrossAttentionBlock(
-            d_model, n_heads, key_patch_size, dropout, norm_first=norm_first
+        self.msdeform_attn = SparseDeformableAttentionBlock(
+            d_model,
+            n_heads,
+            n_deformable_value_levels,
+            n_deformable_points,
+            dropout,
+            norm_first,
         )
-        self.ffn = FFNBlock(d_model, dim_feedforward, dropout, activation_fn=activation_fn)
-
-    def forward(self, query_dict: dict[str, Tensor], image_feature_tensor: Tensor):
-        image_size = query_dict["indices"].new_tensor(image_feature_tensor.shape[1:-1])
-        pixel_encoding = self.pixel_pos_encoding(
-            query_dict["indices"][..., -2:], image_size
+        self.ffn = FFNBlock(
+            d_model, dim_feedforward, dropout, activation_fn, norm_first
         )
-        subpixel_encoding = self.subpixel_pos_encoding(
-            query_dict["subpixel_coordinates"]
-        )
-
-        x = query_dict["queries"] + pixel_encoding + subpixel_encoding
-
-        x = self.self_attn(x, query_dict["batch_offsets"])
-        x = self.cross_attn(
-            x,
-            query_dict["indices"],
-            query_dict["subpixel_coordinates"],
-            image_feature_tensor,
-        )
-        x = self.ffn(x)
-        return x
-
-
-class SelfAttentionBlock(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        dropout: float = 0.0,
-        bias: bool = True,
-        norm_first: bool = True,
-    ):
-        super().__init__()
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.norm_first = norm_first
-
-        self.attn = nn.MultiheadAttention(
-            d_model, n_heads, dropout=dropout, bias=bias, batch_first=True
-        )
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: Tensor, batch_offsets: Tensor):
-        # Add batch dimension for self-attention computation
-        x, pad_mask = deconcat_add_batch_dim(x, batch_offsets)
-
-        if self.norm_first:
-            residual = x
-            x = self.norm(x)
-            x = self.attn(x, x, x, key_padding_mask=pad_mask, need_weights=False)[0]
-            x = self.dropout(x)
-            x = residual + x
-        else:
-            x = x + self.dropout(self.attn(x, x, x, need_weights=False)[0])
-            x = self.norm(x)
-
-        # remove batch dimension and return to stacked format
-        x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
-        assert torch.equal(batch_offsets, batch_offsets_2)
-        return x
-
-
-class CrossAttentionBlock(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        key_patch_size=5,
-        dropout: float = 0.0,
-        bias: bool = True,
-        norm_first: bool = True,
-    ):
-        super().__init__()
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.norm_first = norm_first
-
-        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.k_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.v_proj = nn.Linear(d_model, d_model, bias=bias)
-
-        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
-
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-
-        self.rel_pos_encoding = RelativePositionalEncodingTableInterpolate2D(
-            d_model, key_patch_size, key_patch_size
-        )
-
-        self.key_patch_size = key_patch_size
 
     def forward(
         self,
         queries: Tensor,
-        query_indices: Tensor,
-        query_subpixel_coordinates: Tensor,
-        image_feature_tensor: Tensor,
+        query_pos_encoding: Tensor,
+        query_ij_indices: Tensor,
+        query_normalized_xy_positions: Tensor,
+        batch_offsets: Tensor,
+        stacked_feature_maps: Tensor,
+        spatial_shapes: Tensor,
     ):
-        if self.norm_first:
-            residual = queries
-            x = self.norm(queries)
-            x = residual + self.dropout(
-                self.attn(
-                    queries,
-                    query_indices,
-                    query_subpixel_coordinates,
-                    image_feature_tensor,
-                )
-            )
-        else:
-            x = x + self.dropout(
-                self.attn(
-                    queries,
-                    query_indices,
-                    query_subpixel_coordinates,
-                    image_feature_tensor,
-                )
-            )
-            x = self.norm(x)
+        queries_batched, pad_mask = deconcat_add_batch_dim(queries, batch_offsets)
+        pos_encoding_batched, pad_mask_2 = deconcat_add_batch_dim(
+            query_pos_encoding, batch_offsets
+        )
+        assert torch.equal(pad_mask, pad_mask_2)
+
+        x = self.self_attn(queries_batched, pos_encoding_batched, pad_mask)
+        x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
+        assert torch.equal(batch_offsets, batch_offsets_2)
+
+        x = self.msdeform_attn(
+            x,
+            query_pos_encoding,
+            query_normalized_xy_positions,
+            batch_offsets,
+            stacked_feature_maps,
+            spatial_shapes,
+        )
+        x = self.ffn(x)
         return x
 
-    def attn(
+    def reset_parameters(self):
+        self.self_attn.reset_parameters()
+        self.msdeform_attn.reset_parameters()
+        self.ffn.reset_parameters()
+
+
+class EMTransformerDecoder(nn.Module):
+    def __init__(
+        self,
+        decoder_layer: nn.Module,
+        num_layers: int = 6,
+        layers_share_heads: bool = True,
+        class_head: Optional[nn.Module] = None,
+        position_offset_head: Optional[nn.Module] = None,
+        look_forward_twice: bool = True,
+    ):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [copy.deepcopy(decoder_layer) for _ in range(num_layers)]
+        )
+        self.num_layers = num_layers
+        self.d_model = decoder_layer.d_model
+        self.look_forward_twice = look_forward_twice
+        self.query_pos_encoding = FourierEncoding(
+            2, decoder_layer.d_model, dtype=torch.double
+        )
+
+        self.layers_share_heads = layers_share_heads
+        if self.layers_share_heads:
+            if class_head is None or position_offset_head is None:
+                raise ValueError(
+                    "Expected `class_head` and `position_offset_head` to be specified "
+                    "when layers_share_heads is True; got "
+                    f"{class_head} and {position_offset_head}"
+                )
+            self.class_head = class_head
+            self.position_offset_head = position_offset_head
+        else:
+            self.class_heads = nn.ModuleList(
+                [nn.Linear(self.d_model, 1) for _ in range(num_layers)]
+            )
+            self.position_offset_heads = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(self.d_model, self.d_model, dtype=torch.double),
+                        nn.ReLU(),
+                        nn.Linear(self.d_model, self.d_model, dtype=torch.double),
+                        nn.ReLU(),
+                        nn.Linear(self.d_model, 2, dtype=torch.double),
+                    )
+                    for _ in range(num_layers)
+                ]
+            )
+
+        # self.ref_point_head = nn.Sequential(
+        #     nn.Linear(2 * self.d_model, self.d_model),
+        #     nn.ReLU(),
+        #     nn.Linear(self.d_model, self.d_model),
+        #     nn.ReLU(),
+        #     nn.Linear(self.d_model, self.d_model),
+        # )
+
+        self.norm = nn.LayerNorm(self.d_model)
+
+        self.reset_parameters()
+
+    def forward(
         self,
         queries: Tensor,
-        query_indices: Tensor,
-        query_subpixel_coordinates: Tensor,
-        image_feature_tensor: Tensor,
+        query_reference_points: Tensor,
+        query_batch_offsets: Tensor,
+        stacked_feature_maps: Tensor,
+        spatial_shapes: Tensor,
     ):
-        n_queries = queries.shape[0]
+        layer_output_logits = []
+        layer_output_positions = []
+        for i, layer in enumerate(self.layers):
+            query_pos_encoding = self.query_pos_encoding(query_reference_points)
+            queries = layer(
+                queries,
+                query_pos_encoding,
+                None,
+                query_reference_points.detach(),
+                query_batch_offsets,
+                stacked_feature_maps,
+                spatial_shapes,
+            )
 
-        keys, _, key_offsets, key_pad_mask, _ = windowed_keys_for_queries(
-            query_indices,
-            image_feature_tensor,
-            self.key_patch_size,
-            self.key_patch_size,
-        )
-        qk_rel_posn_encoding = self.rel_pos_encoding(
-            query_subpixel_coordinates, key_offsets
-        )  # query x H x W x feat
+            queries_normed = self.norm(queries)
 
-        # queries x HW x feat
-        keys = keys.view(
-            n_queries, self.key_patch_size * self.key_patch_size, self.d_model
-        )
-        qk_rel_posn_encoding = qk_rel_posn_encoding.view(
-            n_queries, self.key_patch_size * self.key_patch_size, self.d_model
-        )
+            if self.layers_share_heads:
+                class_head = self.class_head
+                delta_pos_head = self.position_offset_head
+            else:
+                class_head = self.class_heads[i]
+                delta_pos_head = self.position_offset_heads[i]
 
-        # compute input projections
-        q = self.q_proj(queries)  # queries x feat
-        k = self.k_proj(keys + qk_rel_posn_encoding)
-        v = self.v_proj(keys)
+            query_logits = class_head(queries_normed)
+            query_delta_pos = delta_pos_head(queries_normed.double())
 
-        q = q.reshape(n_queries, self.n_heads, 1, self.head_dim)
-        k = k.reshape(
-            n_queries,
-            self.key_patch_size * self.key_patch_size,
-            self.n_heads,
-            self.head_dim,
-        )
-        v = v.reshape(
-            n_queries,
-            self.key_patch_size * self.key_patch_size,
-            self.n_heads,
-            self.head_dim,
-        )
-        key_pad_mask = key_pad_mask.reshape(
-            n_queries, 1, 1, self.key_patch_size * self.key_patch_size
-        ).expand(-1, self.n_heads, -1, -1)
-        key_pad_mask = key_pad_mask.logical_not()
+            new_reference_points = torch.sigmoid(
+                query_delta_pos + inverse_sigmoid(query_reference_points)
+            )
 
-        k = k.permute(0, 2, 1, 3)  # query x head x key x head dim
-        v = v.permute(0, 2, 1, 3)
+            layer_output_logits.append(query_logits)
+            if self.look_forward_twice:
+                layer_output_positions.append(new_reference_points)
+            else:
+                layer_output_positions.append(new_reference_points.detach())
 
-        attn = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=key_pad_mask, dropout_p=self.dropout.p
-        )
-        if torch.any(attn.isinf()):
-            raise ValueError("Got inf attention output")
-        attn = attn.permute(0, 2, 1, 3).reshape(-1, self.n_heads * self.head_dim)
+            query_reference_points = new_reference_points.detach()
 
-        out = self.out_proj(attn)
-        return out
+        stacked_query_logits = torch.stack(layer_output_logits)
+        stacked_query_positions = torch.stack(layer_output_positions)
+        return stacked_query_logits, stacked_query_positions

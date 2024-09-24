@@ -9,7 +9,7 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor):
     return torch.tensor_split(tensor, batch_offsets[1:].cpu())
 
 
-def deconcat_add_batch_dim(tensor: Tensor, batch_offsets: Tensor):
+def deconcat_add_batch_dim(tensor: Tensor, batch_offsets: Tensor, pad_value=0):
     assert batch_offsets.ndim == 1
     if batch_offsets[-1] != len(tensor):
         batch_offsets = torch.cat(
@@ -20,7 +20,7 @@ def deconcat_add_batch_dim(tensor: Tensor, batch_offsets: Tensor):
     max_len = max(seq_lens)
     feature_dim = tensor.shape[-1]
 
-    out = tensor.new_zeros([batchsize, max_len, feature_dim])
+    out = tensor.new_full([batchsize, max_len, feature_dim], pad_value)
     padding_mask = tensor.new_ones((batchsize, max_len), dtype=torch.bool)
     # for b, out_b, mask_b in zip(range(batchsize), out, padding_mask):
     for b in range(batchsize):

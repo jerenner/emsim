@@ -384,7 +384,7 @@ def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor):
     matching_indices = batch_indices.unsqueeze(-1) == torch.arange(
         max_batch_index + 1, device=batch_indices.device, dtype=batch_indices.dtype
     )
-    out = matching_indices.to(torch.uint8).argmax(0)
+    out = matching_indices.to(torch.uint8).argmax(0).cpu()
     return out
 
 

@@ -122,7 +122,11 @@ class EMTransformerDecoder(nn.Module):
                 )
             self.class_head = class_head
             self.position_offset_head = position_offset_head
+            self.class_heads = None
+            self.position_offset_heads = None
         else:
+            self.class_head = None
+            self.position_offset_head = None
             self.class_heads = nn.ModuleList(
                 [nn.Linear(self.d_model, 1) for _ in range(num_layers)]
             )
@@ -163,6 +167,7 @@ class EMTransformerDecoder(nn.Module):
         layer_output_positions = []
         for i, layer in enumerate(self.layers):
             query_pos_encoding = self.query_pos_encoding(query_reference_points)
+            query_pos_encoding = query_pos_encoding.to(queries)
             queries = layer(
                 queries,
                 query_pos_encoding,
@@ -175,12 +180,8 @@ class EMTransformerDecoder(nn.Module):
 
             queries_normed = self.norm(queries)
 
-            if self.layers_share_heads:
-                class_head = self.class_head
-                delta_pos_head = self.position_offset_head
-            else:
-                class_head = self.class_heads[i]
-                delta_pos_head = self.position_offset_heads[i]
+            class_head = self._get_class_head(i)
+            delta_pos_head = self._get_position_head(i)
 
             query_logits = class_head(queries_normed)
             query_delta_pos = delta_pos_head(queries_normed.double())
@@ -200,3 +201,27 @@ class EMTransformerDecoder(nn.Module):
         stacked_query_logits = torch.stack(layer_output_logits)
         stacked_query_positions = torch.stack(layer_output_positions)
         return stacked_query_logits, stacked_query_positions
+
+    def _get_class_head(self, layer_index):
+        if self.layers_share_heads:
+            return self.class_head
+        else:
+            return self.class_heads[layer_index]
+
+    def _get_position_head(self, layer_index):
+        if self.layers_share_heads:
+            return self.position_offset_head
+        else:
+            return self.position_offset_heads[layer_index]
+
+    def reset_parameters(self):
+        for layer in self.layers:
+            layer.reset_parameters()
+        if self.class_heads is not None:
+            for head in self.class_heads:
+                head.reset_parameters()
+        if self.position_offset_heads is not None:
+            for head in self.position_offset_heads:
+                for layer in head:
+                    if hasattr(layer, "reset_parameters"):
+                        layer.reset_parameters()

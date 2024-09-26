@@ -101,6 +101,14 @@ class SpconvSparseMaskPredictor(nn.Module):
         out = self.layer2(z)
         return out
 
+    def reset_parameters(self):
+        for layer in self.layer1:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+        for layer in self.layer2:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+
     @staticmethod
     def batchwise_global_mean_second_half_features(z: spconv.SparseConvTensor):
         indices_per_batch = [z.indices[:, 0] == i for i in z.indices[:, 0].unique()]

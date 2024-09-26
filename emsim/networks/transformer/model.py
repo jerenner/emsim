@@ -40,7 +40,6 @@ class EMTransformer(nn.Module):
         level_filter_ratio: tuple = (0.25, 0.5, 1.0, 1.0),
         layer_filter_ratio: tuple = (1.0, 0.8, 0.6, 0.6, 0.4, 0.2),
         n_query_embeddings: int = 1000,
-        return_score_dict: bool = False,
     ):
         super().__init__()
         self.two_stage_num_proposals = n_query_embeddings
@@ -67,7 +66,6 @@ class EMTransformer(nn.Module):
             score_predictor=self.classification_head,
         )
         self.encoder_output_norm = nn.LayerNorm(d_model)
-        self.class_head = nn.Linear(d_model, 1)
         self.query_offset_head = nn.Sequential(
             nn.Linear(d_model, d_model, dtype=torch.double),
             nn.ReLU(),
@@ -99,7 +97,8 @@ class EMTransformer(nn.Module):
                 attn_proj_bias=attn_proj_bias,
             ),
             num_layers=n_decoder_layers,
-
+            class_head=self.classification_head,
+            position_offset_head=self.query_offset_head,
         )
         self.mask_head = nn.Sequential(
             nn.Linear(d_model, d_model),
@@ -109,13 +108,21 @@ class EMTransformer(nn.Module):
             nn.Linear(d_model, d_model),
         )
 
-        self.return_score_dict = return_score_dict
-
     def reset_parameters(self):
-        for module in self.modules():
-            if hasattr(module, "reset_parameters"):
-                module.reset_parameters()
+        self.salience_mask_predictor.reset_parameters()
+        self.pos_embedding.reset_parameters()
+        self.classification_head.reset_parameters()
         nn.init.uniform_(self.alpha, -0.3, 0.3)
+        self.encoder.reset_parameters()
+        self.encoder_output_norm.reset_parameters()
+        for layer in self.query_offset_head:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+        for layer in self.salience_unpoolers:
+            layer.reset_parameters()
+        self.object_query_embedding.reset_parameters()
+        self.decoder.reset_parameters()
+        self.mask_head.reset_parameters()
 
     def forward(self, encoded_features: list[spconv.SparseConvTensor]):
         assert len(encoded_features) == self.n_levels
@@ -153,14 +160,14 @@ class EMTransformer(nn.Module):
             ]
         ).diff()
         encoder_out_normalized = self.encoder_output_norm(encoder_out.values())
-        encoder_out_scores = self.classification_head(encoder_out_normalized)
+        encoder_out_logits = self.classification_head(encoder_out_normalized)
 
         num_topk = self.two_stage_num_proposals * 4
         topk_by_image = [
             torch.topk(scores, min(num_topk, size), 0)
             for scores, size in zip(
                 split_batch_concatted_tensor(
-                    encoder_out_scores.squeeze(-1), encoder_out_batch_offsets
+                    encoder_out_logits.squeeze(-1), encoder_out_batch_offsets
                 ),
                 encoder_out_batch_sizes,
             )
@@ -183,7 +190,7 @@ class EMTransformer(nn.Module):
             encoder_out.shape,
         ).coalesce()
         nms_encoder_out_normalized = encoder_out_normalized[nms_topk_indices]
-        nms_topk_scores = encoder_out_scores[nms_topk_indices]
+        nms_topk_logits = encoder_out_logits[nms_topk_indices]
         nms_topk_batch_offsets = batch_offsets_from_sparse_tensor_indices(
             nms_encoder_out.indices()
         )
@@ -200,24 +207,27 @@ class EMTransformer(nn.Module):
         )
         #####
         reference_points = nms_encoder_out_positions.detach()  # [0, 1]
-        queries = self.object_query_embedding.weight.unsqueeze(0).expand(
-            encoder_out.shape[0], -1, -1
+        queries = (
+            self.object_query_embedding.weight.unsqueeze(0)
+            .expand(encoder_out.shape[0], -1, -1)
+            .flatten(0, 1)
         )
 
         decoder_out_logits, decoder_out_positions = self.decoder(
             queries=queries,
             query_reference_points=reference_points,
-            batch_offsets=nms_topk_batch_offsets,
+            query_batch_offsets=nms_topk_batch_offsets,
             stacked_feature_maps=encoder_out,
             spatial_shapes=score_dict["spatial_shapes"],
         )
 
-        return decoder_out_logits, decoder_out_positions, encoder_out
-
-        if self.return_score_dict:
-            return encoder_out, score_dict
-        else:
-            return encoder_out
+        return (
+            decoder_out_logits,
+            decoder_out_positions,
+            nms_topk_logits,
+            nms_encoder_out_positions,
+            score_dict,
+        )
 
     def get_position_encoding(self, encoded_features: list[spconv.SparseConvTensor]):
         spatial_sizes = [

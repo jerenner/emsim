@@ -122,15 +122,15 @@ class EMTransformerDecoder(nn.Module):
                 )
             self.class_head = class_head
             self.position_offset_head = position_offset_head
-            self.class_heads = None
-            self.position_offset_heads = None
+            self.per_layer_class_heads = None
+            self.per_layer_position_heads = None
         else:
             self.class_head = None
             self.position_offset_head = None
-            self.class_heads = nn.ModuleList(
+            self.per_layer_class_heads = nn.ModuleList(
                 [nn.Linear(self.d_model, 1) for _ in range(num_layers)]
             )
-            self.position_offset_heads = nn.ModuleList(
+            self.per_layer_position_heads = nn.ModuleList(
                 [
                     nn.Sequential(
                         nn.Linear(self.d_model, self.d_model, dtype=torch.double),
@@ -142,7 +142,6 @@ class EMTransformerDecoder(nn.Module):
                     for _ in range(num_layers)
                 ]
             )
-
         # self.ref_point_head = nn.Sequential(
         #     nn.Linear(2 * self.d_model, self.d_model),
         #     nn.ReLU(),
@@ -165,6 +164,7 @@ class EMTransformerDecoder(nn.Module):
     ):
         layer_output_logits = []
         layer_output_positions = []
+        layer_output_queries = []
         for i, layer in enumerate(self.layers):
             query_pos_encoding = self.query_pos_encoding(query_reference_points)
             query_pos_encoding = query_pos_encoding.to(queries)
@@ -195,33 +195,39 @@ class EMTransformerDecoder(nn.Module):
                 layer_output_positions.append(new_reference_points)
             else:
                 layer_output_positions.append(new_reference_points.detach())
+            layer_output_queries.append(queries)
 
             query_reference_points = new_reference_points.detach()
 
         stacked_query_logits = torch.stack(layer_output_logits)
         stacked_query_positions = torch.stack(layer_output_positions)
-        return stacked_query_logits, stacked_query_positions
+        stacked_queries = torch.stack(layer_output_queries)
+        return (
+            stacked_query_logits,
+            stacked_query_positions,
+            stacked_queries,
+        )
 
     def _get_class_head(self, layer_index):
         if self.layers_share_heads:
             return self.class_head
         else:
-            return self.class_heads[layer_index]
+            return self.per_layer_class_heads[layer_index]
 
     def _get_position_head(self, layer_index):
         if self.layers_share_heads:
             return self.position_offset_head
         else:
-            return self.position_offset_heads[layer_index]
+            return self.per_layer_position_heads[layer_index]
 
     def reset_parameters(self):
         for layer in self.layers:
             layer.reset_parameters()
-        if self.class_heads is not None:
-            for head in self.class_heads:
+        if self.per_layer_class_heads is not None:
+            for head in self.per_layer_class_heads:
                 head.reset_parameters()
-        if self.position_offset_heads is not None:
-            for head in self.position_offset_heads:
+        if self.per_layer_position_heads is not None:
+            for head in self.per_layer_position_heads:
                 for layer in head:
                     if hasattr(layer, "reset_parameters"):
                         layer.reset_parameters()

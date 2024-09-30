@@ -10,16 +10,17 @@ from emsim.networks.positional_encoding import (
     normalized_xy_of_stacked_feature_maps,
 )
 
-from ...utils.batching_utils import deconcat_add_batch_dim, split_batch_concatted_tensor
+from ...utils.batching_utils import split_batch_concatted_tensor
 from ...utils.misc_utils import inverse_sigmoid
 from ...utils.sparse_utils import (
     batch_offsets_from_sparse_tensor_indices,
     spconv_sparse_mult,
 )
-from ..mask_predictor import SpconvSparseMaskPredictor
+from ..salience_mask_predictor import SpconvSparseMaskPredictor
 from ..positional_encoding import FourierEncoding
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
+from ..segmentation_map import SegmentationMapPredictor
 
 
 class EMTransformer(nn.Module):
@@ -66,13 +67,14 @@ class EMTransformer(nn.Module):
             score_predictor=self.classification_head,
         )
         self.encoder_output_norm = nn.LayerNorm(d_model)
-        self.query_offset_head = nn.Sequential(
+        self.query_pos_offset_head = nn.Sequential(
             nn.Linear(d_model, d_model, dtype=torch.double),
             nn.ReLU(),
             nn.Linear(d_model, d_model, dtype=torch.double),
             nn.ReLU(),
             nn.Linear(d_model, 2, dtype=torch.double),
         )
+        self.segmentation_head = SegmentationMapPredictor(d_model)
 
         self.salience_unpoolers = nn.ModuleList(
             [
@@ -98,14 +100,7 @@ class EMTransformer(nn.Module):
             ),
             num_layers=n_decoder_layers,
             class_head=self.classification_head,
-            position_offset_head=self.query_offset_head,
-        )
-        self.mask_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model),
+            position_offset_head=self.query_pos_offset_head,
         )
 
     def reset_parameters(self):
@@ -115,14 +110,14 @@ class EMTransformer(nn.Module):
         nn.init.uniform_(self.alpha, -0.3, 0.3)
         self.encoder.reset_parameters()
         self.encoder_output_norm.reset_parameters()
-        for layer in self.query_offset_head:
+        for layer in self.query_pos_offset_head:
             if hasattr(layer, "reset_parameters"):
                 layer.reset_parameters()
         for layer in self.salience_unpoolers:
             layer.reset_parameters()
         self.object_query_embedding.reset_parameters()
         self.decoder.reset_parameters()
-        self.mask_head.reset_parameters()
+        self.segmentation_head.reset_parameters()
 
     def forward(self, encoded_features: list[spconv.SparseConvTensor]):
         assert len(encoded_features) == self.n_levels
@@ -191,13 +186,15 @@ class EMTransformer(nn.Module):
         ).coalesce()
         nms_encoder_out_normalized = encoder_out_normalized[nms_topk_indices]
         nms_topk_logits = encoder_out_logits[nms_topk_indices]
-        nms_topk_batch_offsets = batch_offsets_from_sparse_tensor_indices(
+        nms_topk_query_batch_offsets = batch_offsets_from_sparse_tensor_indices(
             nms_encoder_out.indices()
         )
-        nms_topk_position_offsets = self.query_offset_head(
+        nms_topk_position_offsets = self.query_pos_offset_head(
             nms_encoder_out_normalized.double()
         )
-        nms_topk_masks = self.mask_head(nms_encoder_out_normalized)
+        nms_topk_masks = self.segmentation_head(
+            encoder_out, nms_encoder_out_normalized, nms_topk_query_batch_offsets
+        )
 
         nms_proposal_xy = normalized_xy_of_stacked_feature_maps(
             nms_encoder_out, score_dict["spatial_shapes"]
@@ -213,19 +210,31 @@ class EMTransformer(nn.Module):
             .flatten(0, 1)
         )
 
-        decoder_out_logits, decoder_out_positions = self.decoder(
+        (
+            decoder_out_logits,
+            decoder_out_positions,
+            decoder_out_queries,
+        ) = self.decoder(
             queries=queries,
             query_reference_points=reference_points,
-            query_batch_offsets=nms_topk_batch_offsets,
+            query_batch_offsets=nms_topk_query_batch_offsets,
             stacked_feature_maps=encoder_out,
             spatial_shapes=score_dict["spatial_shapes"],
+        )
+
+        segmentation_logits = self.segmentation_head(
+            encoder_out, decoder_out_queries[-1], nms_topk_query_batch_offsets
         )
 
         return (
             decoder_out_logits,
             decoder_out_positions,
+            decoder_out_queries,
+            segmentation_logits,
+            nms_topk_query_batch_offsets,
             nms_topk_logits,
             nms_encoder_out_positions,
+            encoder_out,
             score_dict,
         )
 

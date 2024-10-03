@@ -7,11 +7,16 @@ from scipy.ndimage import grey_dilation
 
 class NSigmaSparsifyTransform:
     def __init__(
-        self, background_threshold_n_sigma=4, window_size=7, channels_last=True
+        self,
+        background_threshold_n_sigma=4,
+        window_size=7,
+        channels_last=True,
+        max_pixels_to_keep=int(1e7),
     ):
         self.background_threshold_n_sigma = background_threshold_n_sigma
         self.window_size = window_size
         self.channels_last = channels_last
+        self.max_pixels_to_keep = max_pixels_to_keep
 
     def __call__(self, batch):
         image = batch["image"]
@@ -20,6 +25,7 @@ class NSigmaSparsifyTransform:
                 image,
                 background_threshold_n_sigma=self.background_threshold_n_sigma,
                 window_size=self.window_size,
+                max_pixels_to_keep=self.max_pixels_to_keep,
             )
         elif isinstance(image, torch.Tensor):
             sparsified = torch_sigma_energy_threshold_sparsify(
@@ -72,7 +78,7 @@ def torch_sigma_energy_threshold_sparsify(
 
 
 def numpy_sigma_energy_threshold_sparsify(
-    image: np.ndarray, background_threshold_n_sigma=4, window_size=7
+    image: np.ndarray, background_threshold_n_sigma=4, window_size=7, max_pixels_to_keep=int(1e7),
 ):
     if window_size % 2 != 1:
         raise ValueError(f"Expected an odd `window_size`, got {window_size=}")
@@ -87,10 +93,24 @@ def numpy_sigma_energy_threshold_sparsify(
 
     mean = np.mean(image, reduce_dims, keepdims=True)
     std = np.std(image, reduce_dims, keepdims=True)
-    thresholded = image > mean + background_threshold_n_sigma * std
 
-    conved = grey_dilation(thresholded, kernel_size)
-    indices = conved.nonzero()
+    def _get_indices(n_sigma):
+        thresholded = image > mean + n_sigma * std
+        conved = grey_dilation(thresholded, kernel_size)
+        indices = conved.nonzero()
+        return indices
+
+    # if we end up with more than 1M pixels after sparsification, raise the threshold
+    below_limit = False
+    n_sigma = background_threshold_n_sigma
+    while not below_limit:
+        indices = _get_indices(n_sigma)
+        n_indices = indices[0].size
+        if n_indices <= max_pixels_to_keep:
+            below_limit = True
+        else:
+            n_sigma += 0.1
+
     values = image[indices]
     out = sparse.COO(indices, values, shape=image.shape)
     return out

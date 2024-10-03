@@ -40,6 +40,7 @@ class EMTransformer(nn.Module):
         n_decoder_layers: int = 6,
         level_filter_ratio: tuple = (0.25, 0.5, 1.0, 1.0),
         layer_filter_ratio: tuple = (1.0, 0.8, 0.6, 0.6, 0.4, 0.2),
+        encoder_max_tokens: int = 10000,
         n_query_embeddings: int = 1000,
     ):
         super().__init__()
@@ -84,6 +85,7 @@ class EMTransformer(nn.Module):
         )
         self.register_buffer("level_filter_ratio", torch.tensor(level_filter_ratio))
         self.register_buffer("layer_filter_ratio", torch.tensor(layer_filter_ratio))
+        self.encoder_max_tokens = encoder_max_tokens
 
         self.object_query_embedding = nn.Embedding(n_query_embeddings, d_model)
         self.decoder = EMTransformerDecoder(
@@ -381,6 +383,13 @@ class EMTransformer(nn.Module):
             (indices.shape[0] * self.layer_filter_ratio).int()
             for indices in selected_token_sorted_indices
         ]
+
+        # cap the number of selected tokens at the given limit
+        per_layer_token_counts = [
+            counts.clamp_max(self.encoder_max_tokens)
+            for counts in per_layer_token_counts
+        ]
+
         per_layer_subset_indices = [
             [indices[:count] for count in counts]
             for indices, counts in zip(

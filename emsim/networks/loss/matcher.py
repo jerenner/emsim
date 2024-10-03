@@ -29,19 +29,19 @@ class HungarianMatcher(nn.Module):
         self, predicted_dict: dict[str, Tensor], target_dict: dict[str, Tensor]
     ):
         segmap = target_dict["segmentation_mask"].to(
-            predicted_dict["binary_mask_logits"].device
+            predicted_dict["pred_segmentation_logits"].device
         )
         incidence_points = target_dict["incidence_points_pixels_rc"].to(
-            predicted_dict["positions"].device
+            predicted_dict["pred_positions"].device
         )
         class_cost = get_class_cost(
-            predicted_dict["is_electron_logit"], predicted_dict["batch_offsets"]
+            predicted_dict["pred_logits"], predicted_dict["query_batch_offsets"]
         )
-        mask_cost = get_bce_cost(predicted_dict["binary_mask_logits_sparse"], segmap)
-        dice_cost = get_dice_cost(predicted_dict["portion_logits_sparse"], segmap)
+        mask_cost = get_bce_cost(predicted_dict["pred_segmentation_logits"], segmap)
+        dice_cost = get_dice_cost(predicted_dict["pred_segmentation_logits"], segmap)
         distance_cost = get_huber_distance_cost(
-            predicted_dict["positions"],
-            predicted_dict["batch_offsets"],
+            predicted_dict["pred_positions"],
+            predicted_dict["query_batch_offsets"],
             incidence_points,
             target_dict["electron_batch_offsets"],
         )
@@ -71,7 +71,7 @@ def batch_class_cost(is_electron_logit: Tensor) -> Tensor:
     loss = F.binary_cross_entropy_with_logits(
         is_electron_logit, torch.ones_like(is_electron_logit), reduction="none"
     )
-    return loss.unsqueeze(-1).cpu()
+    return loss.view(-1, 1).cpu()
 
 
 @torch.jit.script

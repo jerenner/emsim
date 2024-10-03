@@ -7,9 +7,12 @@ from .sparse_resnet.unet import SparseResnetUnet
 from .transformer.decoder import EMTransformerDecoder
 from .transformer.model import EMTransformer
 from .occupancy import OccupancyPredictor
-from .mask_predictor import SparseMaskPredictor
+from .salience_mask_predictor import SparseMaskPredictor
 from .value_encoder import ValueEncoder
 from .salience import ElectronSalienceCriterion
+from .loss.matcher import HungarianMatcher
+from .loss.criterion import EMCriterion
+from .segmentation_map import sparse_binary_segmentation_map
 
 
 class EMModel(nn.Module):
@@ -35,7 +38,21 @@ class EMModel(nn.Module):
         transformer_decoder_layers: int = 6,
         transformer_level_filter_ratio: tuple[float] = (0.25, 0.5, 1.0, 1.0),
         transformer_layer_filter_ratio: tuple[float] = (1.0, 0.8, 0.6, 0.6, 0.4, 0.2),
+        transformer_encoder_max_tokens: int = 10000,
         transformer_n_query_embeddings: int = 1000,
+        matcher_cost_coef_class: float = 1.0,
+        matcher_cost_coef_mask: float = 1.0,
+        matcher_cost_coef_dice: float = 1.0,
+        matcher_cost_coef_dist: float = 1.0,
+        loss_coef_class: float = 1.0,
+        loss_coef_mask_bce: float = 1.0,
+        loss_coef_mask_dice: float = 1.0,
+        loss_coef_incidence_nll: float = 1.0,
+        loss_coef_incidence_mse: float = 1.0,
+        loss_coef_total_energy: float = 1.0,
+        loss_coef_occupancy: float = 1.0,
+        loss_no_electron_weight: float = 0.1,
+        aux_loss=True,
     ):
         super().__init__()
 
@@ -74,11 +91,27 @@ class EMModel(nn.Module):
             n_query_embeddings=transformer_n_query_embeddings,
         )
 
+        self.criterion = EMCriterion(
+            loss_coef_class=loss_coef_class,
+            loss_coef_mask_bce=loss_coef_mask_bce,
+            loss_coef_mask_dice=loss_coef_mask_dice,
+            loss_coef_incidence_nll=loss_coef_incidence_nll,
+            loss_coef_incidence_mse=loss_coef_incidence_mse,
+            loss_coef_total_energy=loss_coef_total_energy,
+            loss_coef_occupancy=loss_coef_occupancy,
+            no_electron_weight=loss_no_electron_weight,
+            matcher_cost_coef_class=matcher_cost_coef_class,
+            matcher_cost_coef_mask=matcher_cost_coef_mask,
+            matcher_cost_coef_dice=matcher_cost_coef_dice,
+            matcher_cost_coef_dist=matcher_cost_coef_dist,
+        )
+
         self.salience_criterion = ElectronSalienceCriterion()
 
         self.occupancy_predictor = OccupancyPredictor(
             self.backbone.decoder.feature_info[-1]["num_chs"], pixel_max_occupancy + 1
         )
+        self.aux_loss = True
 
     def forward(self, batch: dict):
         image = batch["image_sparsified"]
@@ -88,13 +121,43 @@ class EMModel(nn.Module):
         (
             output_logits,
             output_positions,
+            output_queries,
+            segmentation_logits,
+            query_batch_offsets,
             encoder_logits,
             encoder_positions,
+            encoder_out,
             score_dict,
         ) = self.transformer(features)
 
-        output = {"pred_logits": output_logits, "pred_positions": output_positions}
+        output = {
+            "pred_logits": output_logits[-1],
+            "pred_positions": output_positions[-1],
+            "pred_segmentation_logits": segmentation_logits,
+            "pred_binary_mask": sparse_binary_segmentation_map(segmentation_logits),
+            "query_batch_offsets": query_batch_offsets,
+        }
 
-        output["enc_outputs"] = {"pred_logits": encoder_logits, "pred_positions": encoder_positions}
+        output["aux_outputs"] = [
+            {
+                "pred_logits": logits,
+                "pred_positions": positions,
+                "query_batch_offsets": query_batch_offsets,
+            }
+            for logits, positions in zip(
+                output_logits[:-1],
+                output_positions[:-1],
+            )
+        ]
+
+        output["output_queries"] = output_queries
+        output["enc_outputs"] = {
+            "pred_logits": encoder_logits,
+            "pred_positions": encoder_positions,
+        }
+        output["encoder_out"] = encoder_out
+        output["score_dict"] = score_dict
+
+        # matched = self.matcher(output, batch)
 
         return output

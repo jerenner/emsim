@@ -55,19 +55,45 @@ class SegmentationMapPredictor(nn.Module):
             ],
             -1,
         )
-        segmentation_logit_pad_mask = torch.logical_or(query_pad_mask.unsqueeze(-2), feature_pad_mask.unsqueeze(-1))
+        segmentation_logit_pad_mask = torch.logical_or(
+            query_pad_mask.unsqueeze(-2), feature_pad_mask.unsqueeze(-1)
+        )
         nonpad_per_batch = segmentation_logit_pad_mask.logical_not().sum([-1, -2])
         out_logits = segmentation_logits.new_zeros(nonpad_per_batch.sum().item())
-        out_indices = segmentation_logit_indices.new_zeros(nonpad_per_batch.sum().item(), 4)
-        out_offsets = torch.cat([nonpad_per_batch.new_zeros([1]), nonpad_per_batch.cumsum(-1)]).to("cpu")
+        out_indices = segmentation_logit_indices.new_zeros(
+            nonpad_per_batch.sum().item(), 4
+        )
+        out_offsets = torch.cat(
+            [nonpad_per_batch.new_zeros([1]), nonpad_per_batch.cumsum(-1)]
+        ).to("cpu")
 
-        for batch_pad_mask, batch_logits, batch_indices, start_index, stop_index in zip(segmentation_logit_pad_mask.logical_not(), segmentation_logits, segmentation_logit_indices, out_offsets[:-1], out_offsets[1:]):
-            out_logits[start_index:stop_index] = batch_logits.flatten()[batch_pad_mask.flatten()]
-            out_indices[start_index:stop_index] = batch_indices.flatten(0, -2)[batch_pad_mask.flatten()]
+        for batch_pad_mask, batch_logits, batch_indices, start_index, stop_index in zip(
+            segmentation_logit_pad_mask.logical_not(),
+            segmentation_logits,
+            segmentation_logit_indices,
+            out_offsets[:-1],
+            out_offsets[1:],
+        ):
+            out_logits[start_index:stop_index] = batch_logits.flatten()[
+                batch_pad_mask.flatten()
+            ]
+            out_indices[start_index:stop_index] = batch_indices.flatten(0, -2)[
+                batch_pad_mask.flatten()
+            ]
 
         return torch.sparse_coo_tensor(
             out_indices.T,
             out_logits,
             (*feature_map.shape[:-1], segmentation_logits.shape[-1]),
-            device=feature_map.device
+            device=feature_map.device,
         ).coalesce()
+
+
+def sparse_binary_segmentation_map(segmentation_map: Tensor):
+    assert segmentation_map.is_sparse
+    return torch.sparse_coo_tensor(
+        segmentation_map.indices(),
+        segmentation_map.values() > 0.0,
+        segmentation_map.shape,
+        device=segmentation_map.device
+    )

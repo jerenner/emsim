@@ -72,23 +72,12 @@ def sparse_split_heads(sparse_tensor: Tensor, n_heads: int):
     assert isinstance(sparse_tensor, Tensor)
     assert sparse_tensor.is_sparse
     assert sparse_tensor.ndim >= 4
-    n_specified_elements = sparse_tensor.indices().shape[1]
     embed_dim = sparse_tensor.shape[-1]
-    repeated_indices = torch.repeat_interleave(sparse_tensor.indices(), n_heads, 1)
-    new_indices = torch.cat(
-        [
-            repeated_indices,
-            torch.arange(n_heads, device=sparse_tensor.device)
-            .repeat(n_specified_elements)
-            .unsqueeze(0),
-        ]
-    )
-    new_values = sparse_tensor.values().view(
-        n_specified_elements * n_heads, embed_dim // n_heads
-    )
+    assert embed_dim % n_heads == 0
+    head_dim = embed_dim // n_heads
     new_sparse_tensor = torch.sparse_coo_tensor(
-        new_indices,
-        new_values,
+        sparse_tensor.indices(),
+        sparse_tensor.values().view(-1, n_heads, head_dim),
         (*sparse_tensor.shape[:-1], n_heads, embed_dim // n_heads),
     ).coalesce()
     return new_sparse_tensor
@@ -103,14 +92,22 @@ class SparseMSDeformableAttention(nn.Module):
         num_levels: int = 4,
         num_heads: int = 8,
         num_points: int = 4,
+        double_presigmoid_sampling_offsets=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_levels = num_levels
         self.num_heads = num_heads
         self.num_points = num_points
+        self.double_presigmoied_sampling_offsets = double_presigmoid_sampling_offsets
         self.sampling_offsets = nn.Linear(
-            embed_dim, num_levels * num_points * num_heads * 2, dtype=torch.double
+            embed_dim,
+            num_levels * num_points * num_heads * 2,
+            dtype=(
+                torch.double
+                if double_presigmoid_sampling_offsets
+                else torch.get_default_dtype()
+            ),
         )
         self.attention_weights = nn.Linear(
             embed_dim, num_points * num_levels * num_heads
@@ -121,9 +118,9 @@ class SparseMSDeformableAttention(nn.Module):
 
     def reset_parameters(self):
         constant_(self.sampling_offsets.weight.data, 0.0)
-        thetas = torch.arange(self.num_heads, dtype=torch.float64) * (
-            2.0 * math.pi / self.num_heads
-        )
+        thetas = torch.arange(
+            self.num_heads, dtype=self.sampling_offsets.bias.dtype
+        ) * (2.0 * math.pi / self.num_heads)
         grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
         grid_init = (
             (grid_init / grid_init.abs().max(-1, keepdim=True)[0])
@@ -167,9 +164,9 @@ class SparseMSDeformableAttention(nn.Module):
         assert xy_reference_points.dtype == torch.double
         n_total_queries = query.shape[0]
 
-        sampling_offsets = self.sampling_offsets(query.double()).view(
-            n_total_queries, self.num_levels, self.num_points, self.num_heads, 2
-        )
+        sampling_offsets = self.sampling_offsets(
+            query.to(self.sampling_offsets.weight)
+        ).view(n_total_queries, self.num_levels, self.num_points, self.num_heads, 2)
         attention_weights = self.attention_weights(query).view(
             n_total_queries, self.num_levels * self.num_points, self.num_heads
         )
@@ -326,10 +323,10 @@ def multilevel_sparse_bilinear_grid_sample(
     wc = ((x - x0) * (y1 - y)).unsqueeze(-1)
     wd = ((x - x0) * (y - y0)).unsqueeze(-1)
 
-    x0_y0 = torch.stack([xy_batch_index, x0, y0, xy_level_index, head_indices], -1)
-    x0_y1 = torch.stack([xy_batch_index, x0, x1, xy_level_index, head_indices], -1)
-    x1_y0 = torch.stack([xy_batch_index, x1, y0, xy_level_index, head_indices], -1)
-    x1_y1 = torch.stack([xy_batch_index, x1, y1, xy_level_index, head_indices], -1)
+    x0_y0 = torch.stack([xy_batch_index, x0, y0, xy_level_index], -1)
+    x0_y1 = torch.stack([xy_batch_index, x0, x1, xy_level_index], -1)
+    x1_y0 = torch.stack([xy_batch_index, x1, y0, xy_level_index], -1)
+    x1_y1 = torch.stack([xy_batch_index, x1, y1, xy_level_index], -1)
 
     val_a = gather_from_sparse_tensor(sparse_tensor, x0_y0)[0]
     val_b = gather_from_sparse_tensor(sparse_tensor, x0_y1)[0]

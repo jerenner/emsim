@@ -386,7 +386,7 @@ class EMTransformer(nn.Module):
 
         # cap the number of selected tokens at the given limit
         per_layer_token_counts = [
-            counts.clamp_max(self.encoder_max_tokens)
+            counts.clamp_max((self.encoder_max_tokens * self.layer_filter_ratio).int())
             for counts in per_layer_token_counts
         ]
 

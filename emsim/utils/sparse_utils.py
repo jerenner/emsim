@@ -182,25 +182,30 @@ def gather_from_sparse_tensor(
         tensor and False if not
     """
     (
-        sparse_tensor_linearized,
+        sparse_tensor_indices_linearized,
+        sparse_tensor_values,
         index_tensor_linearized,
         index_tensor_shape,
         is_specified_mask,
     ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
 
     index_search = torch.searchsorted(
-        sparse_tensor_linearized.indices().squeeze(0), index_tensor_linearized
-    ).clamp_max(sparse_tensor_linearized.indices().shape[1] - 1)
-    selected = sparse_tensor_linearized.values()[index_search]
+        sparse_tensor_indices_linearized, index_tensor_linearized
+    ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
+    selected = sparse_tensor_values[index_search]
     if sparse_tensor.dense_dim() > 0:
-        selected = selected.reshape(*index_tensor_shape[:-1], selected.shape[-1])
+        selected = selected.view(
+            *index_tensor_shape[:-1], *selected.shape[-sparse_tensor.dense_dim() :]
+        )
     else:
-        selected = selected.reshape(*index_tensor_shape[:-1])
-    is_specified_mask = is_specified_mask.reshape(
+        selected = selected.view(*index_tensor_shape[:-1])
+    is_specified_mask = is_specified_mask.view(
         *index_tensor_shape[:-1], *[1] * sparse_tensor.dense_dim()
     )
-    selected = torch.masked_fill(selected, is_specified_mask.logical_not(), 0.0)
-    is_specified_mask = is_specified_mask.reshape(*index_tensor_shape[:-1])
+    if not is_specified_mask.all():
+        # selected = torch.masked_fill(selected, is_specified_mask.logical_not(), 0.0)
+        selected[(~is_specified_mask).expand_as(selected)] = 0.0
+    is_specified_mask = is_specified_mask.view(*index_tensor_shape[:-1])
 
     if check_all_specified:
         if not is_specified_mask.all():
@@ -269,22 +274,7 @@ def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tens
 
     sparse_tensor_indices_linear = (
         sparse_tensor.indices() * dim_linear_offsets.unsqueeze(-1)
-    ).sum(0, keepdim=True)
-    if sparse_tensor.dense_dim() > 0:
-        linear_shape = (
-            tuple(np.prod(sparse_shape, keepdims=True))
-            + sparse_tensor.shape[-sparse_tensor.dense_dim() :]
-        )
-    else:
-        linear_shape = tuple(np.prod(sparse_shape, keepdims=True))
-    sparse_tensor_linearized = torch.sparse_coo_tensor(
-        sparse_tensor_indices_linear,
-        sparse_tensor.values(),
-        linear_shape,
-        dtype=sparse_tensor.dtype,
-        device=sparse_tensor.device,
-        requires_grad=sparse_tensor.requires_grad,
-    ).coalesce()
+    ).sum(0)
 
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
         assert index_tensor.shape[-1] == sparse_tensor.sparse_dim() - 1
@@ -292,19 +282,18 @@ def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tens
 
     index_tensor_shape = index_tensor.shape
     index_tensor_linearized = (index_tensor * dim_linear_offsets).sum(-1)
-    index_tensor_linearized = index_tensor_linearized.reshape(
-        -1,
-    )
+    index_tensor_linearized = index_tensor_linearized.reshape(-1)
 
     is_specified_mask = torch.isin(
         index_tensor_linearized, sparse_tensor_indices_linear, assume_unique=True
     )
 
     assert index_tensor_linearized.min() >= 0
-    assert index_tensor_linearized.max() <= sparse_tensor_linearized.shape[0]
+    assert index_tensor_linearized.max() <= np.prod(sparse_shape)
 
     return (
-        sparse_tensor_linearized,
+        sparse_tensor_indices_linear,
+        sparse_tensor.values(),
         index_tensor_linearized,
         index_tensor_shape,
         is_specified_mask,
@@ -335,17 +324,18 @@ def scatter_to_sparse_tensor(
     assert sparse_tensor.dense_dim() == values.ndim - 1
 
     (
-        sparse_tensor_linearized,
+        sparse_tensor_indices_linearized,
+        sparse_tensor_values,
         index_tensor_linearized,
         _,
         is_specified_mask,
     ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
 
     index_search = torch.searchsorted(
-        sparse_tensor_linearized.indices().squeeze(0), index_tensor_linearized
-    ).clamp_max(sparse_tensor_linearized.indices().shape[1] - 1)
+        sparse_tensor_indices_linearized, index_tensor_linearized
+    ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
 
-    new_values = sparse_tensor_linearized.values().clone()
+    new_values = sparse_tensor_values.clone()
     new_values[index_search[is_specified_mask]] = values[is_specified_mask]
     new_values = torch.cat([new_values, values[~is_specified_mask]], 0)
     new_indices = torch.cat(

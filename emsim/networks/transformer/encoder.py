@@ -269,15 +269,15 @@ class EMTransformerEncoder(nn.Module):
     @staticmethod
     def get_background_indices(stacked_feature_maps, foreground_indices):
         (
-            sparse_tensor_linearized,
+            linear_sparse_indices,
+            _,
             index_tensor_linearized,
             _,
             _,
         ) = linearize_sparse_and_index_tensors(stacked_feature_maps, foreground_indices)
-        linear_sparse_indices = sparse_tensor_linearized.indices()
         background_token_indices = ~torch.isin(
             linear_sparse_indices, index_tensor_linearized
-        ).squeeze()
+        )
         background_indices = stacked_feature_maps.indices()[
             :, background_token_indices
         ].transpose(0, 1)

@@ -217,42 +217,6 @@ def gather_from_sparse_tensor(
     return selected, is_specified_mask
 
 
-def gather_from_sparse_tensor_old(sparse_tensor: Tensor, index_tensor: Tensor):
-    """Batch selection of elements from a torch sparse tensor. Should be
-    equivalent to sparse_tensor[index_tensor]. It works by flattening the sparse
-    tensor's sparse dims and the index tensor to 1D (and converting n-d indices
-    to raveled indices), then using index_select along the flattened sparse tensor.
-
-    Args:
-        sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
-        S leading sparse dimensions and M is the dense dimension
-        index_tensor (Tensor): Long tensor of dimension ..., S; where ... are
-        leading batch dimensions.
-
-    Returns:
-        Tensor: Tensor of dimension ..., M; where the leading dimensions are
-        the same as the batch dimensions from `index_tensor`
-        Tensor: Boolean tensor of dimension ...; where each element is True if
-        the corresponding index is a specified (nonzero) element of the sparse
-        tensor and False if not
-    """
-    (
-        sparse_tensor_linearized,
-        index_tensor_linearized,
-        index_tensor_shape,
-        is_specified_mask,
-    ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
-    selected = sparse_tensor_linearized.index_select(
-        0, index_tensor_linearized
-    ).to_dense()
-    if sparse_tensor.dense_dim() > 0:
-        selected = selected.reshape(*index_tensor_shape[:-1], selected.shape[-1])
-    else:
-        selected = selected.reshape(*index_tensor_shape[:-1])
-    is_specified_mask = is_specified_mask.reshape(*index_tensor_shape[:-1])
-    return selected, is_specified_mask
-
-
 def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tensor):
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
         if (

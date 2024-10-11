@@ -44,6 +44,7 @@ class EMModel(nn.Module):
         matcher_cost_coef_mask: float = 1.0,
         matcher_cost_coef_dice: float = 1.0,
         matcher_cost_coef_dist: float = 1.0,
+        matcher_cost_coef_nll: float = 1.0,
         loss_coef_class: float = 1.0,
         loss_coef_mask_bce: float = 1.0,
         loss_coef_mask_dice: float = 1.0,
@@ -105,6 +106,7 @@ class EMModel(nn.Module):
             matcher_cost_coef_mask=matcher_cost_coef_mask,
             matcher_cost_coef_dice=matcher_cost_coef_dice,
             matcher_cost_coef_dist=matcher_cost_coef_dist,
+            matcher_cost_coef_nll=matcher_cost_coef_nll,
         )
 
         self.salience_criterion = ElectronSalienceCriterion()
@@ -122,6 +124,7 @@ class EMModel(nn.Module):
         (
             output_logits,
             output_positions,
+            std_dev_cholesky,
             output_queries,
             segmentation_logits,
             query_batch_offsets,
@@ -134,6 +137,7 @@ class EMModel(nn.Module):
         output = {
             "pred_logits": output_logits[-1],
             "pred_positions": output_positions[-1],
+            "pred_std_dev_cholesky": std_dev_cholesky[-1],
             "pred_segmentation_logits": segmentation_logits,
             "pred_binary_mask": sparse_binary_segmentation_map(segmentation_logits),
             "query_batch_offsets": query_batch_offsets,
@@ -143,11 +147,13 @@ class EMModel(nn.Module):
             {
                 "pred_logits": logits,
                 "pred_positions": positions,
+                "pred_std_dev_cholesky": cholesky,
                 "query_batch_offsets": query_batch_offsets,
             }
-            for logits, positions in zip(
+            for logits, positions, cholesky in zip(
                 output_logits[:-1],
                 output_positions[:-1],
+                std_dev_cholesky[:-1],
             )
         ]
 

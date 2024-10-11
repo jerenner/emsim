@@ -258,12 +258,26 @@ class EMTransformerEncoder(nn.Module):
         max_size = (
             np.stack([tensor.shape for tensor in converted_tensors], 0).max(0).tolist()
         )
-        return torch.stack(
-            [
-                torch.sparse_coo_tensor(tensor.indices(), tensor.values(), max_size)
-                for tensor in converted_tensors
-            ],
-            -2,
+        indices = []
+        values = []
+        for level_index, level_tensor in enumerate(converted_tensors):
+            values.append(level_tensor.values())
+            level_indices = level_tensor.indices()
+            indices.append(
+                torch.cat(
+                    [
+                        level_indices,
+                        level_indices.new_tensor([[level_index]]).expand(
+                            -1, level_indices.shape[-1]
+                        ),
+                    ],
+                    0,
+                )
+            )
+        return torch.sparse_coo_tensor(
+            torch.cat(indices, -1),
+            torch.cat(values, 0),
+            list(max_size[:-1]) + [len(tensor_list)] + [max_size[-1]],
         ).coalesce()
 
     @staticmethod

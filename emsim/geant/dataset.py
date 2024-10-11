@@ -168,6 +168,11 @@ class GeantElectronDataset(IterableDataset):
                     for elec in elecs
                 ]
             )
+            normalized_incidence_points_xy = (
+                incidence_points_xy
+                * 1000
+                / np.array([self.grid.xmax_um, self.grid.ymax_um])
+            )
             incidence_points_pixels_rc = np.fliplr(
                 incidence_points_xy
             ) / self.pixel_to_mm.astype(np.float32)
@@ -176,6 +181,7 @@ class GeantElectronDataset(IterableDataset):
                 local_incidence_points_mm / self.pixel_to_mm.astype(np.float32)
             )
             batch["incidence_points_xy"] = incidence_points_xy.astype(np.float32)
+            batch["normalized_incidence_points_xy"] = normalized_incidence_points_xy
             batch["incidence_points_pixels_rc"] = incidence_points_pixels_rc
             batch["local_incidence_points_pixels_xy"] = (
                 local_incidence_points_pixels.astype(np.float32)

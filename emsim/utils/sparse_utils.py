@@ -64,12 +64,31 @@ def torch_sparse_to_pydata_sparse(tensor: Tensor):
     assert tensor.is_sparse
     tensor = tensor.detach().coalesce().cpu()
     assert tensor.is_coalesced
+    nonzero_values = tensor.values().nonzero(as_tuple=True)
     return sparse.COO(
-        tensor.indices(),
-        tensor.values(),
+        tensor.indices()[:, nonzero_values[0]],
+        tensor.values()[nonzero_values],
         tensor.shape,
         has_duplicates=False,
     )
+
+
+def sparse_flatten_hw(tensor: Tensor):
+    assert tensor.is_sparse
+    tensor = tensor.coalesce()
+    indices = tensor.indices()
+    i = indices[1]
+    j = indices[2]
+    H = tensor.shape[1]
+    W = tensor.shape[2]
+    ij = (i * W + j).unsqueeze(0)
+    shape = tensor.shape
+    new_shape = shape[:1] + (H * W,) + shape[3:]
+    return torch.sparse_coo_tensor(
+        torch.cat([indices[:1], ij, indices[3:]], 0),
+        tensor.values(),
+        new_shape
+    ).coalesce()
 
 
 def spconv_sparse_mult(*tens: SparseConvTensor):

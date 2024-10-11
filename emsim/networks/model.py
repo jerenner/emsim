@@ -88,6 +88,7 @@ class EMModel(nn.Module):
             n_decoder_layers=transformer_decoder_layers,
             level_filter_ratio=transformer_level_filter_ratio,
             layer_filter_ratio=transformer_layer_filter_ratio,
+            encoder_max_tokens=transformer_encoder_max_tokens,
             n_query_embeddings=transformer_n_query_embeddings,
         )
 

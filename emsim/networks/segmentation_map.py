@@ -1,4 +1,7 @@
-from emsim.utils.batching_utils import deconcat_add_batch_dim
+from emsim.utils.batching_utils import (
+    deconcat_add_batch_dim,
+    split_batch_concatted_tensor,
+)
 from emsim.utils.sparse_utils import batch_offsets_from_sparse_tensor_indices
 
 
@@ -24,69 +27,49 @@ class SegmentationMapPredictor(nn.Module):
         self, stacked_feature_map: Tensor, queries: Tensor, query_batch_offsets: Tensor
     ):
         queries = self.mask_embed(queries)
-        batched_queries, query_pad_mask = deconcat_add_batch_dim(
-            queries, query_batch_offsets
-        )
         # unbind over the level dimension
         fullscale_feature_map = stacked_feature_map.unbind(-2)[-1].coalesce()
         assert fullscale_feature_map.ndim == 4  # (batch, height, width, feature)
+
+        split_queries = split_batch_concatted_tensor(queries, query_batch_offsets)
         feature_map_batch_offsets = batch_offsets_from_sparse_tensor_indices(
             fullscale_feature_map.indices()
         )
-        batched_features, feature_pad_mask = deconcat_add_batch_dim(
+        split_feature_values = split_batch_concatted_tensor(
             fullscale_feature_map.values(), feature_map_batch_offsets
         )
-        batched_feature_indices, index_pad_mask = deconcat_add_batch_dim(
+        split_feature_indices = split_batch_concatted_tensor(
             fullscale_feature_map.indices().T, feature_map_batch_offsets
         )
-        assert torch.equal(feature_pad_mask, index_pad_mask)
 
-        segmentation_logits = torch.bmm(batched_features, batched_queries.mT) # (batch, pixel/token, query)
+        split_segmentation_logits = []
+        for im_feats, im_queries in zip(split_feature_values, split_queries):
+            split_segmentation_logits.append(torch.mm(im_feats, im_queries.T))
 
-        # now put the segmentation logits in a sparse tensor
-        query_index = torch.arange(
-            segmentation_logits.shape[-1], device=batched_feature_indices.device
-        )
-        segmentation_logit_indices = torch.cat(
-            [
-                batched_feature_indices.unsqueeze(-2).expand(
-                    -1, -1, segmentation_logits.shape[-1], -1
-                ),
-                query_index.expand(*segmentation_logits.shape[:-1], -1).unsqueeze(-1),
-            ],
-            -1,
-        ) # (batch, height, width, query)
-        segmentation_logit_pad_mask = torch.logical_or(
-            query_pad_mask.unsqueeze(-2), feature_pad_mask.unsqueeze(-1)
-        )
-        num_nonpad_per_image = segmentation_logit_pad_mask.logical_not().sum([-1, -2])
-        out_logits = segmentation_logits.new_zeros(num_nonpad_per_image.sum().item())
-        out_indices = segmentation_logit_indices.new_zeros(
-            num_nonpad_per_image.sum().item(), 4
-        )
-        out_offsets = torch.cat(
-            [num_nonpad_per_image.new_zeros([1]), num_nonpad_per_image.cumsum(-1)]
-        ).to("cpu")
-
-        for batch_pad_mask, batch_logits, batch_indices, start_index, stop_index in zip(
-            segmentation_logit_pad_mask.logical_not(),
-            segmentation_logits,
-            segmentation_logit_indices,
-            out_offsets[:-1],
-            out_offsets[1:],
+        split_segmentation_logit_indices = []
+        for segmentation_logits, feature_indices in zip(
+            split_segmentation_logits, split_feature_indices
         ):
-            out_logits[start_index:stop_index] = batch_logits.flatten()[
-                batch_pad_mask.flatten()
-            ]
-            out_indices[start_index:stop_index] = batch_indices.flatten(0, -2)[
-                batch_pad_mask.flatten()
-            ]
+            query_index = torch.arange(
+                segmentation_logits.shape[-1], device=segmentation_logits.device
+            )
+            segmentation_logit_indices = torch.cat(
+                [
+                    feature_indices.unsqueeze(-2).expand(-1, len(query_index), -1),
+                    query_index.expand(*segmentation_logits.shape[:-1], -1).unsqueeze(
+                        -1
+                    ),
+                ],
+                -1,
+            )
+            split_segmentation_logit_indices.append(segmentation_logit_indices)
 
         return torch.sparse_coo_tensor(
-            out_indices.T,
-            out_logits,
-            (*fullscale_feature_map.shape[:-1], segmentation_logits.shape[-1]),
-            device=fullscale_feature_map.device,
+            torch.cat(
+                [indices.view(-1, indices.shape[-1]) for indices in split_segmentation_logit_indices]
+            ).T,
+            torch.cat([logits.flatten() for logits in split_segmentation_logits]),
+            (*fullscale_feature_map.shape[:-1], max(len(q) for q in split_queries)),
         ).coalesce()
 
 
@@ -96,5 +79,5 @@ def sparse_binary_segmentation_map(segmentation_map: Tensor):
         segmentation_map.indices(),
         segmentation_map.values() > 0.0,
         segmentation_map.shape,
-        device=segmentation_map.device
+        device=segmentation_map.device,
     )

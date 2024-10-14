@@ -85,11 +85,6 @@ class PatchedSegmentationMapPredictor(SegmentationMapPredictor):
         super().__init__(d_model, mask_head_hidden_layers)
         self.query_patch_diameter = query_patch_diameter
 
-    def reset_parameters(self):
-        for layer in self.mask_embed:
-            if hasattr(layer, "reset_parameters"):
-                layer.reset_parameters()
-
     def forward(
         self,
         stacked_feature_map: Tensor,

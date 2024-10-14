@@ -351,21 +351,11 @@ def multilevel_sparse_bilinear_grid_sample(
     x1_y0 = torch.stack([xy_batch_index, x1, y0, xy_level_index, head_indices], -1)
     x1_y1 = torch.stack([xy_batch_index, x1, y1, xy_level_index, head_indices], -1)
 
-    # x0_y0 = torch.stack([xy_batch_index, x0, y0, xy_level_index], -1)
-    # x0_y1 = torch.stack([xy_batch_index, x0, x1, xy_level_index], -1)
-    # x1_y0 = torch.stack([xy_batch_index, x1, y0, xy_level_index], -1)
-    # x1_y1 = torch.stack([xy_batch_index, x1, y1, xy_level_index], -1)
+    xy = torch.stack([x0_y0, x0_y1, x1_y0, x1_y1], -2)
+    w = torch.stack([wa, wb, wc, wd], -1)
 
-    val_a = gather_from_sparse_tensor(sparse_tensor, x0_y0)[0]
-    val_b = gather_from_sparse_tensor(sparse_tensor, x0_y1)[0]
-    val_c = gather_from_sparse_tensor(sparse_tensor, x1_y0)[0]
-    val_d = gather_from_sparse_tensor(sparse_tensor, x1_y1)[0]
+    val = gather_from_sparse_tensor(sparse_tensor, xy)[0]
 
-    # out = (wa * val_a) + (wb * val_b) + (wc * val_c) + (wd * val_d)
-
-    # stacking and matmul is much more efficient
-    val = torch.stack([val_a, val_b, val_c, val_d], -1)
-    w = torch.stack([wa, wb, wc, wd], -2)
-    out = torch.matmul(val.to(w), w).squeeze(-1)
+    out = torch.matmul(w, val.to(w)).squeeze(-2)
 
     return out

@@ -268,7 +268,7 @@ def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tens
     index_tensor_linearized = index_tensor_linearized.reshape(-1)
 
     is_specified_mask = torch.isin(
-        index_tensor_linearized, sparse_tensor_indices_linear, assume_unique=True
+        index_tensor_linearized, sparse_tensor_indices_linear
     )
 
     assert index_tensor_linearized.min() >= 0

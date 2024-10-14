@@ -5,8 +5,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn.init import constant_, xavier_uniform_
 
-from ..utils.batching_utils import split_batch_concatted_tensor
-from ..utils.sparse_utils import gather_from_sparse_tensor, spconv_to_torch_sparse
+from ..utils.sparse_utils import gather_from_sparse_tensor
 from ..utils.misc_utils import inverse_sigmoid
 
 
@@ -53,7 +52,7 @@ def multi_scale_deformable_attention(
         xy_level_indices,
         value_spatial_shapes,
     )
-    sampled_values = sampled_values.float()
+    sampled_values = sampled_values.to(attention_weights)
 
     assert sampled_values.shape == (
         n_queries,
@@ -63,22 +62,46 @@ def multi_scale_deformable_attention(
         embed_dim // n_heads,
     )
     assert attention_weights.shape == (n_queries, n_levels, n_points, n_heads)
-    output = sampled_values * attention_weights.unsqueeze(-1)
-    output = output.sum([1, 2]).view(n_queries, embed_dim)
+    output = torch.einsum("qlphd,qlph->qhd", sampled_values, attention_weights)
+    output = output.view(n_queries, embed_dim)
     return output
 
 
 def sparse_split_heads(sparse_tensor: Tensor, n_heads: int):
+    """
+    Splits a sparse tensor into multiple heads.
+
+    Args:
+        sparse_tensor (Tensor): The input sparse tensor.
+        n_heads (int): The number of heads to split into.
+
+    Returns:
+        Tensor: The split sparse tensor with shape (*sparse_tensor.shape[:-1], n_heads, head_dim).
+    """
     assert isinstance(sparse_tensor, Tensor)
     assert sparse_tensor.is_sparse
     assert sparse_tensor.ndim >= 4
+    n_specified_elements = sparse_tensor.indices().shape[1]
     embed_dim = sparse_tensor.shape[-1]
+    repeated_indices = torch.repeat_interleave(sparse_tensor.indices(), n_heads, 1)
+    new_indices = torch.cat(
+        [
+            repeated_indices,
+            torch.arange(n_heads, device=sparse_tensor.device)
+            .repeat(n_specified_elements)
+            .unsqueeze(0),
+        ]
+    )
+    new_values = sparse_tensor.values().view(
+        n_specified_elements * n_heads, embed_dim // n_heads
+    )
+
     assert embed_dim % n_heads == 0
     head_dim = embed_dim // n_heads
     new_sparse_tensor = torch.sparse_coo_tensor(
-        sparse_tensor.indices(),
-        sparse_tensor.values().view(-1, n_heads, head_dim),
-        (*sparse_tensor.shape[:-1], n_heads, embed_dim // n_heads),
+        new_indices,
+        new_values,
+        (*sparse_tensor.shape[:-1], n_heads, head_dim),
     ).coalesce()
     return new_sparse_tensor
 
@@ -99,7 +122,7 @@ class SparseMSDeformableAttention(nn.Module):
         self.num_levels = num_levels
         self.num_heads = num_heads
         self.num_points = num_points
-        self.double_presigmoied_sampling_offsets = double_presigmoid_sampling_offsets
+        self.double_presigmoid_sampling_offsets = double_presigmoid_sampling_offsets
         self.sampling_offsets = nn.Linear(
             embed_dim,
             num_levels * num_points * num_heads * 2,
@@ -308,8 +331,8 @@ def multilevel_sparse_bilinear_grid_sample(
     # x = x.view(-1)
     # y = y.view(-1)
 
-    x0 = x.floor().long()
-    y0 = y.floor().long()
+    x0 = x.floor().int()
+    y0 = y.floor().int()
     x1 = x0 + 1
     y1 = y0 + 1
 
@@ -323,16 +346,26 @@ def multilevel_sparse_bilinear_grid_sample(
     wc = ((x - x0) * (y1 - y)).unsqueeze(-1)
     wd = ((x - x0) * (y - y0)).unsqueeze(-1)
 
-    x0_y0 = torch.stack([xy_batch_index, x0, y0, xy_level_index], -1)
-    x0_y1 = torch.stack([xy_batch_index, x0, x1, xy_level_index], -1)
-    x1_y0 = torch.stack([xy_batch_index, x1, y0, xy_level_index], -1)
-    x1_y1 = torch.stack([xy_batch_index, x1, y1, xy_level_index], -1)
+    x0_y0 = torch.stack([xy_batch_index, x0, y0, xy_level_index, head_indices], -1)
+    x0_y1 = torch.stack([xy_batch_index, x0, y1, xy_level_index, head_indices], -1)
+    x1_y0 = torch.stack([xy_batch_index, x1, y0, xy_level_index, head_indices], -1)
+    x1_y1 = torch.stack([xy_batch_index, x1, y1, xy_level_index, head_indices], -1)
+
+    # x0_y0 = torch.stack([xy_batch_index, x0, y0, xy_level_index], -1)
+    # x0_y1 = torch.stack([xy_batch_index, x0, x1, xy_level_index], -1)
+    # x1_y0 = torch.stack([xy_batch_index, x1, y0, xy_level_index], -1)
+    # x1_y1 = torch.stack([xy_batch_index, x1, y1, xy_level_index], -1)
 
     val_a = gather_from_sparse_tensor(sparse_tensor, x0_y0)[0]
     val_b = gather_from_sparse_tensor(sparse_tensor, x0_y1)[0]
     val_c = gather_from_sparse_tensor(sparse_tensor, x1_y0)[0]
     val_d = gather_from_sparse_tensor(sparse_tensor, x1_y1)[0]
 
-    out = (wa * val_a) + (wb * val_b) + (wc * val_c) + (wd * val_d)
+    # out = (wa * val_a) + (wb * val_b) + (wc * val_c) + (wd * val_d)
+
+    # stacking and matmul is much more efficient
+    val = torch.stack([val_a, val_b, val_c, val_d], -1)
+    w = torch.stack([wa, wb, wc, wd], -2)
+    out = torch.matmul(val.to(w), w).squeeze(-1)
 
     return out

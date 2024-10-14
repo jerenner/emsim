@@ -1,8 +1,10 @@
 from emsim.utils.batching_utils import (
-    deconcat_add_batch_dim,
     split_batch_concatted_tensor,
 )
-from emsim.utils.sparse_utils import batch_offsets_from_sparse_tensor_indices
+from emsim.utils.sparse_utils import (
+    batch_offsets_from_sparse_tensor_indices,
+    gather_from_sparse_tensor,
+)
 
 
 import torch
@@ -66,11 +68,109 @@ class SegmentationMapPredictor(nn.Module):
 
         return torch.sparse_coo_tensor(
             torch.cat(
-                [indices.view(-1, indices.shape[-1]) for indices in split_segmentation_logit_indices]
+                [
+                    indices.view(-1, indices.shape[-1])
+                    for indices in split_segmentation_logit_indices
+                ]
             ).T,
             torch.cat([logits.flatten() for logits in split_segmentation_logits]),
             (*fullscale_feature_map.shape[:-1], max(len(q) for q in split_queries)),
         ).coalesce()
+
+
+class PatchedSegmentationMapPredictor(SegmentationMapPredictor):
+    def __init__(
+        self, d_model: int, mask_head_hidden_layers: int = 3, query_patch_diameter=7
+    ):
+        super().__init__(d_model, mask_head_hidden_layers)
+        self.query_patch_diameter = query_patch_diameter
+
+    def reset_parameters(self):
+        for layer in self.mask_embed:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+
+    def forward(
+        self,
+        stacked_feature_map: Tensor,
+        queries: Tensor,
+        query_batch_offsets: Tensor,
+        query_positions: Tensor,
+        image_spatial_shapes: Tensor,
+    ):
+        queries = self.mask_embed(queries)
+        # unbind over the level dimension
+        fullscale_feature_map = stacked_feature_map.unbind(-2)[-1].coalesce()
+        assert fullscale_feature_map.ndim == 4  # (batch, height, width, feature)
+        assert image_spatial_shapes.shape == (fullscale_feature_map.shape[0], 2)
+
+        split_queries = split_batch_concatted_tensor(queries, query_batch_offsets)
+        split_positions = split_batch_concatted_tensor(
+            query_positions, query_batch_offsets
+        )
+
+        patch_map_indices = []
+        patch_map_values = []
+        for i, (im_queries, im_positions, shape) in enumerate(
+            zip(split_queries, split_positions, image_spatial_shapes)
+        ):
+            H = shape[0]
+            W = shape[1]
+            HW = im_positions.new_tensor([H, W], dtype=torch.int)
+            im_query_indices = (im_positions.flip(-1) * HW).int()
+            axis = (
+                torch.arange(
+                    self.query_patch_diameter,
+                    device=im_query_indices.device,
+                    dtype=im_query_indices.dtype,
+                )
+                - self.query_patch_diameter // 2
+            )
+            index_grid = torch.stack(torch.meshgrid(axis, axis, indexing="ij"), -1)
+            patch_indices = im_query_indices.unsqueeze(1).unsqueeze(1) + index_grid
+            patch_indices = patch_indices.clamp_min(0).clamp_max(
+                HW.expand_as(patch_indices) - 1
+            )
+            patch_indices = torch.cat(
+                [
+                    patch_indices.new_tensor(i).expand(*patch_indices.shape[:-1], 1),
+                    patch_indices,
+                    torch.arange(
+                        patch_indices.shape[0],
+                        dtype=patch_indices.dtype,
+                        device=patch_indices.device,
+                    )
+                    .view(-1, 1, 1, 1)
+                    .expand(*patch_indices.shape[:-1], 1),
+                ],
+                -1,
+            )
+            patch_values = (
+                im_queries.unsqueeze(1)
+                .unsqueeze(1)
+                .expand(*patch_indices.shape[:-1], -1)
+            )
+            patch_map_indices.append(patch_indices)
+            patch_map_values.append(patch_values)
+
+        patch_map_indices = torch.cat(patch_map_indices)
+        patch_map_values = torch.cat(patch_map_values)
+
+        feature_map_values = gather_from_sparse_tensor(
+            fullscale_feature_map, patch_map_indices[..., :-1]
+        )[0]
+
+        patch_map_logits = torch.einsum(
+            "qhwf,qhwf->qhw", patch_map_values, feature_map_values
+        )
+
+        nonzero_logits = patch_map_logits.nonzero(as_tuple=True)
+        patch_segmap = torch.sparse_coo_tensor(
+            patch_map_indices[nonzero_logits].T,
+            patch_map_logits[nonzero_logits],
+            (*fullscale_feature_map.shape[:-1], max(len(q) for q in split_queries)),
+        ).coalesce()
+        return patch_segmap
 
 
 def sparse_binary_segmentation_map(segmentation_map: Tensor):

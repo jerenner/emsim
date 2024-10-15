@@ -9,6 +9,7 @@ from emsim.networks.positional_encoding import (
     ij_indices_to_normalized_xy,
     normalized_xy_of_stacked_feature_maps,
 )
+from emsim.networks.transformer.std_dev_head import StdDevHead
 
 from ...utils.batching_utils import split_batch_concatted_tensor
 from ...utils.misc_utils import inverse_sigmoid
@@ -20,7 +21,7 @@ from ..salience_mask_predictor import SpconvSparseMaskPredictor
 from ..positional_encoding import FourierEncoding
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
-from ..segmentation_map import SegmentationMapPredictor
+from ..segmentation_map import SegmentationMapPredictor, PatchedSegmentationMapPredictor
 
 
 class EMTransformer(nn.Module):
@@ -75,7 +76,8 @@ class EMTransformer(nn.Module):
             nn.ReLU(),
             nn.Linear(d_model, 2, dtype=torch.double),
         )
-        self.segmentation_head = SegmentationMapPredictor(d_model)
+        self.segmentation_head = PatchedSegmentationMapPredictor(d_model)
+        self.std_head = StdDevHead(d_model)
 
         self.salience_unpoolers = nn.ModuleList(
             [
@@ -103,6 +105,7 @@ class EMTransformer(nn.Module):
             num_layers=n_decoder_layers,
             class_head=self.classification_head,
             position_offset_head=self.query_pos_offset_head,
+            std_head=self.std_head,
         )
 
     def reset_parameters(self):
@@ -194,9 +197,9 @@ class EMTransformer(nn.Module):
         nms_topk_position_offsets = self.query_pos_offset_head(
             nms_encoder_out_normalized.double()
         )
-        nms_topk_masks = self.segmentation_head(
-            encoder_out, nms_encoder_out_normalized, nms_topk_query_batch_offsets
-        )
+        # nms_topk_masks = self.segmentation_head(
+        #     encoder_out, nms_encoder_out_normalized, nms_topk_query_batch_offsets
+        # )
 
         nms_proposal_xy = normalized_xy_of_stacked_feature_maps(
             nms_encoder_out, score_dict["spatial_shapes"]
@@ -216,6 +219,7 @@ class EMTransformer(nn.Module):
             decoder_out_logits,
             decoder_out_positions,
             decoder_out_queries,
+            decoder_out_std,
         ) = self.decoder(
             queries=queries,
             query_reference_points=reference_points,
@@ -225,12 +229,16 @@ class EMTransformer(nn.Module):
         )
 
         segmentation_logits = self.segmentation_head(
-            encoder_out, decoder_out_queries[-1], nms_topk_query_batch_offsets
+            encoder_out,
+            decoder_out_queries[-1],
+            nms_topk_query_batch_offsets,
+            decoder_out_positions[-1],
         )
 
         return (
             decoder_out_logits,
             decoder_out_positions,
+            decoder_out_std,
             decoder_out_queries,
             segmentation_logits,
             nms_topk_query_batch_offsets,

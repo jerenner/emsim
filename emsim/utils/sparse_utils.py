@@ -85,9 +85,7 @@ def sparse_flatten_hw(tensor: Tensor):
     shape = tensor.shape
     new_shape = shape[:1] + (H * W,) + shape[3:]
     return torch.sparse_coo_tensor(
-        torch.cat([indices[:1], ij, indices[3:]], 0),
-        tensor.values(),
-        new_shape
+        torch.cat([indices[:1], ij, indices[3:]], 0), tensor.values(), new_shape
     ).coalesce()
 
 
@@ -361,56 +359,66 @@ def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor):
     return out
 
 
-def union_sparse_indices(
-    predicted_occupancy_logits: Tensor, groundtruth_occupancy: Tensor
-):
-    assert groundtruth_occupancy.is_sparse
-    assert predicted_occupancy_logits.is_sparse
+def union_sparse_indices(sparse_tensor_1: Tensor, sparse_tensor_2: Tensor):
+    assert sparse_tensor_1.is_sparse
+    assert sparse_tensor_2.is_sparse
+    assert sparse_tensor_1.sparse_dim() == sparse_tensor_2.sparse_dim()
+    assert sparse_tensor_1.dense_dim() == sparse_tensor_2.dense_dim()
 
-    if not groundtruth_occupancy.is_coalesced():
-        groundtruth_occupancy = groundtruth_occupancy.coalesce()
-    if not predicted_occupancy_logits.is_coalesced():
-        predicted_occupancy_logits = predicted_occupancy_logits.coalesce()
+    M = sparse_tensor_1.sparse_dim()
+    K = sparse_tensor_1.dense_dim()
 
-    groundtruth_indices = groundtruth_occupancy.indices()
-    groundtruth_values = groundtruth_occupancy.values()
-    predicted_indices = predicted_occupancy_logits.indices()
-    predicted_values = predicted_occupancy_logits.values()
+    if sparse_tensor_1.shape != sparse_tensor_2.shape:
+        max_shape = max([tensor.shape for tensor in (sparse_tensor_1, sparse_tensor_2)])
+        sparse_tensor_1 = sparse_tensor_1.sparse_resize_(max_shape, M, K)
+        sparse_tensor_2 = sparse_tensor_2.sparse_resize_(max_shape, M, K)
 
-    indices_gt_gt_predicted = torch.cat(
-        [groundtruth_indices, groundtruth_indices, predicted_indices], -1
-    )
-    uniques, counts = torch.unique(indices_gt_gt_predicted, dim=-1, return_counts=True)
-    predicted_exclusives = uniques[:, counts == 1]
-    groundtruth_exclusives = uniques[:, counts == 2]
+    sparse_tensor_1 = sparse_tensor_1.coalesce()
+    sparse_tensor_2 = sparse_tensor_2.coalesce()
 
-    groundtruth_unioned = torch.sparse_coo_tensor(
-        torch.cat([groundtruth_indices, predicted_exclusives], -1),
+    indices_1 = sparse_tensor_1.indices()
+    values_1 = sparse_tensor_1.values()
+    indices_2 = sparse_tensor_2.indices()
+    values_2 = sparse_tensor_2.values()
+
+    indices_2_2_1 = torch.cat([indices_2, indices_2, indices_1], -1)
+    uniques, counts = torch.unique(indices_2_2_1, dim=-1, return_counts=True)
+    tensor_1_exclusives = uniques[:, counts == 1]
+    tensor_2_exclusives = uniques[:, counts == 2]
+
+    tensor_2_unioned = torch.sparse_coo_tensor(
+        torch.cat([indices_2, tensor_1_exclusives], -1),
         torch.cat(
             [
-                groundtruth_values,
-                groundtruth_values.new_zeros(
-                    predicted_exclusives.shape[-1],
+                values_2,
+                values_2.new_zeros(
+                    (tensor_1_exclusives.shape[-1], *sparse_tensor_2.shape[M : M + K]),
                 ),
             ],
             0,
         ),
-        size=groundtruth_occupancy.shape[:3],
-        device=groundtruth_occupancy.device,
+        size=sparse_tensor_2.shape,
+        device=sparse_tensor_2.device,
     ).coalesce()
 
-    stacked_zero_logits = predicted_values.new_zeros(
-        [groundtruth_exclusives.shape[-1], predicted_values.shape[-1]],
-    )
-    stacked_zero_logits[:, 0] = 1
-    predicted_unioned = torch.sparse_coo_tensor(
-        torch.cat([predicted_indices, groundtruth_exclusives], -1),
-        torch.cat([predicted_values, stacked_zero_logits], 0),
-        size=predicted_occupancy_logits.shape,
-        device=predicted_occupancy_logits.device,
+    tensor_1_unioned = torch.sparse_coo_tensor(
+        torch.cat([indices_1, tensor_2_exclusives], -1),
+        torch.cat(
+            [
+                values_1,
+                values_1.new_zeros(
+                    (tensor_2_exclusives.shape[-1], *sparse_tensor_1.shape[M : M + K])
+                ),
+            ],
+            0,
+        ),
+        size=sparse_tensor_1.shape,
+        device=sparse_tensor_1.device,
     ).coalesce()
 
-    return predicted_unioned, groundtruth_unioned
+    assert torch.equal(tensor_1_unioned.indices(), tensor_2_unioned.indices())
+
+    return tensor_1_unioned, tensor_2_unioned
 
 
 def __trim(subtensor: Tensor):

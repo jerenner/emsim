@@ -91,13 +91,11 @@ class PatchedSegmentationMapPredictor(SegmentationMapPredictor):
         queries: Tensor,
         query_batch_offsets: Tensor,
         query_positions: Tensor,
-        image_spatial_shapes: Tensor,
     ):
         queries = self.mask_embed(queries)
         # unbind over the level dimension
         fullscale_feature_map = stacked_feature_map.unbind(-2)[-1].coalesce()
         assert fullscale_feature_map.ndim == 4  # (batch, height, width, feature)
-        assert image_spatial_shapes.shape == (fullscale_feature_map.shape[0], 2)
 
         split_queries = split_batch_concatted_tensor(queries, query_batch_offsets)
         split_positions = split_batch_concatted_tensor(
@@ -106,11 +104,11 @@ class PatchedSegmentationMapPredictor(SegmentationMapPredictor):
 
         patch_map_indices = []
         patch_map_values = []
-        for i, (im_queries, im_positions, shape) in enumerate(
-            zip(split_queries, split_positions, image_spatial_shapes)
+        for i, (im_queries, im_positions) in enumerate(
+            zip(split_queries, split_positions)
         ):
-            H = shape[0]
-            W = shape[1]
+            H = fullscale_feature_map.shape[1]
+            W = fullscale_feature_map.shape[2]
             HW = im_positions.new_tensor([H, W], dtype=torch.int)
             im_query_indices = (im_positions.flip(-1) * HW).int()
             axis = (

@@ -66,7 +66,7 @@ class HungarianMatcher(nn.Module):
             predicted_dict["pred_positions"],
             predicted_dict["pred_std_dev_cholesky"],
             predicted_dict["query_batch_offsets"],
-            target_dict["normalized_incidence_points_xy"],
+            incidence_points,
             target_dict["electron_batch_offsets"],
         )
 

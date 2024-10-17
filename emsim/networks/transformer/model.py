@@ -106,6 +106,7 @@ class EMTransformer(nn.Module):
             class_head=self.classification_head,
             position_offset_head=self.query_pos_offset_head,
             std_head=self.std_head,
+            segmentation_head=self.segmentation_head,
         )
 
     def reset_parameters(self):
@@ -220,6 +221,7 @@ class EMTransformer(nn.Module):
             decoder_out_positions,
             decoder_out_queries,
             decoder_out_std,
+            decoder_out_segmentation_logits,
         ) = self.decoder(
             queries=queries,
             query_reference_points=reference_points,
@@ -228,19 +230,19 @@ class EMTransformer(nn.Module):
             spatial_shapes=score_dict["spatial_shapes"],
         )
 
-        segmentation_logits = self.segmentation_head(
-            encoder_out,
-            decoder_out_queries[-1],
-            nms_topk_query_batch_offsets,
-            decoder_out_positions[-1],
-        )
+        # segmentation_logits = self.segmentation_head(
+        #     encoder_out,
+        #     decoder_out_queries[-1],
+        #     nms_topk_query_batch_offsets,
+        #     decoder_out_positions[-1],
+        # )
 
         return (
             decoder_out_logits,
             decoder_out_positions,
             decoder_out_std,
             decoder_out_queries,
-            segmentation_logits,
+            decoder_out_segmentation_logits,
             nms_topk_query_batch_offsets,
             nms_topk_logits,
             nms_encoder_out_positions,

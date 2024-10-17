@@ -19,6 +19,7 @@ from ..positional_encoding import (
 from ..ms_deform_attn import SparseMSDeformableAttention
 from .std_dev_head import StdDevHead
 from .blocks import SelfAttentionBlock, SparseDeformableAttentionBlock, FFNBlock
+from ..segmentation_map import PatchedSegmentationMapPredictor
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -100,6 +101,7 @@ class EMTransformerDecoder(nn.Module):
         class_head: Optional[nn.Module] = None,
         position_offset_head: Optional[nn.Module] = None,
         std_head: Optional[nn.Module] = None,
+        segmentation_head: Optional[nn.Module] = None,
         look_forward_twice: bool = True,
     ):
         super().__init__()
@@ -115,22 +117,32 @@ class EMTransformerDecoder(nn.Module):
 
         self.layers_share_heads = layers_share_heads
         if self.layers_share_heads:
-            if class_head is None or position_offset_head is None or std_head is None:
+            if (
+                class_head is None
+                or position_offset_head is None
+                or std_head is None
+                or segmentation_head is None
+            ):
                 raise ValueError(
-                    "Expected `class_head`, `position_offset_head`, and "
-                    "`std_head` to be specified when layers_share_heads is True; got "
-                    f"{class_head}, {position_offset_head}, and {std_head}"
+                    "Expected `class_head`, `position_offset_head`, "
+                    "`std_head`, and `segmentation_head` to be specified when "
+                    "layers_share_heads is True; got "
+                    f"{class_head}, {position_offset_head}, {std_head}, "
+                    f"and {segmentation_head}"
                 )
             self.class_head = class_head
             self.position_offset_head = position_offset_head
             self.std_head = std_head
+            self.segmentation_head = segmentation_head
             self.per_layer_class_heads = None
             self.per_layer_position_heads = None
             self.per_layer_std_heads = None
+            self.per_layer_segmentation_heads = None
         else:
             self.class_head = None
             self.position_offset_head = None
             self.std_head = None
+            self.segmentation_head = None
             self.per_layer_class_heads = nn.ModuleList(
                 [nn.Linear(self.d_model, 1) for _ in range(num_layers)]
             )
@@ -146,7 +158,15 @@ class EMTransformerDecoder(nn.Module):
                     for _ in range(num_layers)
                 ]
             )
-            self.per_layer_std_heads = nn.ModuleList([StdDevHead(self.d_model) for _ in range(num_layers)])
+            self.per_layer_std_heads = nn.ModuleList(
+                [StdDevHead(self.d_model) for _ in range(num_layers)]
+            )
+            self.per_layer_segmentation_heads = nn.ModuleList(
+                [
+                    PatchedSegmentationMapPredictor(self.d_model)
+                    for _ in range(num_layers)
+                ]
+            )
         # self.ref_point_head = nn.Sequential(
         #     nn.Linear(2 * self.d_model, self.d_model),
         #     nn.ReLU(),
@@ -171,6 +191,7 @@ class EMTransformerDecoder(nn.Module):
         layer_output_positions = []
         layer_output_queries = []
         layer_output_std = []
+        layer_output_segmentation = []
         for i, layer in enumerate(self.layers):
             query_pos_encoding = self.query_pos_encoding(query_reference_points)
             query_pos_encoding = query_pos_encoding.to(queries)
@@ -189,6 +210,7 @@ class EMTransformerDecoder(nn.Module):
             class_head = self._get_class_head(i)
             delta_pos_head = self._get_position_head(i)
             std_head = self._get_std_head(i)
+            segmentation_head = self._get_segmentation_head(i)
 
             query_logits = class_head(queries_normed)
             query_delta_pos = delta_pos_head(queries_normed.double())
@@ -198,6 +220,13 @@ class EMTransformerDecoder(nn.Module):
                 query_delta_pos + inverse_sigmoid(query_reference_points)
             )
 
+            query_segmentation = segmentation_head(
+                stacked_feature_maps,
+                queries_normed,
+                query_batch_offsets,
+                new_reference_points,
+                )
+
             layer_output_logits.append(query_logits)
             layer_output_std.append(query_std)
             if self.look_forward_twice:
@@ -205,6 +234,7 @@ class EMTransformerDecoder(nn.Module):
             else:
                 layer_output_positions.append(new_reference_points.detach())
             layer_output_queries.append(queries)
+            layer_output_segmentation.append(query_segmentation)
 
             query_reference_points = new_reference_points.detach()
 
@@ -212,11 +242,13 @@ class EMTransformerDecoder(nn.Module):
         stacked_query_positions = torch.stack(layer_output_positions)
         stacked_queries = torch.stack(layer_output_queries)
         stacked_std = torch.stack(layer_output_std)
+        stacked_segmentation = torch.stack(layer_output_segmentation)
         return (
             stacked_query_logits,
             stacked_query_positions,
             stacked_queries,
             stacked_std,
+            stacked_segmentation,
         )
 
     def _get_class_head(self, layer_index):
@@ -237,6 +269,12 @@ class EMTransformerDecoder(nn.Module):
         else:
             return self.per_layer_std_heads[layer_index]
 
+    def _get_segmentation_head(self, layer_index):
+        if self.layers_share_heads:
+            return self.segmentation_head
+        else:
+            return self.per_layer_segmentation_heads[layer_index]
+
     def reset_parameters(self):
         for layer in self.layers:
             layer.reset_parameters()
@@ -250,4 +288,7 @@ class EMTransformerDecoder(nn.Module):
                         layer.reset_parameters()
         if self.per_layer_std_heads is not None:
             for head in self.per_layer_std_heads:
+                head.reset_parameters()
+        if self.per_layer_segmentation_heads is not None:
+            for head in self.per_layer_segmentation_heads:
                 head.reset_parameters()

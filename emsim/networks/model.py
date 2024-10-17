@@ -49,9 +49,7 @@ class EMModel(nn.Module):
         loss_coef_mask_bce: float = 1.0,
         loss_coef_mask_dice: float = 1.0,
         loss_coef_incidence_nll: float = 1.0,
-        loss_coef_incidence_mse: float = 1.0,
-        loss_coef_total_energy: float = 1.0,
-        loss_coef_occupancy: float = 1.0,
+        loss_coef_incidence_huber: float = 1.0,
         loss_no_electron_weight: float = 0.1,
         aux_loss=True,
     ):
@@ -98,15 +96,14 @@ class EMModel(nn.Module):
             loss_coef_mask_bce=loss_coef_mask_bce,
             loss_coef_mask_dice=loss_coef_mask_dice,
             loss_coef_incidence_nll=loss_coef_incidence_nll,
-            loss_coef_incidence_mse=loss_coef_incidence_mse,
-            loss_coef_total_energy=loss_coef_total_energy,
-            loss_coef_occupancy=loss_coef_occupancy,
+            loss_coef_incidence_huber=loss_coef_incidence_huber,
             no_electron_weight=loss_no_electron_weight,
             matcher_cost_coef_class=matcher_cost_coef_class,
             matcher_cost_coef_mask=matcher_cost_coef_mask,
             matcher_cost_coef_dice=matcher_cost_coef_dice,
             matcher_cost_coef_dist=matcher_cost_coef_dist,
             matcher_cost_coef_nll=matcher_cost_coef_nll,
+            aux_loss=aux_loss,
         )
 
         self.salience_criterion = ElectronSalienceCriterion()
@@ -114,7 +111,7 @@ class EMModel(nn.Module):
         self.occupancy_predictor = OccupancyPredictor(
             self.backbone.decoder.feature_info[-1]["num_chs"], pixel_max_occupancy + 1
         )
-        self.aux_loss = True
+        self.aux_loss = aux_loss
 
     def forward(self, batch: dict):
         image = batch["image_sparsified"]
@@ -138,26 +135,31 @@ class EMModel(nn.Module):
             "pred_logits": output_logits[-1],
             "pred_positions": output_positions[-1],
             "pred_std_dev_cholesky": std_dev_cholesky[-1],
-            "pred_segmentation_logits": segmentation_logits,
-            "pred_binary_mask": sparse_binary_segmentation_map(segmentation_logits),
+            "pred_segmentation_logits": segmentation_logits[-1].coalesce(),
+            # "pred_binary_mask": sparse_binary_segmentation_map(segmentation_logits),
             "query_batch_offsets": query_batch_offsets,
         }
 
-        output["aux_outputs"] = [
-            {
-                "pred_logits": logits,
-                "pred_positions": positions,
-                "pred_std_dev_cholesky": cholesky,
-                "query_batch_offsets": query_batch_offsets,
-            }
-            for logits, positions, cholesky in zip(
-                output_logits[:-1],
-                output_positions[:-1],
-                std_dev_cholesky[:-1],
-            )
-        ]
+        if self.aux_loss:
+            output["aux_outputs"] = [
+                {
+                    "pred_logits": logits,
+                    "pred_positions": positions,
+                    "pred_std_dev_cholesky": cholesky,
+                    "query_batch_offsets": query_batch_offsets,
+                    "pred_segmentation_logits": seg_logits.coalesce(),
+                    "output_queries": queries,
+                }
+                for logits, positions, cholesky, seg_logits, queries in zip(
+                    output_logits[:-1],
+                    output_positions[:-1],
+                    std_dev_cholesky[:-1],
+                    segmentation_logits.unbind()[:-1],
+                    output_queries[:-1],
+                )
+            ]
 
-        output["output_queries"] = output_queries
+        output["output_queries"] = output_queries[-1]
         output["enc_outputs"] = {
             "pred_logits": encoder_logits,
             "pred_positions": encoder_positions,

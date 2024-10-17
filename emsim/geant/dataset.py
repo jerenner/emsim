@@ -163,10 +163,7 @@ class GeantElectronDataset(IterableDataset):
 
             # actual point the geant electron hit the detector surface
             incidence_points_xy = np.stack(
-                [
-                    np.array([elec.incidence.x, elec.incidence.y], dtype=np.float32)
-                    for elec in elecs
-                ]
+                [np.array([elec.incidence.x, elec.incidence.y]) for elec in elecs]
             )
             normalized_incidence_points_xy = (
                 incidence_points_xy
@@ -189,9 +186,10 @@ class GeantElectronDataset(IterableDataset):
 
             # center of mass for each patch
             local_centers_of_mass_pixels = charge_2d_center_of_mass(patches)
-            batch["local_centers_of_mass_pixels_xy"] = (
-                local_centers_of_mass_pixels.astype(np.float32)
-            )
+            batch["local_centers_of_mass_pixels_xy"] = local_centers_of_mass_pixels
+            batch["normalized_centers_of_mass_xy"] = (
+                local_centers_of_mass_pixels + patch_coords[:, :2]
+            ) / np.array([self.grid.xmax_pixel, self.grid.ymax_pixel])
 
             # whole trajectories, if trajectory file is given
             # Note: could have x/y out of order, need to check if needed

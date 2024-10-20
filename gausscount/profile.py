@@ -116,6 +116,9 @@ def gaussian_profile(file_path, nframes, baseline, th_single_elec, plot_results=
             axs[2].set_title('Difference (Original - Optimized)')
             axs[2].axis('off')
             
+            fig2, axs2 = plt.subplots(1, 1, figsize=(15, 5))
+            axs2.hist(hit_patches[:,1,1],bins=100)
+
             plt.show()
         
         # Return the key results

@@ -42,7 +42,7 @@ def construct_modeled_frame_pytorch(frame_ct, splash_kernel, device='cpu'):
     
     return modeled_frame
 
-def count_frame_pytorch(frame_bls, frame_ct, gauss_A, gauss_sigma, n_steps_max=500, loss_lim = 1):
+def count_frame_pytorch(frame_bls, frame_ct, gauss_A, gauss_sigma, n_steps_max=5000, loss_lim = 1, min_loss_patience = 10, min_loss_improvement = 0.01):
     """Counts a frame given initial guess frame_ct"""
     
     # Convert frame and frame_ct to a PyTorch tensor
@@ -58,8 +58,14 @@ def count_frame_pytorch(frame_bls, frame_ct, gauss_A, gauss_sigma, n_steps_max=5
     # Set up the parameters for the iteration
     n_steps = 0
     loss = loss_lim + 1
+
+    # Record the loss at each step
+    loss_steps = []
+
+    # Boolean for stopping due to loss improvement condition
+    improvement_stop = False
     
-    while(loss > loss_lim and n_steps < n_steps_max):
+    while(loss > loss_lim and n_steps < n_steps_max and not improvement_stop):
         
         optimizer.zero_grad()  # Clear previous gradients
 
@@ -75,14 +81,27 @@ def count_frame_pytorch(frame_bls, frame_ct, gauss_A, gauss_sigma, n_steps_max=5
         # Update frame_ct_tensor based on gradients
         optimizer.step()
 
+        # Record the loss
+        loss_steps.append(loss.item())
+
+        # Check for stopping condition based on improvement
+        if n_steps > min_loss_patience:
+            relative_improvement = (loss_steps[-min_loss_patience] - loss.item()) / loss_steps[-min_loss_patience]
+            if relative_improvement < min_loss_improvement:
+                print(f"* Stopping at step {n_steps} due to small relative improvement ({relative_improvement:.4f})")
+                improvement_stop = True
+
         n_steps += 1
         if(n_steps >= n_steps_max):
-            print(f"Warning, stopping at max steps {n_steps} with loss {loss}")
+            print(f"* Stopping at max steps {n_steps} with loss {loss}")
+        if(loss <= loss_lim):
+            print(f"* Stopping due to loss {loss} dropping below lower limit {loss_lim}")
         if n_steps % 100 == 0:
             print(f"Step {n_steps}, Loss: {loss.item()}")
     print(f"Counted in n_steps = {n_steps} with loss = {loss}")
     
-    return frame_ct_tensor.cpu().detach().numpy(), modeled_frame.cpu().detach().numpy()
+    loss_steps = np.array(loss_steps)
+    return frame_ct_tensor.cpu().detach().numpy(), modeled_frame.cpu().detach().numpy(), loss_steps
 
 def frame_to_indices_weights(counted_frames):
     """Convert a batch of 2D counted frames into lists of linear indices and weights."""
@@ -179,7 +198,10 @@ def compute_prior(frames_file, nframes, baseline, gauss_A):
 
     return prior_frame
 
-def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_batch, th_single_elec, baseline, gauss_A, gauss_sigma, n_steps_max = 300, batch_start = 0, batch_end = -1, nframes_prior=0):
+def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_batch, 
+                 th_single_elec, baseline, gauss_A, gauss_sigma, 
+                 n_steps_max = 5000, loss_per_frame_stop = 1, min_loss_patience = 10, min_loss_improvement = 0.01, 
+                 batch_start = 0, batch_end = -1, nframes_prior=0, record_loss_curves = True):
     """
     Counts the specified number of frames from the given file and saves the counted data to an HDF5 file.
     If nframes < 0, counts all frames in the file.
@@ -206,6 +228,9 @@ def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_bat
             nframes = data.shape[0]
             print(f"Counting all {nframes} frames")
 
+    # Record all loss curves.
+    loss_curves = []
+
     batches = round(nframes / frames_per_batch)
     print(f"Analyzing in {batches} batches...")
     if(batch_end < 0): batch_end = batches
@@ -227,9 +252,13 @@ def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_bat
         # -------------------------------------------------------------------------------
         # Count the frames.
         print("-- Counting frames...")
-        frame_ct_reco, modeled_frame_reco = count_frame_pytorch(frame_bls, frame_ct, gauss_A, gauss_sigma, n_steps_max = n_steps_max, loss_lim = nframes)
+        frame_ct_reco, modeled_frame_reco, loss_steps = count_frame_pytorch(frame_bls, frame_ct, gauss_A, gauss_sigma, 
+                                                                            n_steps_max = n_steps_max, loss_lim = len(frame_bls)*loss_per_frame_stop, 
+                                                                            min_loss_patience=min_loss_patience, min_loss_improvement=min_loss_improvement)
         frame_ct_reco[frame_ct_reco < 0] = 0
         frame_ct_reco = np.rint(frame_ct_reco)
+        if(record_loss_curves):
+            loss_curves.append(loss_steps)
         # -------------------------------------------------------------------------------
         
         # -------------------------------------------------------------------------------
@@ -258,3 +287,6 @@ def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_bat
         frames_indices, frames_weights = frame_to_indices_weights(frame_ct_reco)
         print(f"Frame indices len = {len(frames_indices)} and weights = {len(frames_weights)}")
         update_counted_data_hdf5(counted_file, nframes, batch*frames_per_batch, frames_indices, frames_weights)
+
+    # Return the loss curve for the counting
+    return loss_curves

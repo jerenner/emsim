@@ -1,18 +1,20 @@
 import torch
-from torch import nn
+from torch import nn, Tensor
 
 import spconv.pytorch as spconv
 
+from .config import EMModelConfig
 from .sparse_resnet.unet import SparseResnetUnet
 from .transformer.decoder import EMTransformerDecoder
 from .transformer.model import EMTransformer
 from .occupancy import OccupancyPredictor
 from .salience_mask_predictor import SparseMaskPredictor
 from .value_encoder import ValueEncoder
-from .salience import ElectronSalienceCriterion
+from .loss.salience_criterion import ElectronSalienceCriterion
 from .loss.matcher import HungarianMatcher
 from .loss.criterion import EMCriterion
 from .segmentation_map import sparse_binary_segmentation_map
+from ..utils.sparse_utils import spconv_to_torch_sparse
 
 
 class EMModel(nn.Module):
@@ -108,9 +110,6 @@ class EMModel(nn.Module):
 
         self.salience_criterion = ElectronSalienceCriterion()
 
-        self.occupancy_predictor = OccupancyPredictor(
-            self.backbone.decoder.feature_info[-1]["num_chs"], pixel_max_occupancy + 1
-        )
         self.aux_loss = aux_loss
 
     def forward(self, batch: dict):
@@ -135,29 +134,10 @@ class EMModel(nn.Module):
             "pred_logits": output_logits[-1],
             "pred_positions": output_positions[-1],
             "pred_std_dev_cholesky": std_dev_cholesky[-1],
-            "pred_segmentation_logits": segmentation_logits[-1].coalesce(),
+            "pred_segmentation_logits": segmentation_logits[-1],
             # "pred_binary_mask": sparse_binary_segmentation_map(segmentation_logits),
             "query_batch_offsets": query_batch_offsets,
         }
-
-        if self.aux_loss:
-            output["aux_outputs"] = [
-                {
-                    "pred_logits": logits,
-                    "pred_positions": positions,
-                    "pred_std_dev_cholesky": cholesky,
-                    "query_batch_offsets": query_batch_offsets,
-                    "pred_segmentation_logits": seg_logits.coalesce(),
-                    "output_queries": queries,
-                }
-                for logits, positions, cholesky, seg_logits, queries in zip(
-                    output_logits[:-1],
-                    output_positions[:-1],
-                    std_dev_cholesky[:-1],
-                    segmentation_logits.unbind()[:-1],
-                    output_queries[:-1],
-                )
-            ]
 
         output["output_queries"] = output_queries[-1]
         output["enc_outputs"] = {
@@ -167,6 +147,49 @@ class EMModel(nn.Module):
         output["encoder_out"] = encoder_out
         output["score_dict"] = score_dict
 
-        # matched = self.matcher(output, batch)
+        if self.training:
+            if self.aux_loss:
+                output["aux_outputs"] = [
+                    {
+                        "pred_logits": logits,
+                        "pred_positions": positions,
+                        "pred_std_dev_cholesky": cholesky,
+                        "query_batch_offsets": query_batch_offsets,
+                        "pred_segmentation_logits": seg_logits,
+                        "output_queries": queries,
+                    }
+                    for logits, positions, cholesky, seg_logits, queries in zip(
+                        output_logits[:-1],
+                        output_positions[:-1],
+                        std_dev_cholesky[:-1],
+                        segmentation_logits[:-1],
+                        output_queries[:-1],
+                    )
+                ]
+            return self.compute_loss(batch, output)
 
         return output
+
+    def compute_loss(self, batch: dict[str, Tensor], output: dict[dict, str]):
+        loss_dict, aux_outputs = self.criterion(output, batch)
+
+        predicted_foreground_masks = [
+            spconv_to_torch_sparse(mask, squeeze=True)
+            for mask in output["score_dict"]["score_feature_maps"]
+        ]
+
+        downsample_scales = [1, 2, 4, 8, 16, 32, 64]
+        downsample_scales = downsample_scales[: len(predicted_foreground_masks)]
+        downsample_scales.reverse()
+        peak_normalized_images = [
+            batch[f"peak_normalized_noiseless_image_1/{ds}"].to(
+                predicted_foreground_masks[0].device
+            )
+            for ds in downsample_scales
+        ]
+
+        loss_dict.update(
+            self.salience_criterion(predicted_foreground_masks, peak_normalized_images)
+        )
+
+        return loss_dict, aux_outputs, output

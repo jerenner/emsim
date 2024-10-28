@@ -242,13 +242,12 @@ class EMTransformerDecoder(nn.Module):
         stacked_query_positions = torch.stack(layer_output_positions)
         stacked_queries = torch.stack(layer_output_queries)
         stacked_std = torch.stack(layer_output_std)
-        stacked_segmentation = torch.stack(layer_output_segmentation)
         return (
             stacked_query_logits,
             stacked_query_positions,
             stacked_queries,
             stacked_std,
-            stacked_segmentation,
+            layer_output_segmentation,
         )
 
     def _get_class_head(self, layer_index):

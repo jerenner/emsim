@@ -35,11 +35,15 @@ def torch_sparse_to_spconv(tensor: torch.Tensor):
     return spconv.SparseConvTensor(features_th, indices_th, spatial_shape, batch_size)
 
 
-def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor):
+def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor, squeeze=False):
     """Converts an spconv SparseConvTensor to a sparse torch.Tensor
 
     Args:
         tensor (spconv.SparseConvTensor): spconv tensor to be converted
+        squeeze (bool): If the spconv tensor has a feature dimension of 1,
+            setting this to true squeezes it out so that the resulting
+            sparse Tensor has a dense_dim() of 0. Raises an error if the spconv
+            feature dim is not 1.
 
     Returns:
         torch.Tensor: Converted sparse torch.Tensor
@@ -47,17 +51,29 @@ def spconv_to_torch_sparse(tensor: spconv.SparseConvTensor):
     if isinstance(tensor, Tensor) and tensor.is_sparse:
         return tensor
     assert isinstance(tensor, spconv.SparseConvTensor)
-    size = [tensor.batch_size] + tensor.spatial_shape + [tensor.features.shape[-1]]
+    if squeeze:
+        if tensor.features.shape[-1] != 1:
+            raise ValueError(
+                "Got `squeeze`=True, but the spconv tensor has a feature dim of "
+                f"{tensor.features.shape[-1]}, not 1"
+            )
+        size = [tensor.batch_size] + tensor.spatial_shape
+        values = tensor.features.squeeze(-1)
+    else:
+        size = [tensor.batch_size] + tensor.spatial_shape + [tensor.features.shape[-1]]
+        values = tensor.features
     indices = tensor.indices.transpose(0, 1)
-    values = tensor.features
-    return torch.sparse_coo_tensor(
+    out = torch.sparse_coo_tensor(
         indices,
         values,
         size,
         device=tensor.features.device,
         dtype=tensor.features.dtype,
         requires_grad=tensor.features.requires_grad,
-    ).coalesce()
+        check_invariants=True,
+    )
+    out = out.coalesce()
+    return out
 
 
 def torch_sparse_to_pydata_sparse(tensor: Tensor):
@@ -73,6 +89,42 @@ def torch_sparse_to_pydata_sparse(tensor: Tensor):
     )
 
 
+def sparse_select(tensor: Tensor, axis: int, index: int):
+    assert tensor.is_sparse
+    tensor = tensor.coalesce()
+    index_mask = tensor.indices()[axis] == index
+    values = tensor.values()[index_mask]
+    indices = torch.cat(
+        [tensor.indices()[:axis, index_mask], tensor.indices()[axis + 1 :, index_mask]]
+    )
+    return torch.sparse_coo_tensor(
+        indices, values, tensor.shape[:axis] + tensor.shape[axis + 1 :]
+    ).coalesce()
+
+
+def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
+    assert tensor.is_sparse
+    tensor = tensor.coalesce()
+    assert tensor.ndim <= 1
+    index_masks = [tensor.indices()[axis] == i for i in index]
+    new_values = [tensor.values()[mask] for mask in index_masks]
+    new_indices = [
+        torch.cat(
+            [
+                tensor.indices()[:axis, mask],
+                tensor.indices().new_full((1, mask.count_nonzero()), i),
+                tensor.indices()[axis + 1 :, mask],
+            ]
+        )
+        for i, mask in enumerate(index_masks)
+    ]
+    return torch.sparse_coo_tensor(
+        torch.cat(new_indices, -1),
+        torch.cat(new_values, 0),
+        (*tensor.shape[:axis], len(new_indices), *tensor.shape[axis + 1 :]),
+    ).coalesce()
+
+
 def sparse_flatten_hw(tensor: Tensor):
     assert tensor.is_sparse
     tensor = tensor.coalesce()
@@ -82,11 +134,9 @@ def sparse_flatten_hw(tensor: Tensor):
     H = tensor.shape[1]
     W = tensor.shape[2]
     ij = (i * W + j).unsqueeze(0)
-    shape = tensor.shape
-    new_shape = shape[:1] + (H * W,) + shape[3:]
-    return torch.sparse_coo_tensor(
-        torch.cat([indices[:1], ij, indices[3:]], 0), tensor.values(), new_shape
-    ).coalesce()
+    new_shape = tensor.shape[:1] + (H * W,) + tensor.shape[3:]
+    new_indices = torch.cat([indices[:1], ij, indices[3:]], 0).long()
+    return torch.sparse_coo_tensor(new_indices, tensor.values(), new_shape).coalesce()
 
 
 def spconv_sparse_mult(*tens: SparseConvTensor):
@@ -107,10 +157,19 @@ def spconv_sparse_mult(*tens: SparseConvTensor):
         ten_ths.append(
             torch.sparse_coo_tensor(
                 ten.indices.T, ten.features, res_shape, requires_grad=True
-            )
+            ).coalesce()
         )
 
-    c_th = reduce(lambda x, y: x * y, ten_ths).coalesce()
+    ## hacky workaround sparse_mask bug...
+    if all([torch.equal(ten_ths[0].indices(), ten.indices()) for ten in ten_ths]):
+        c_th = torch.sparse_coo_tensor(
+            ten_ths[0].indices(),
+            reduce(lambda x, y: x * y, [ten.values() for ten in ten_ths]),
+            max([ten.shape for ten in ten_ths]), requires_grad=True
+        ).coalesce()
+    else:
+        c_th = reduce(lambda x, y: torch.mul(x, y), ten_ths).coalesce()
+
     c_th_inds = c_th.indices().T.contiguous().int()
     c_th_values = c_th.values()
     assert c_th_values.is_contiguous()

@@ -4,6 +4,7 @@ from emsim.utils.batching_utils import (
 from emsim.utils.sparse_utils import (
     batch_offsets_from_sparse_tensor_indices,
     gather_from_sparse_tensor,
+    sparse_select,
 )
 
 
@@ -30,7 +31,7 @@ class SegmentationMapPredictor(nn.Module):
     ):
         queries = self.mask_embed(queries)
         # unbind over the level dimension
-        fullscale_feature_map = stacked_feature_map.unbind(-2)[-1].coalesce()
+        fullscale_feature_map = sparse_select(stacked_feature_map, 3, 3)
         assert fullscale_feature_map.ndim == 4  # (batch, height, width, feature)
 
         split_queries = split_batch_concatted_tensor(queries, query_batch_offsets)
@@ -94,7 +95,7 @@ class PatchedSegmentationMapPredictor(SegmentationMapPredictor):
     ):
         queries = self.mask_embed(queries)
         # unbind over the level dimension
-        fullscale_feature_map = stacked_feature_map.unbind(-2)[-1].coalesce()
+        fullscale_feature_map = sparse_select(stacked_feature_map, 3, 3)
         assert fullscale_feature_map.ndim == 4  # (batch, height, width, feature)
 
         split_queries = split_batch_concatted_tensor(queries, query_batch_offsets)

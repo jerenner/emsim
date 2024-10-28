@@ -17,6 +17,7 @@ class EMCriterion(nn.Module):
         loss_coef_mask_dice: float = 1.0,
         loss_coef_incidence_nll: float = 1.0,
         loss_coef_incidence_huber: float = 1.0,
+        loss_coef_salience: float = 1.0,
         no_electron_weight: float = 0.1,
         matcher_cost_coef_class: float = 1.0,
         matcher_cost_coef_mask: float = 1.0,
@@ -31,6 +32,7 @@ class EMCriterion(nn.Module):
         self.loss_coef_mask_dice = loss_coef_mask_dice
         self.loss_coef_incidence_nll = loss_coef_incidence_nll
         self.loss_coef_incidence_huber = loss_coef_incidence_huber
+        self.loss_coef_salience = loss_coef_salience
         self.no_electron_weight = no_electron_weight
         self.aux_loss = aux_loss
 
@@ -99,11 +101,11 @@ class EMCriterion(nn.Module):
         model_mse = _mse(pred_positions, true_positions)
 
         loss_dict = {
-            "class_loss": class_loss.detach().item(),
-            "bce_loss": bce_loss.detach().item(),
-            "dice_loss": dice_loss.detach().item(),
-            "incidence_nll_loss": distance_nll_loss.detach().item(),
-            "incidence_huber_loss": huber_loss.detach().item(),
+            "loss_class": class_loss,
+            "loss_bce": bce_loss,
+            "loss_dice": dice_loss,
+            "loss_incidence_nll": distance_nll_loss,
+            "loss_incidence_huber": huber_loss,
         }
 
         aux_dict = {
@@ -125,8 +127,10 @@ class EMCriterion(nn.Module):
         loss_dict, aux_dict = self.compute_losses(predicted_dict, target_dict)
 
         if "aux_outputs" in predicted_dict:
-            for i, aux_dict in enumerate(predicted_dict["aux_outputs"]):
-                aux_loss_dict, aux_aux_dict = self.compute_losses(aux_dict, target_dict)
+            for i, aux_output_dict in enumerate(predicted_dict["aux_outputs"]):
+                aux_loss_dict, aux_aux_dict = self.compute_losses(
+                    aux_output_dict, target_dict
+                )
                 loss_dict.update({k + f"_{i}": v for k, v in aux_loss_dict.items()})
                 aux_dict.update({k + f"_{i}": v for k, v in aux_aux_dict.items()})
 
@@ -135,9 +139,28 @@ class EMCriterion(nn.Module):
             target_dict["normalized_incidence_points_xy"],
         )
 
-        aux_dict["com_mse"] = com_mse.item()
+        aux_dict["mse_com"] = com_mse.item()
 
         return loss_dict, aux_dict
+
+    def __reweight_loss(self, loss_name, loss_tensor):
+        if "class" in loss_name:
+            return loss_tensor * self.loss_coef_class
+        elif "bce" in loss_name:
+            return loss_tensor * self.loss_coef_mask_bce
+        elif "dice" in loss_name:
+            return loss_tensor * self.loss_coef_mask_dice
+        elif "distance_nll" in loss_name:
+            return loss_tensor * self.loss_coef_incidence_nll
+        elif "distance_huber" in loss_name:
+            return loss_tensor * self.loss_coef_incidence_huber
+        elif "salience" in loss_name:
+            return loss_tensor * self.loss_coef_salience
+        else:
+            raise ValueError(f"Unrecognized loss {loss_name}: {loss_tensor}")
+
+    def reweight_losses(self, loss_dict: dict[str, Tensor]):
+        return {k: self.__reweight_loss(k, v) for k, v in loss_dict.items()}
 
 
 def get_class_loss(
@@ -184,32 +207,91 @@ def _sort_predicted_true_maps(
 
     reordered_predicted = []
     reordered_true = []
+    max_elecs = max([indices.shape[1] for indices in matched_indices])
     for predicted_map, true_map, indices in zip(
-        predicted_segmentation_logits, true_segmentation_map, matched_indices
+        predicted_segmentation_logits.unbind(0),
+        true_segmentation_map.unbind(0),
+        matched_indices,
     ):
-        reordered_pred_i = torch.stack([predicted_map[..., i] for i in indices[0]], -1)
-        reordered_true_i = torch.stack([true_map[..., i] for i in indices[1]], -1)
 
-        reordered_predicted.append(reordered_pred_i)
-        reordered_true.append(reordered_true_i)
+        predicted_map = predicted_map.coalesce()
+        true_map = true_map.coalesce()
 
-    max_elecs = max([pred.shape[-1] for pred in reordered_predicted])
+        pred_index_masks = [predicted_map.indices()[-1] == i for i in indices[0]]
+        true_index_masks = [true_map.indices()[-1] == i for i in indices[1]]
 
-    reordered_predicted = [
-        pred.sparse_resize_(
-            (*pred.shape[:-1], max_elecs), pred.sparse_dim(), pred.dense_dim()
+        pred_indices = [
+            torch.cat(
+                [
+                    predicted_map.indices()[:-1, mask],
+                    predicted_map.indices().new_full([1, mask.count_nonzero()], i),
+                ]
+            )
+            for i, mask in enumerate(pred_index_masks)
+        ]
+        pred_values = [predicted_map.values()[mask] for mask in pred_index_masks]
+
+        true_indices = [
+            torch.cat(
+                [
+                    true_map.indices()[:-1, mask],
+                    true_map.indices().new_full([1, mask.count_nonzero()], i),
+                ]
+            )
+            for i, mask in enumerate(true_index_masks)
+        ]
+        true_values = [true_map.values()[mask] for mask in true_index_masks]
+
+        reordered_predicted.append(
+            torch.sparse_coo_tensor(
+                torch.cat(pred_indices, -1),
+                torch.cat(pred_values, 0),
+                (*predicted_map.shape[:-1], max_elecs),
+            )
         )
-        for pred in reordered_predicted
-    ]
-    reordered_true = [
-        true.sparse_resize_(
-            (*true.shape[:-1], max_elecs), true.sparse_dim(), true.dense_dim()
+        reordered_true.append(
+            torch.sparse_coo_tensor(
+                torch.cat(true_indices, -1),
+                torch.cat(true_values, 0),
+                (*true_map.shape[:-1], max_elecs),
+            )
         )
-        for true in reordered_true
-    ]
+
+        # pred_unbound = predicted_map.unbind(-1)
+        # true_unbound = true_map.unbind(-1)
+        # pred_unbound[0].register_hook(lambda _: print("pred_unbound"))
+        # reordered_pred_i = torch.stack([torch.select(predicted_map, -1, i) for i in indices[0]], -1).coalesce()
+        # reordered_true_i = torch.stack([torch.select(true_map, -1, i) for i in indices[1]], -1).coalesce()
+
+        # reordered_pred_i = torch.index_select(predicted_map, -1, indices[0]).coalesce()
+        # reordered_true_i = torch.index_select(true_map, -1, indices[1]).coalesce()
+
+    #     reordered_pred_i.register_hook(lambda _: print("reordered_pred_i"))
+
+    #     reordered_predicted.append(reordered_pred_i)
+    #     reordered_true.append(reordered_true_i)
+
+    # reordered_predicted = [
+    #     torch.sparse_coo_tensor(
+    #         pred.indices(),
+    #         pred.values(),
+    #         (*pred.shape[:-1], max_elecs),
+    #     )
+    #     for pred in reordered_predicted
+    # ]
+    # reordered_true = [
+    #     torch.sparse_coo_tensor(
+    #         true.indices(),
+    #         true.values(),
+    #         (*true.shape[:-1], max_elecs),
+    #     )
+    #     for true in reordered_true
+    # ]
 
     reordered_predicted = torch.stack(reordered_predicted).coalesce()
     reordered_true = torch.stack(reordered_true).coalesce()
+
+    # reordered_predicted.register_hook(lambda x: print("reordered_predicted"))
 
     return reordered_predicted, reordered_true
 
@@ -246,16 +328,23 @@ def get_mask_dice_loss(
     assert sorted_predicted_logits.shape == sorted_true.shape
 
     predicted_segmentation = torch.sparse.softmax(sorted_predicted_logits, -1)
+    # predicted_segmentation.register_hook(lambda x: print("predicted_segmentation"))
 
     unioned_predicted, unioned_true = union_sparse_indices(
         predicted_segmentation, sorted_true
     )
     assert torch.equal(unioned_predicted.indices(), unioned_true.indices())
 
-    num = torch.sparse.sum(2 * unioned_predicted * unioned_true, [1, 2, 3]).to_dense()
-    den = torch.sparse.sum(unioned_predicted + unioned_true, [1, 2, 3]).to_dense()
-    loss = 1 - (num + 1) / (den + 1)
-    return loss.mean()
+    num = 2 * unioned_predicted * unioned_true
+    den = unioned_predicted + unioned_true
+    losses = []
+    for num_i, den_i in zip(num.unbind(), den.unbind()):
+        num_sum = num_i.coalesce().values().sum()
+        den_sum = den_i.coalesce().values().sum()
+        losses.append(1 - (num_sum + 1) / (den_sum + 1))
+    loss = torch.stack(losses).mean()
+    # loss.register_hook(lambda x: print("dice loss"))
+    return loss
 
 
 def _sort_tensor(
@@ -275,7 +364,7 @@ def get_distance_nll_loss(
         pred_centers, scale_tril=pred_std_cholesky
     ).log_prob(true_incidence_points)
     # print(torch.isinf(loss).any())
-    loss[loss.isinf()] = 1e7
+    loss = loss.clamp(-1e7, 1e7)
     # loss = torch.clamp_max(loss, 1e7)
     return loss.mean()
 

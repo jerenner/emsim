@@ -85,7 +85,8 @@ class TransformerEncoderLayer(nn.Module):
         assert torch.equal(pad_mask, pad_mask_2)
         assert torch.equal(pad_mask, pad_mask_3)
 
-        indices = torch.topk(token_scores_batched, self.topk_sa, dim=1)[1]
+        k = min(self.topk_sa, token_scores_batched.shape[1])
+        indices = torch.topk(token_scores_batched, k, dim=1)[1]
         selected_pad_mask = torch.gather(pad_mask, 1, indices)
         indices = indices.unsqueeze(-1).expand(-1, -1, queries_batched.shape[-1])
         selected_queries = torch.gather(queries_batched, 1, indices)

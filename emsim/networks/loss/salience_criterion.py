@@ -47,9 +47,9 @@ class ElectronSalienceCriterion(nn.Module):
             predicted_unioned, true_unioned = union_sparse_indices(
                 predicted_mask, true_mask
             )
-            assert torch.equal(predicted_unioned.indices(), true_unioned)
+            assert torch.equal(predicted_unioned.indices(), true_unioned.indices())
             predicted_pixels.append(predicted_unioned.values())
-            true_pixels.append(true_pixels.values())
+            true_pixels.append(true_unioned.values())
 
         predicted_pixels = torch.cat(predicted_pixels)
         true_pixels = torch.cat(true_pixels)
@@ -59,4 +59,4 @@ class ElectronSalienceCriterion(nn.Module):
             predicted_pixels, true_pixels, alpha=self.alpha, gamma=self.gamma
         )
         loss = loss.sum() / num_pos
-        return loss
+        return {"salience_loss": loss}

@@ -289,4 +289,4 @@ def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_bat
         update_counted_data_hdf5(counted_file, nframes, batch*frames_per_batch, frames_indices, frames_weights)
 
     # Return the loss curve for the counting
-    return loss_curves
+    return loss_curves, frame_ct_reco, modeled_frame_reco

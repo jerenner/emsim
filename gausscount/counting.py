@@ -121,9 +121,19 @@ def frame_to_indices_weights(counted_frames):
 
     return all_linear_indices, all_weights
 
-def update_counted_data_hdf5(file_path, nframes, batch_start_idx, frames_indices, frames_weights, group_name='electron_events'):
-    # Ensure frames_indices and frames_weights are lists of arrays, 
-    # with each array corresponding to one frame's data.
+def update_counted_data_hdf5(file_path, nframes, batch_start_idx, frames_indices, frames_weights, scan_shape, group_name='electron_events'):
+    """
+    Updates an HDF5 file with counted frames, weights, and scan positions.
+
+    Args:
+        file_path (str): Path to the HDF5 file.
+        nframes (int): Total number of frames.
+        batch_start_idx (int): Starting index for the current batch.
+        frames_indices (list of arrays): List of arrays where each array contains pixel indices for one frame.
+        frames_weights (list of arrays): List of arrays where each array contains weights for one frame.
+        scan_shape (tuple): Shape of the scan grid as (Ny, Nx).
+        group_name (str): Name of the group in the HDF5 file where data will be stored.
+    """
     
     with h5py.File(file_path, 'a') as f:  # Open file in append mode
         # Create or access the group
@@ -144,6 +154,14 @@ def update_counted_data_hdf5(file_path, nframes, batch_start_idx, frames_indices
             vl_dataset_weights = grp.create_dataset("weights", (nframes,), dtype=vl_dtype_weights)
         else:
             vl_dataset_weights = grp['weights']
+
+        # Check if scan_positions dataset exists; if not, create it
+        # Note that while scan_shape must be specified as a parameter, scan_positions is 
+        #  just an np.arange of the total number of frames
+        if 'scan_positions' not in grp:
+            scan_positions_dataset = grp.create_dataset('scan_positions', data=np.arange(nframes))
+            scan_positions_dataset.attrs['Nx'] = scan_shape[1]
+            scan_positions_dataset.attrs['Ny'] = scan_shape[0]
 
         # Assuming the length of frames_indices matches the expected number of frames,
         # iterate through each and update the datasets
@@ -198,13 +216,12 @@ def compute_prior(frames_file, nframes, baseline, gauss_A):
 
     return prior_frame
 
-def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_batch, 
+def count_frames(frames_file, counted_file, frame_width, frames_per_batch, 
                  th_single_elec, baseline, gauss_A, gauss_sigma, 
                  n_steps_max = 5000, loss_per_frame_stop = 1, min_loss_patience = 10, min_loss_improvement = 0.01, 
                  batch_start = 0, batch_end = -1, nframes_prior=0, record_loss_curves = True):
     """
-    Counts the specified number of frames from the given file and saves the counted data to an HDF5 file.
-    If nframes < 0, counts all frames in the file.
+    Counts the frames from the given file and saves the counted data to an HDF5 file.
     """
 
     # Compute the prior if nframes_prior > 0.
@@ -221,12 +238,14 @@ def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_bat
         # Repeat the conditional probabilities for the number of frames in a batch.
         conditional_prob_batch = np.repeat(conditional_prob[np.newaxis,:,:], frames_per_batch, axis=0)
 
-    # Count all frames if nframes < 0.
-    if(nframes < 0):
-        with h5py.File(frames_file, 'r') as f0:
-            data = f0['frames']
-            nframes = data.shape[0]
-            print(f"Counting all {nframes} frames")
+    # Get the total number of frames and scan shape.
+    nframes = -1
+    scan_shape = (0,0)
+    with h5py.File(frames_file, 'r') as f0:
+        data = f0['frames']
+        nframes = data.shape[0]
+        scan_shape = f0['stem']['images'].shape[1:]
+        print(f"Counting all {nframes} frames for scan of shape {scan_shape}")
 
     # Record all loss curves.
     loss_curves = []
@@ -286,7 +305,7 @@ def count_frames(frames_file, counted_file, nframes, frame_width, frames_per_bat
         print("-- Saving frames...")
         frames_indices, frames_weights = frame_to_indices_weights(frame_ct_reco)
         print(f"Frame indices len = {len(frames_indices)} and weights = {len(frames_weights)}")
-        update_counted_data_hdf5(counted_file, nframes, batch*frames_per_batch, frames_indices, frames_weights)
+        update_counted_data_hdf5(counted_file, nframes, batch*frames_per_batch, frames_indices, frames_weights, scan_shape)
 
     # Return the loss curve for the counting
     return loss_curves, frame_ct_reco, modeled_frame_reco

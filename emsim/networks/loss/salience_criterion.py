@@ -59,4 +59,4 @@ class ElectronSalienceCriterion(nn.Module):
             predicted_pixels, true_pixels, alpha=self.alpha, gamma=self.gamma
         )
         loss = loss.sum() / num_pos
-        return {"salience_loss": loss}
+        return loss

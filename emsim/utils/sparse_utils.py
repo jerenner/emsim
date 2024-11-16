@@ -165,7 +165,8 @@ def spconv_sparse_mult(*tens: SparseConvTensor):
         c_th = torch.sparse_coo_tensor(
             ten_ths[0].indices(),
             reduce(lambda x, y: x * y, [ten.values() for ten in ten_ths]),
-            max([ten.shape for ten in ten_ths]), requires_grad=True
+            max([ten.shape for ten in ten_ths]),
+            requires_grad=True,
         ).coalesce()
     else:
         c_th = reduce(lambda x, y: torch.mul(x, y), ten_ths).coalesce()
@@ -257,6 +258,21 @@ def gather_from_sparse_tensor(
         the corresponding index is a specified (nonzero) element of the sparse
         tensor and False if not
     """
+    if index_tensor.is_nested:
+        results = [
+            gather_from_sparse_tensor(
+                sparse_tensor,
+                index_subtensor,
+                check_all_specified=check_all_specified,
+            )
+            for index_subtensor in index_tensor.unbind()
+        ]
+        selected, is_specified_mask = zip(*results)
+
+        selected = torch.nested.as_nested_tensor(selected)
+        is_specified_mask = torch.nested.as_nested_tensor(is_specified_mask)
+        return selected, is_specified_mask
+
     (
         sparse_tensor_indices_linearized,
         sparse_tensor_values,
@@ -360,7 +376,12 @@ def scatter_to_sparse_tensor(
     Returns:
         Tensor: sparse_tensor with the new values scattered into it
     """
-    assert index_tensor.shape[0] == values.shape[0]
+    if index_tensor.is_nested:
+        assert values.is_nested
+        index_tensor = torch.cat(index_tensor.unbind())
+        values = torch.cat(values.unbind())
+
+    assert index_tensor.shape[:-1] == values.shape[:-1]
     assert sparse_tensor.dense_dim() == values.ndim - 1
 
     (

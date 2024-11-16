@@ -135,7 +135,7 @@ class SparseMSDeformableAttention(nn.Module):
         self.attention_weights = nn.Linear(
             embed_dim, num_points * num_levels * num_heads
         )
-        self.value_proj = spconv.SubMConv2d(embed_dim, embed_dim, 1)
+        self.value_proj = nn.Linear(embed_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
         self.reset_parameters()
 
@@ -186,6 +186,13 @@ class SparseMSDeformableAttention(nn.Module):
         """
         assert xy_reference_points.dtype == torch.double
         n_total_queries = query.shape[0]
+
+        stacked_value_tensors = torch.sparse_coo_tensor(
+            stacked_value_tensors.indices(),
+            self.value_proj(stacked_value_tensors.values()),
+            size=stacked_value_tensors.shape,
+            is_coalesced=stacked_value_tensors.is_coalesced(),
+        ).coalesce()
 
         sampling_offsets = self.sampling_offsets(
             query.to(self.sampling_offsets.weight)
@@ -308,7 +315,7 @@ def multilevel_sparse_bilinear_grid_sample(
     assert xy_batch_index.min() >= 0
     assert xy_batch_index.max() < bsz
     assert xy_level_index.min() >= 0
-    assert xy_level_index.max() < xy_level_index.shape[0]
+    assert xy_level_index.max() < xy_level_index.shape[1]
 
     x = xy_coordinates[..., 0]
     y = xy_coordinates[..., 1]

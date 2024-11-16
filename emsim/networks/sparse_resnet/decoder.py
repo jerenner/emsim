@@ -30,7 +30,7 @@ class SparseUnetDecoder(spconv.SparseModule):
 
         block_dprs = [
             x.tolist()
-            for x in torch.linspace(0, drop_path_rate, sum(layers)).split(layers)
+            for x in torch.linspace(0, drop_path_rate, sum(layers)).split(tuple(layers))
         ]
         self.stages = nn.ModuleList()
         for stage_index, (depth, c, bdpr) in enumerate(

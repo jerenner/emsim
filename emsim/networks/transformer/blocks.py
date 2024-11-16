@@ -16,20 +16,15 @@ class FFNBlock(nn.Module):
         d_model: int,
         hidden_dim: int,
         dropout: float = 0.0,
-        activation_fn: str = "gelu",
+        activation_fn: nn.Module = nn.GELU,
         norm_first: bool = True,
     ):
-        assert activation_fn in ["gelu", "relu"]
         super().__init__()
         self.norm_first = norm_first
-        if activation_fn == "relu":
-            activation = nn.ReLU
-        elif activation_fn == "gelu":
-            activation = nn.GELU
 
         self.mlp = nn.Sequential(
             nn.Linear(d_model, hidden_dim),
-            activation(),
+            activation_fn(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, d_model),
             nn.Dropout(dropout),
@@ -200,3 +195,20 @@ class SparseDeformableAttentionBlock(nn.Module):
     def reset_parameters(self):
         self.attn.reset_parameters()
         self.norm.reset_parameters()
+
+
+# class FP64Linear(nn.Module):
+#     def __init__(
+#         self,
+#         in_features: int,
+#         out_features: int,
+#         bias: bool = True,
+#         device: torch.device = None,
+#     ):
+#         super().__init__()
+#         self.linear = nn.Linear(
+#             in_features, out_features, bias=bias, device=device, dtype=torch.float64
+#         )
+
+#     def forward(self, x):
+#         return self.linear(x.to(torch.float64))

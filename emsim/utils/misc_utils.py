@@ -1,13 +1,16 @@
 import numpy as np
-from typing import Any, List
+from typing import Any, List, Union
 
 import torch
+from torch import nn
 
 
 def random_chunks(x: List[Any], min_size: int, max_size: int):
-    chunk_sizes = np.concatenate(
-        [[0], np.random.randint(min_size, max_size, size=len(x) // min_size)], 0
-    )
+    if min_size == max_size:
+        chunk_sizes = np.full(shape=[len(x) // min_size], fill_value=min_size)
+    else:
+        chunk_sizes = np.random.randint(min_size, max_size, size=len(x) // min_size)
+    chunk_sizes = np.concatenate([[0], chunk_sizes], 0)
     start_indices = np.cumsum(chunk_sizes)
     chunked = [
         x[start:stop] for start, stop in zip(start_indices[:-1], start_indices[1:])
@@ -26,3 +29,16 @@ def inverse_sigmoid(x, eps: float = 1e-6):
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1 / x2)
+
+
+def _get_layer(layer: Union[str, nn.Module]):
+    if isinstance(layer, nn.Module):
+        return layer
+    if layer.lower() == "relu":
+        return nn.ReLU
+    elif layer.lower() == "gelu":
+        return nn.GELU
+    elif layer.lower() == "batchnorm1d":
+        return nn.BatchNorm1d
+    else:
+        raise ValueError(f"Unexpected layer {layer}")

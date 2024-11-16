@@ -160,8 +160,13 @@ class EMTransformer(nn.Module):
                 encoder_out_batch_offsets.new_tensor([encoder_out.indices().shape[1]]),
             ]
         ).diff()
-        encoder_out_normalized = self.encoder_output_norm(encoder_out.values())
-        encoder_out_logits = self.classification_head(encoder_out_normalized)
+        encoder_out_normalized = torch.sparse_coo_tensor(
+            encoder_out.indices(),
+            self.encoder_output_norm(encoder_out.values()),
+            size=encoder_out.shape,
+            is_coalesced=encoder_out.is_coalesced(),
+        ).coalesce()
+        encoder_out_logits = self.classification_head(encoder_out_normalized.values())
 
         num_topk = self.two_stage_num_proposals * 4
         topk_by_image = [
@@ -180,21 +185,31 @@ class EMTransformer(nn.Module):
                 for topk, offset in zip(topk_by_image, encoder_out_batch_offsets)
             ]
         )
-        topk_spatial_indices = encoder_out.indices()[:, topk_indices].T
+        topk_bijl_indices = encoder_out.indices()[:, topk_indices].T
 
+        # deduplication via non-maximum suppression
         nms_topk_indices = self.nms_on_topk_index(
-            topk_scores, topk_indices, topk_spatial_indices, iou_threshold=0.3
+            topk_scores, topk_indices, topk_bijl_indices, iou_threshold=0.3
         )
+        # sparse tensor with the
         nms_encoder_out = torch.sparse_coo_tensor(
             encoder_out.indices()[:, nms_topk_indices],
             encoder_out.values()[nms_topk_indices],
             encoder_out.shape,
         ).coalesce()
-        nms_encoder_out_normalized = encoder_out_normalized[nms_topk_indices]
+        nms_encoder_out_normalized = encoder_out_normalized.values()[nms_topk_indices]
         nms_topk_logits = encoder_out_logits[nms_topk_indices]
         nms_topk_query_batch_offsets = batch_offsets_from_sparse_tensor_indices(
             nms_encoder_out.indices()
         )
+        nms_topk_query_batch_sizes = torch.cat(
+            [
+                nms_topk_query_batch_offsets,
+                nms_topk_query_batch_offsets.new_tensor(
+                    [nms_encoder_out.indices().shape[1]]
+                ),
+            ]
+        ).diff()
         nms_topk_position_offsets = self.query_pos_offset_head(
             nms_encoder_out_normalized.double()
         )
@@ -209,12 +224,12 @@ class EMTransformer(nn.Module):
             inverse_sigmoid(nms_proposal_xy) + nms_topk_position_offsets
         )
         #####
-        reference_points = nms_encoder_out_positions.detach()  # [0, 1]
-        queries = (
-            self.object_query_embedding.weight.unsqueeze(0)
-            .expand(encoder_out.shape[0], -1, -1)
-            .flatten(0, 1)
+        reference_points = nms_encoder_out_positions.detach()  # \in [0, 1]
+        queries = self.object_query_embedding.weight.unsqueeze(0).expand(
+            encoder_out.shape[0], -1, -1
         )
+        queries = [q[:size] for q, size in zip(queries, nms_topk_query_batch_sizes)]
+        queries = torch.cat(queries)
 
         (
             decoder_out_logits,
@@ -226,7 +241,7 @@ class EMTransformer(nn.Module):
             queries=queries,
             query_reference_points=reference_points,
             query_batch_offsets=nms_topk_query_batch_offsets,
-            stacked_feature_maps=encoder_out,
+            stacked_feature_maps=encoder_out_normalized,
             spatial_shapes=score_dict["spatial_shapes"],
         )
 
@@ -410,19 +425,24 @@ class EMTransformer(nn.Module):
         return {
             "score_feature_maps": scores,
             "spatial_shapes": torch.stack(spatial_shapes),
-            "selected_token_scores": torch.nested.as_nested_tensor(selected_scores),
-            "selected_normalized_xy_positions": torch.nested.as_nested_tensor(
-                selected_normalized_xy
-            ),
-            "selected_token_ij_level_indices": torch.nested.as_nested_tensor(
-                selected_ij_indices
-            ),
-            "selected_token_level_indices": torch.nested.as_nested_tensor(
-                selected_level_indices
-            ),
-            "selected_token_sorted_indices": torch.nested.as_nested_tensor(
-                selected_token_sorted_indices
-            ),
+            # "selected_token_scores": torch.nested.as_nested_tensor(selected_scores),
+            "selected_token_scores": selected_scores,
+            # "selected_normalized_xy_positions": torch.nested.as_nested_tensor(
+            #     selected_normalized_xy
+            # ),
+            "selected_normalized_xy_positions": selected_normalized_xy,
+            # "selected_token_ij_level_indices": torch.nested.as_nested_tensor(
+            #     selected_ij_indices
+            # ),
+            "selected_token_ij_level_indices": selected_ij_indices,
+            # "selected_token_level_indices": torch.nested.as_nested_tensor(
+            #     selected_level_indices
+            # ),
+            "selected_token_level_indices": selected_level_indices,
+            # "selected_token_sorted_indices": torch.nested.as_nested_tensor(
+            #     selected_token_sorted_indices
+            # ),
+            "selected_token_sorted_indices": selected_token_sorted_indices,
             "per_layer_subset_indices": per_layer_subset_indices,
         }
 

@@ -14,7 +14,7 @@ class SparseResnetV2(nn.Module):
         layers: list[int],
         channels: list[int] = [32, 64, 128, 256],
         in_chans: int = 1,
-        stem_chs: int = 16,
+        stem_channels: int = 16,
         output_stride: Optional[int] = None,
         act_layer: nn.Module = nn.ReLU,
         norm_layer: nn.Module = nn.BatchNorm1d,
@@ -24,17 +24,17 @@ class SparseResnetV2(nn.Module):
 
         self.feature_info = []
         # stem_chs = make_divisible(stem_chs)
-        self.stem = spconv.SubMConv2d(in_chans, stem_chs, 7)
-        self.feature_info.append(dict(num_chs=stem_chs, reduction=1, module="stem"))
+        self.stem = spconv.SubMConv2d(in_chans, stem_channels, 7)
+        self.feature_info.append(dict(num_chs=stem_channels, reduction=1, module="stem"))
         if output_stride is None:
             output_stride = 2 ** len(layers)
 
-        prev_chs = stem_chs
+        prev_chs = stem_channels
         curr_stride = 1
         dilation = 1
         block_dprs = [
             x.tolist()
-            for x in torch.linspace(0, drop_path_rate, sum(layers)).split(layers)
+            for x in torch.linspace(0, drop_path_rate, sum(layers)).split(tuple(layers))
         ]
         self.stages = nn.ModuleList()
         for stage_index, (d, c, bdpr) in enumerate(zip(layers, channels, block_dprs)):
@@ -72,7 +72,6 @@ class SparseResnetV2(nn.Module):
         indice_keys = [stage.blocks[0].indice_key_3x3 for stage in self.stages]
         self.downsample_indice_keys = [key for key in indice_keys if "down" in key]
         self.num_features = prev_chs
-        self.norm = norm_layer(self.num_features)
 
     def forward(self, x):
         if isinstance(x, Tensor):

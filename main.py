@@ -18,8 +18,6 @@ from lightning.fabric.strategies import DDPStrategy
 from lightning.fabric.loggers import TensorBoardLogger, CSVLogger
 from torchmetrics.aggregation import RunningMean
 
-from accelerate import Accelerator
-from accelerate.utils import ProjectConfiguration
 from transformers import get_cosine_schedule_with_warmup
 
 from emsim.networks import (
@@ -197,6 +195,8 @@ def train(
             model.train()
 
         iter_time.update(time.time() - t0)
+    for logger in fabric.loggers:
+        logger.finalize()
     if fabric.is_global_zero:
         elapsed_time_str = str(datetime.timedelta(seconds=int(elapsed_time)))
         _logger.info(f"Training complete in {elapsed_time_str}.")

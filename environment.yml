@@ -5,7 +5,9 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.8
+  - python==3.11
+  - pytorch-cuda=11.8
+  - pytorch::pytorch
   - pip
   - h5py
   - cython
@@ -13,7 +15,13 @@ dependencies:
   - numpy
   - pandas
   - pillow
-  - pytorch::pytorch
+  - tensorboard
+  - tensorboardx
+  - lightning
+  - torchmetrics
+  - pycocotools
+  - hydra-core
+  - yaml
   - scipy
   - seaborn
   - torchvision
@@ -31,3 +39,5 @@ dependencies:
   - pip:
     - stempy
     - pylandau
+    - cumm-cu118
+    - spconv-cu118

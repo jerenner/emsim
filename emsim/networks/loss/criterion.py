@@ -4,6 +4,7 @@ import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 from torchmetrics import MeanMetric, MetricCollection
+from torchmetrics.aggregation import MaxMetric, MinMetric
 from torchmetrics.detection import MeanAveragePrecision
 from torchmetrics.wrappers import Running, MultitaskWrapper
 from torchmetrics.classification import (
@@ -30,6 +31,7 @@ class EMCriterion(nn.Module):
         loss_coef_mask_bce: float = 1.0,
         loss_coef_mask_dice: float = 1.0,
         loss_coef_incidence_nll: float = 1.0,
+        loss_coef_incidence_likelihood: float = 1.0,
         loss_coef_incidence_huber: float = 1.0,
         loss_coef_salience: float = 1.0,
         no_electron_weight: float = 0.1,
@@ -40,6 +42,7 @@ class EMCriterion(nn.Module):
         matcher_cost_coef_dice: float = 1.0,
         matcher_cost_coef_dist: float = 1.0,
         matcher_cost_coef_nll: float = 1.0,
+        matcher_cost_coef_likelihood: float = 1.0,
         aux_loss=True,
         n_aux_losses: int = 0,
     ):
@@ -48,6 +51,7 @@ class EMCriterion(nn.Module):
         self.loss_coef_mask_bce = loss_coef_mask_bce
         self.loss_coef_mask_dice = loss_coef_mask_dice
         self.loss_coef_incidence_nll = loss_coef_incidence_nll
+        self.loss_coef_incidence_likelihood = loss_coef_incidence_likelihood
         self.loss_coef_incidence_huber = loss_coef_incidence_huber
         self.loss_coef_salience = loss_coef_salience
         self.no_electron_weight = no_electron_weight
@@ -63,6 +67,7 @@ class EMCriterion(nn.Module):
             cost_coef_dice=matcher_cost_coef_dice,
             cost_coef_dist=matcher_cost_coef_dist,
             cost_coef_nll=matcher_cost_coef_nll,
+            cost_coef_likelihood=matcher_cost_coef_likelihood,
         )
 
         self.train_losses = nn.ModuleDict(
@@ -71,6 +76,7 @@ class EMCriterion(nn.Module):
                 "loss_bce": MeanMetric(),
                 "loss_dice": MeanMetric(),
                 "loss_incidence_nll": MeanMetric(),
+                "loss_incidence_likelihood": MeanMetric(),
                 "loss_incidence_huber": MeanMetric(),
                 "loss_salience": MeanMetric(),
                 "loss": MeanMetric(),
@@ -84,6 +90,7 @@ class EMCriterion(nn.Module):
                     "loss_bce",
                     "loss_dice",
                     "loss_incidence_nll",
+                    "loss_incidence_likelihood",
                     "loss_incidence_huber",
                 ]:
                     self.train_losses.update(
@@ -94,15 +101,20 @@ class EMCriterion(nn.Module):
             {
                 "query_classification": MetricCollection(
                     [BinaryAccuracy(), BinaryPrecision(), BinaryRecall()],
-                    prefix="query_",
+                    prefix="query/",
                 ),
                 "mask_classification": MetricCollection(
                     [BinaryAccuracy(), BinaryPrecision(), BinaryRecall()],
-                    prefix="mask_",
+                    prefix="mask/",
                 ),
-                "localization_error": MeanMetric(),
+                "localization_error": MetricCollection(
+                    [MinMetric(), MeanMetric(), MaxMetric()],
+                    prefix="localization_error/",
+                ),
                 # "mask_map": MeanAveragePrecision(iou_type="segm"),
-                "centroid_error": MeanMetric(),
+                "centroid_error": MetricCollection(
+                    [MinMetric(), MeanMetric(), MaxMetric()], prefix="centroid_error/"
+                ),
             },
         )
 
@@ -173,16 +185,19 @@ class EMCriterion(nn.Module):
             [inds[1] for inds in matched_indices],
         )
 
+        image_size = (
+            target_dict["image_size_pixels_rc"].flip(-1).to(pred_positions.device)
+        )
         distance_nll_loss = self.get_distance_nll_loss(
-            pred_positions, pred_std_cholesky, true_positions
+            pred_positions, pred_std_cholesky, true_positions, image_size
+        )
+        distance_likelihood_loss = self.get_distance_likelihood_loss(
+            pred_positions, pred_std_cholesky, true_positions, image_size
         )
         huber_loss = self.get_distance_huber_loss(pred_positions, true_positions)
 
         if update_metrics:
             with torch.no_grad():
-                image_size = (
-                    target_dict["image_size_pixels_rc"].flip(-1).to(pred_positions.device)
-                )
                 self.train_metrics["localization_error"].update(
                     (pred_positions * image_size - true_positions * image_size)
                     .square()
@@ -204,6 +219,7 @@ class EMCriterion(nn.Module):
             "loss_bce": bce_loss,
             "loss_dice": dice_loss,
             "loss_incidence_nll": distance_nll_loss,
+            "loss_incidence_likelihood": distance_likelihood_loss,
             "loss_incidence_huber": huber_loss,
         }
 
@@ -306,13 +322,27 @@ class EMCriterion(nn.Module):
         pred_centers: Tensor,
         pred_std_cholesky: Tensor,
         true_incidence_points: Tensor,
+        image_size: Tensor,
     ) -> Tensor:
         loss = -torch.distributions.MultivariateNormal(
-            pred_centers, scale_tril=pred_std_cholesky
-        ).log_prob(true_incidence_points)
+            pred_centers * image_size, scale_tril=pred_std_cholesky
+        ).log_prob(true_incidence_points * image_size)
         # print(torch.isinf(loss).any())
-        loss = loss.clamp(-1e7, 1e7)
-        # loss = torch.clamp_max(loss, 1e7)
+        # loss = loss.clamp(-1e7, 1e7)
+        loss = torch.clamp_max(loss, 1e7)
+        return loss.mean()
+
+    def get_distance_likelihood_loss(
+        self,
+        pred_centers: Tensor,
+        pred_std_cholesky: Tensor,
+        true_incidence_points: Tensor,
+        image_size: Tensor,
+    ) -> Tensor:
+        loss = torch.distributions.MultivariateNormal(
+            pred_centers * image_size, scale_tril=pred_std_cholesky
+        ).log_prob(true_incidence_points * image_size)
+        loss = 1 - loss.exp()
         return loss.mean()
 
     def get_distance_huber_loss(
@@ -355,6 +385,8 @@ class EMCriterion(nn.Module):
             return loss_tensor * self.loss_coef_mask_dice
         elif "incidence_nll" in loss_name:
             return loss_tensor * self.loss_coef_incidence_nll
+        elif "incidence_likelihood" in loss_name:
+            return loss_tensor * self.loss_coef_incidence_likelihood
         elif "incidence_huber" in loss_name:
             return loss_tensor * self.loss_coef_incidence_huber
         elif "salience" in loss_name:
@@ -373,7 +405,7 @@ class EMCriterion(nn.Module):
         for k, v in loss_dict.items():
             self.train_losses[k].update(v)
 
-    def get_log_str(self, reset_metrics: bool = True) -> None:
+    def get_logs(self, reset_metrics: bool = True) -> None:
         def flatten_metrics(metric_dict):
             out = {}
             for k, v in metric_dict.items():
@@ -389,8 +421,20 @@ class EMCriterion(nn.Module):
         if reset_metrics:
             self.reset_metrics()
 
-        log_str = " ".join([f"{k}: {v}" for k, v in log_dict.items()])
-        return log_str
+        return log_dict
+
+    @staticmethod
+    def make_log_str(log_dict: dict):
+        return " ".join([f"{k}: {v}" for k, v in log_dict.items()])
+
+    @staticmethod
+    def tensorboardify_keys(log_dict: dict):
+        log_dict = {k.replace("loss_", "loss/"): v for k, v in log_dict.items()}
+        log_dict = {k.replace("error_", "error/"): v for k, v in log_dict.items()}
+        log_dict = {k.replace("query_", "query/"): v for k, v in log_dict.items()}
+        log_dict = {k.replace("mask_", "mask/"): v for k, v in log_dict.items()}
+        log_dict = {k.replace("eval_", "eval/"): v for k, v in log_dict.items()}
+        return log_dict
 
     def reset_metrics(self) -> None:
         for loss_tracker in self.train_losses.values():

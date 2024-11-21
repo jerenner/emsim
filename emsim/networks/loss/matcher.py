@@ -2,6 +2,7 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
+import logging
 
 # import sparse
 # import numpy as np
@@ -13,6 +14,9 @@ from emsim.utils.sparse_utils import (
 )
 
 
+_logger = logging.getLogger(__name__)
+
+
 class HungarianMatcher(nn.Module):
     def __init__(
         self,
@@ -21,6 +25,7 @@ class HungarianMatcher(nn.Module):
         cost_coef_dice: float = 1.0,
         cost_coef_dist: float = 1.0,
         cost_coef_nll: float = 1.0,
+        cost_coef_likelihood: float = 1.0,
     ):
         super().__init__()
         self.cost_coef_class = cost_coef_class
@@ -28,6 +33,7 @@ class HungarianMatcher(nn.Module):
         self.cost_coef_dice = cost_coef_dice
         self.cost_coef_dist = cost_coef_dist
         self.cost_coef_nll = cost_coef_nll
+        self.cost_coef_likelihood = cost_coef_likelihood
 
     @torch.no_grad()
     def forward(
@@ -40,6 +46,7 @@ class HungarianMatcher(nn.Module):
             ]
         ).diff()
         n_electrons = target_dict["batch_size"]
+        image_size_xy = target_dict["image_size_pixels_rc"].flip(-1)
         segmap = target_dict["segmentation_mask"].to(
             predicted_dict["pred_segmentation_logits"].device
         )
@@ -68,6 +75,15 @@ class HungarianMatcher(nn.Module):
             predicted_dict["query_batch_offsets"],
             incidence_points,
             target_dict["electron_batch_offsets"],
+            image_size_xy,
+        )
+        likelihood_cost = get_likelihood_distance_cost(
+            predicted_dict["pred_positions"],
+            predicted_dict["pred_std_dev_cholesky"],
+            predicted_dict["query_batch_offsets"],
+            incidence_points,
+            target_dict["electron_batch_offsets"],
+            image_size_xy,
         )
 
         total_costs = [
@@ -76,13 +92,21 @@ class HungarianMatcher(nn.Module):
             + self.cost_coef_dice * dice
             + self.cost_coef_dist * dist
             + self.cost_coef_nll * nll
-            for _class, mask, dice, dist, nll in zip(
-                class_cost, mask_cost, dice_cost, distance_cost, nll_cost
+            + self.cost_coef_likelihood * likelihood
+            for _class, mask, dice, dist, nll, likelihood in zip(
+                class_cost,
+                mask_cost,
+                dice_cost,
+                distance_cost,
+                nll_cost,
+                likelihood_cost,
             )
         ]
 
         if any([c.shape[0] < c.shape[1] for c in total_costs]):
-            print(f"Got fewer queries than electrons: {[c.shape for c in total_costs]}")
+            _logger.warning(
+                f"Got fewer queries than electrons: {[c.shape for c in total_costs]}"
+            )
 
         indices = [linear_sum_assignment(cost) for cost in total_costs]
 
@@ -291,25 +315,29 @@ def get_dice_cost(
     return out
 
 
+@torch.jit.ignore
 def batch_nll_distance_loss(
     predicted_positions: Tensor,
     predicted_std_dev_cholesky: Tensor,
     true_positions: Tensor,
+    image_size_xy: Tensor,
 ):
     distn = torch.distributions.MultivariateNormal(
-        predicted_positions.unsqueeze(-2),
+        predicted_positions.unsqueeze(-2) * image_size_xy,
         scale_tril=predicted_std_dev_cholesky.unsqueeze(-3),
-    )
-    nll = -distn.log_prob(true_positions)
+    )  # distribution not supported by script
+    nll = -distn.log_prob(true_positions * image_size_xy)
     return nll
 
 
+@torch.jit.script
 def get_nll_distance_cost(
     predicted_positions: Tensor,
     predicted_std_dev_cholesky: Tensor,
     query_batch_offsets: Tensor,
     true_positions: Tensor,
     electron_batch_offsets: Tensor,
+    image_size_xy: Tensor,
 ):
     predicted_pos_per_image = torch.tensor_split(
         predicted_positions, query_batch_offsets[1:].cpu(), 0
@@ -320,11 +348,61 @@ def get_nll_distance_cost(
     true_pos_per_image = torch.tensor_split(
         true_positions, electron_batch_offsets[1:].cpu(), 0
     )
+    image_size_per_image = torch.tensor_split(image_size_xy, 1)
 
     return [
-        batch_nll_distance_loss(pred, std, true).cpu()
-        for pred, std, true in zip(
-            predicted_pos_per_image, predicted_std_dev_per_image, true_pos_per_image
+        batch_nll_distance_loss(pred, std, true, size).cpu()
+        for pred, std, true, size in zip(
+            predicted_pos_per_image,
+            predicted_std_dev_per_image,
+            true_pos_per_image,
+            image_size_per_image,
+        )
+    ]
+
+
+@torch.jit.ignore
+def batch_likelihood_distance_loss(
+    predicted_positions: Tensor,
+    predicted_std_dev_cholesky: Tensor,
+    true_positions: Tensor,
+    image_size_xy: Tensor,
+):
+    distn = torch.distributions.MultivariateNormal(
+        predicted_positions.unsqueeze(-2) * image_size_xy,
+        scale_tril=predicted_std_dev_cholesky.unsqueeze(-3),
+    )  # distribution not supported by script
+    likelihood = distn.log_prob(true_positions * image_size_xy).exp()
+    return 1 - likelihood
+
+
+@torch.jit.script
+def get_likelihood_distance_cost(
+    predicted_positions: Tensor,
+    predicted_std_dev_cholesky: Tensor,
+    query_batch_offsets: Tensor,
+    true_positions: Tensor,
+    electron_batch_offsets: Tensor,
+    image_size_xy: Tensor,
+):
+    predicted_pos_per_image = torch.tensor_split(
+        predicted_positions, query_batch_offsets[1:].cpu(), 0
+    )
+    predicted_std_dev_per_image = torch.tensor_split(
+        predicted_std_dev_cholesky, query_batch_offsets[1:].cpu(), 0
+    )
+    true_pos_per_image = torch.tensor_split(
+        true_positions, electron_batch_offsets[1:].cpu(), 0
+    )
+    image_size_per_image = torch.tensor_split(image_size_xy, 1)
+
+    return [
+        batch_likelihood_distance_loss(pred, std, true, size).cpu()
+        for pred, std, true, size in zip(
+            predicted_pos_per_image,
+            predicted_std_dev_per_image,
+            true_pos_per_image,
+            image_size_per_image,
         )
     ]
 

@@ -131,6 +131,7 @@ class EMModel(nn.Module):
             loss_coef_mask_bce=cfg.criterion.loss_coef_mask_bce,
             loss_coef_mask_dice=cfg.criterion.loss_coef_mask_dice,
             loss_coef_incidence_nll=cfg.criterion.loss_coef_incidence_nll,
+            loss_coef_incidence_likelihood=cfg.criterion.loss_coef_incidence_likelihood,
             loss_coef_incidence_huber=cfg.criterion.loss_coef_incidence_huber,
             no_electron_weight=cfg.criterion.no_electron_weight,
             matcher_cost_coef_class=cfg.criterion.matcher.cost_coef_class,
@@ -138,6 +139,7 @@ class EMModel(nn.Module):
             matcher_cost_coef_dice=cfg.criterion.matcher.cost_coef_dice,
             matcher_cost_coef_dist=cfg.criterion.matcher.cost_coef_dist,
             matcher_cost_coef_nll=cfg.criterion.matcher.cost_coef_nll,
+            matcher_cost_coef_likelihood=cfg.criterion.matcher.cost_coef_likelihood,
             aux_loss=cfg.criterion.aux_loss,
             n_aux_losses=cfg.transformer.decoder_layers - 1,
         )

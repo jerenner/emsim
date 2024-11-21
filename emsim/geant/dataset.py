@@ -50,37 +50,74 @@ _SPARSE_CONCAT = []
 ELECTRON_IONIZATION_MEV = 3.6e-6
 
 
+def make_test_train_datasets(
+    pixels_file: str,
+    events_per_image_range: tuple[int],
+    pixel_patch_size: int = 5,
+    hybrid_sparse_tensors: bool = True,
+    trajectory_file: Optional[str] = None,
+    train_percentage: float = 0.95,
+    processor: Callable = None,
+    transform: Callable = None,
+    noise_std: float = 1.0,
+    shuffle: bool = True,
+    seed: Optional[int] = None,
+):
+    electrons = read_files(
+        pixels_file=pixels_file, trajectory_file=trajectory_file
+    )
+    assert 0 < train_percentage <= 1
+    train_test_split = int(len(electrons) * train_percentage)
+    train_electrons = electrons[:train_test_split]
+    test_electrons = electrons[train_test_split:]
+
+    if len(train_electrons) > 0:
+        train_dataset = GeantElectronDataset(
+            electrons=train_electrons,
+            events_per_image_range=events_per_image_range,
+            pixel_patch_size=pixel_patch_size,
+            hybrid_sparse_tensors=hybrid_sparse_tensors,
+            processor=processor,
+            transform=transform,
+            noise_std=noise_std,
+            shuffle=shuffle,
+            seed=seed
+        )
+    else:
+        train_dataset = None
+
+    if len(test_electrons) > 0:
+        test_dataset = GeantElectronDataset(
+            electrons=test_electrons,
+            events_per_image_range=events_per_image_range,
+            pixel_patch_size=pixel_patch_size,
+            hybrid_sparse_tensors=hybrid_sparse_tensors,
+            processor=processor,
+            transform=transform,
+            noise_std=noise_std,
+            shuffle=False,
+            seed=seed
+        )
+    else:
+        test_dataset = None
+
+    return train_dataset, test_dataset
+
 class GeantElectronDataset(IterableDataset):
     def __init__(
         self,
-        pixels_file: str,
+        electrons: list[GeantElectron],
         events_per_image_range: tuple[int],
         pixel_patch_size: int = 5,
         hybrid_sparse_tensors: bool = True,
-        trajectory_file: Optional[str] = None,
-        train_percentage: float = 0.95,
-        split: str = "train",
         processor: Callable = None,
         transform: Callable = None,
         noise_std: float = 1.0,
         shuffle: bool = True,
         seed: Optional[int] = None,
     ):
-        assert 0 < train_percentage <= 1
-        assert split in ("train", "test")
-        self.pixels_file = pixels_file
-        self.trajectory_file = trajectory_file
         self.hybrid_sparse_tensors = hybrid_sparse_tensors
-
-        self.electrons = read_files(
-            pixels_file=pixels_file, trajectory_file=trajectory_file
-        )
-        train_test_split = int(len(self.electrons) * train_percentage)
-        if split == "train":
-            self.electrons = self.electrons[:train_test_split]
-        else:
-            self.electrons = self.electrons[train_test_split:]
-
+        self.electrons = electrons
         self.grid = self.electrons[0].grid
         self.pixel_to_mm = np.array(self.grid.pixel_size_um) / 1000
 
@@ -135,6 +172,10 @@ class GeantElectronDataset(IterableDataset):
             )
             batch.update(multiscale_peak_normalized_maps(stacked_sparse_arrays))
 
+            # image size info
+            batch["image_size_pixels_rc"] = np.array([self.grid.ymax_pixel, self.grid.xmax_pixel])
+            batch["image_size_um_xy"] = np.array([self.grid.xmax_um, self.grid.ymax_um])
+
             # bounding boxes
             boxes = [elec.pixels.get_bounding_box() for elec in elecs]
             boxes_normalized = normalize_boxes(
@@ -168,7 +209,7 @@ class GeantElectronDataset(IterableDataset):
             normalized_incidence_points_xy = (
                 incidence_points_xy
                 * 1000
-                / np.array([self.grid.xmax_um, self.grid.ymax_um])
+                / batch["image_size_um_xy"]
             )
             incidence_points_pixels_rc = np.fliplr(
                 incidence_points_xy
@@ -189,22 +230,22 @@ class GeantElectronDataset(IterableDataset):
             batch["local_centers_of_mass_pixels_xy"] = local_centers_of_mass_pixels
             batch["normalized_centers_of_mass_xy"] = (
                 local_centers_of_mass_pixels + patch_coords[:, :2]
-            ) / np.array([self.grid.xmax_pixel, self.grid.ymax_pixel])
+            ) / np.flip(batch["image_size_pixels_rc"], -1)
 
             # whole trajectories, if trajectory file is given
             # Note: could have x/y out of order, need to check if needed
-            if self.trajectory_file is not None:
-                local_trajectories = [
-                    elec.trajectory.localize(coords[0], coords[1]).as_array()
-                    for elec, coords in zip(elecs, patch_coords_mm)
-                ]
-                trajectory_mm_to_pixels = np.concatenate(
-                    [1 / self.pixel_to_mm, np.array([1.0, 1.0])]
-                ).astype(np.float32)
-                local_trajectories_pixels = [
-                    traj * trajectory_mm_to_pixels for traj in local_trajectories
-                ]
-                batch["local_trajectories_pixels"] = local_trajectories_pixels
+            # if self.trajectory_file is not None:
+            #     local_trajectories = [
+            #         elec.trajectory.localize(coords[0], coords[1]).as_array()
+            #         for elec, coords in zip(elecs, patch_coords_mm)
+            #     ]
+            #     trajectory_mm_to_pixels = np.concatenate(
+            #         [1 / self.pixel_to_mm, np.array([1.0, 1.0])]
+            #     ).astype(np.float32)
+            #     local_trajectories_pixels = [
+            #         traj * trajectory_mm_to_pixels for traj in local_trajectories
+            #     ]
+            #     batch["local_trajectories_pixels"] = local_trajectories_pixels
 
             # per-electron segmentation mask
             segmentation_mask, background = make_soft_segmentation_mask(
@@ -545,86 +586,3 @@ def _sparse_pad(items: list[sparse.SparseArray]):
             for item in items
         ]
     return items
-
-
-def plot_pixel_patch_and_points(
-    pixel_patch: np.ndarray,
-    points: list[np.ndarray],
-    point_labels: Optional[list[str]] = None,
-    ellipse_mean: Optional[np.ndarray] = None,
-    ellipse_cov: Optional[np.ndarray] = None,
-    ellipse_n_stds: list[int] = [1.0, 2.0, 3.0],
-    ellipse_facecolor: str = "none",
-    ellipse_colors: list[str] = ["blue", "purple", "red"],
-    ellipse_kwargs: Optional[dict] = None,
-):
-    import matplotlib.pyplot as plt
-
-    ellipse_kwargs = ellipse_kwargs or {}
-
-    pixel_patch = pixel_patch.squeeze()
-    fig, ax = plt.subplots()
-    map = ax.imshow(
-        pixel_patch.T,
-        extent=(0, pixel_patch.shape[0], pixel_patch.shape[1], 0),
-        interpolation=None,
-    )
-    fig.colorbar(map, ax=ax, label="Charge")
-    ax.set_xlabel("Pixel")
-    ax.set_ylabel("Pixel")
-    for point in points:
-        ax.scatter(*point)
-    if point_labels is not None:
-        ax.legend(point_labels)
-    if ellipse_mean is not None and ellipse_cov is not None:
-        for n_std, color in zip(ellipse_n_stds, ellipse_colors):
-            plot_ellipse(
-                ax,
-                ellipse_mean,
-                ellipse_cov,
-                n_std,
-                ellipse_facecolor,
-                ellipse_color=color,
-                **ellipse_kwargs,
-            )
-    return fig, ax
-
-
-def eigsorted(cov):
-    if cov.ndim == 2:
-        squeeze_cov = True
-        cov = np.expand_dims(cov, 0)
-    else:
-        squeeze_cov = False
-    evals, evecs = np.linalg.eigh(cov)
-    order = evals.argsort(-1)[:, ::-1]
-    sorted_evals = np.stack([val[ord] for val, ord in zip(evals, order)])
-    sorted_evecs = np.stack([vec[:, ord] for vec, ord in zip(evecs, order)])
-    if squeeze_cov:
-        sorted_evals, sorted_evecs = sorted_evals.squeeze(0), sorted_evecs.squeeze(0)
-    return sorted_evals, sorted_evecs
-
-
-def plot_ellipse(
-    ax, mean, cov, n_std=1.0, facecolor="none", ellipse_color="red", **kwargs
-):
-    # https://matplotlib.org/stable/gallery/statistics/confidence_ellipse.html
-    import matplotlib.transforms as transforms
-    from matplotlib.patches import Ellipse
-
-    evals, evecs = eigsorted(cov)
-    evals_sqrt = np.sqrt(evals)
-    first_evec = evecs[:, 0]
-    angle = np.degrees(np.arctan2(*first_evec[::-1]))
-    # angle = 0
-    ellipse = Ellipse(
-        mean,
-        width=evals_sqrt[0] * 2 * n_std,
-        height=evals_sqrt[1] * 2 * n_std,
-        angle=angle,
-        edgecolor=ellipse_color,
-        linestyle="--",
-        facecolor=facecolor,
-        **kwargs,
-    )
-    ax.add_patch(ellipse)

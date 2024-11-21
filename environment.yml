@@ -38,6 +38,5 @@ dependencies:
   - deprecation
   - pip:
     - stempy
-    - pylandau
     - cumm-cu118
     - spconv-cu118

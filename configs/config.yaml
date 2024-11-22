@@ -23,21 +23,23 @@ transformer:
   level_filter_ratio: [0.25, 0.5, 1.0, 1.0]
   layer_filter_ratio: [1.0, 0.8, 0.6, 0.6, 0.4, 0.2]
   max_tokens: 10000
-  query_embeddings: 1000
+  query_embeddings: 200
 
 criterion:
   aux_loss: true
-  no_electron_weight: 0.1
+  no_electron_weight: 1.0
   matcher:
-    cost_coef_class: 1.0
+    cost_coef_class: 100.0
     cost_coef_mask: 3.0
     cost_coef_dice: 5.0
     cost_coef_dist: 1.0
-    cost_coef_nll: 1.0
-  loss_coef_class: 1.0
+    cost_coef_nll: 0.10
+    cost_coef_likelihood: 1.0
+  loss_coef_class: 10.0
   loss_coef_mask_bce: 3.0
   loss_coef_mask_dice: 5.0
-  loss_coef_incidence_nll: 1.0
+  loss_coef_incidence_nll: 0.1
+  loss_coef_incidence_likelihood: 10.0
   loss_coef_incidence_huber: 100.0
   salience:
     alpha: 0.25
@@ -50,8 +52,8 @@ dataset:
   train_percentage: 0.95
   events_per_image_range: [100, 200]
   noise_std: 1.0
-  n_sigma_sparsify: 3
   pixel_patch_size: 7
+  n_sigma_sparsify: 3
   max_pixels_to_keep: 50000
 
 lr: 0.0001
@@ -62,6 +64,8 @@ warmup_percentage: 0.1
 eval_steps: 1000
 seed: 1234
 print_interval: 10
+resume_file: null
+tensorboard_name: null
 
 ddp:
   nodes: 2

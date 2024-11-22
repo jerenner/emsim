@@ -115,6 +115,10 @@ class EMCriterion(nn.Module):
                 "centroid_error": MetricCollection(
                     [MinMetric(), MeanMetric(), MaxMetric()], prefix="centroid_error/"
                 ),
+                "localization_minus_centroid_error": MetricCollection(
+                    [MinMetric(), MeanMetric(), MaxMetric()],
+                    prefix="localization_minus_centroid_error/",
+                ),
             },
         )
 
@@ -122,14 +126,14 @@ class EMCriterion(nn.Module):
             {
                 "query_classification": MetricCollection(
                     [BinaryAccuracy(), BinaryPrecision(), BinaryRecall()],
-                    prefix="query_",
+                    prefix="query/",
                 ),
                 "classification_accuracy": BinaryAccuracy(),
                 "localization_error": MeanMetric(),
                 "dice": MeanMetric(),
                 "centroid_error": MeanMetric(),
             },
-            prefix="eval_",
+            prefix="eval/",
         )
 
     def compute_losses(
@@ -198,20 +202,21 @@ class EMCriterion(nn.Module):
 
         if update_metrics:
             with torch.no_grad():
+                localization_error = (
+                    pred_positions * image_size - true_positions * image_size
+                ).square().sum(-1).sqrt()
                 self.train_metrics["localization_error"].update(
-                    (pred_positions * image_size - true_positions * image_size)
-                    .square()
-                    .sum(-1)
-                    .sqrt()
+                    localization_error
                 )
+                centroid_error = (
+                    target_dict["normalized_centers_of_mass_xy"] * image_size
+                    - target_dict["normalized_incidence_points_xy"] * image_size
+                ).square().sum(-1).sqrt()
                 self.train_metrics["centroid_error"].update(
-                    (
-                        target_dict["normalized_centers_of_mass_xy"] * image_size
-                        - target_dict["normalized_incidence_points_xy"] * image_size
-                    )
-                    .square()
-                    .sum(-1)
-                    .sqrt()
+                    centroid_error
+                )
+                self.train_metrics["localization_minus_centroid_error"].update(
+                    localization_error - centroid_error
                 )
 
         loss_dict = {
@@ -329,7 +334,7 @@ class EMCriterion(nn.Module):
         ).log_prob(true_incidence_points * image_size)
         # print(torch.isinf(loss).any())
         # loss = loss.clamp(-1e7, 1e7)
-        loss = torch.clamp_max(loss, 1e7)
+        # loss = torch.clamp_max(loss, 1e7)
         return loss.mean()
 
     def get_distance_likelihood_loss(
@@ -430,10 +435,6 @@ class EMCriterion(nn.Module):
     @staticmethod
     def tensorboardify_keys(log_dict: dict):
         log_dict = {k.replace("loss_", "loss/"): v for k, v in log_dict.items()}
-        log_dict = {k.replace("error_", "error/"): v for k, v in log_dict.items()}
-        log_dict = {k.replace("query_", "query/"): v for k, v in log_dict.items()}
-        log_dict = {k.replace("mask_", "mask/"): v for k, v in log_dict.items()}
-        log_dict = {k.replace("eval_", "eval/"): v for k, v in log_dict.items()}
         return log_dict
 
     def reset_metrics(self) -> None:

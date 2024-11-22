@@ -164,3 +164,4 @@ cython_debug/
 *.code-workspace
 .conda
 slurm-*.out
+outputs

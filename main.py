@@ -134,7 +134,7 @@ def main(cfg: DictConfig):
 def train(
     cfg: DictConfig,
     fabric: Fabric,
-    model: EMModel,
+    model,
     optimizer,
     lr_scheduler,
     train_dataloader,
@@ -172,7 +172,7 @@ def train(
 
         with torch.no_grad():
             log_dict = fabric.all_reduce(loss_dict, reduce_op="mean")
-        log_dict["lr"] = lr_scheduler.get_lr()[0]
+        log_dict["lr"] = lr_scheduler.get_last_lr()[0]
 
         if i > 0 and i % cfg.print_interval == 0:
             metric_log_dict = model.criterion.get_logs()
@@ -195,10 +195,8 @@ def train(
             model.train()
 
         iter_time.update(time.time() - t0)
-    for logger in fabric.loggers:
-        logger.finalize()
     if fabric.is_global_zero:
-        elapsed_time_str = str(datetime.timedelta(seconds=int(elapsed_time)))
+        elapsed_time_str = _elapsed_time_str(elapsed_time)
         _logger.info(f"Training complete in {elapsed_time_str}.")
 
 

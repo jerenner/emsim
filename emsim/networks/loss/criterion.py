@@ -43,7 +43,9 @@ class EMCriterion(nn.Module):
         matcher_cost_coef_dist: float = 1.0,
         matcher_cost_coef_nll: float = 1.0,
         matcher_cost_coef_likelihood: float = 1.0,
-        aux_loss=True,
+        use_aux_loss=True,
+        aux_loss_use_final_matches=False,
+        aux_loss_weight=1.0,
         n_aux_losses: int = 0,
     ):
         super().__init__()
@@ -55,7 +57,9 @@ class EMCriterion(nn.Module):
         self.loss_coef_incidence_huber = loss_coef_incidence_huber
         self.loss_coef_salience = loss_coef_salience
         self.no_electron_weight = no_electron_weight
-        self.aux_loss = aux_loss
+        self.aux_loss = use_aux_loss
+        self.aux_loss_use_final_matches = aux_loss_use_final_matches
+        self.aux_loss_weight = aux_loss_weight
 
         self.salience_criterion = ElectronSalienceCriterion(
             salience_alpha, salience_gamma
@@ -82,7 +86,7 @@ class EMCriterion(nn.Module):
                 "loss": MeanMetric(),
             }
         )
-        if aux_loss:
+        if use_aux_loss:
             assert n_aux_losses > 0
             for i in range(n_aux_losses):
                 for loss_name in [
@@ -203,18 +207,22 @@ class EMCriterion(nn.Module):
         if update_metrics:
             with torch.no_grad():
                 localization_error = (
-                    pred_positions * image_size - true_positions * image_size
-                ).square().sum(-1).sqrt()
-                self.train_metrics["localization_error"].update(
-                    localization_error
+                    (pred_positions * image_size - true_positions * image_size)
+                    .square()
+                    .sum(-1)
+                    .sqrt()
                 )
+                self.train_metrics["localization_error"].update(localization_error)
                 centroid_error = (
-                    target_dict["normalized_centers_of_mass_xy"] * image_size
-                    - target_dict["normalized_incidence_points_xy"] * image_size
-                ).square().sum(-1).sqrt()
-                self.train_metrics["centroid_error"].update(
-                    centroid_error
+                    (
+                        target_dict["normalized_centers_of_mass_xy"] * image_size
+                        - target_dict["normalized_incidence_points_xy"] * image_size
+                    )
+                    .square()
+                    .sum(-1)
+                    .sqrt()
                 )
+                self.train_metrics["centroid_error"].update(centroid_error)
                 self.train_metrics["localization_minus_centroid_error"].update(
                     localization_error - centroid_error
                 )
@@ -242,7 +250,13 @@ class EMCriterion(nn.Module):
         if "aux_outputs" in predicted_dict:
             for i, aux_output_dict in enumerate(predicted_dict["aux_outputs"]):
                 aux_loss_dict, aux_matched_indices = self.compute_losses(
-                    aux_output_dict, target_dict
+                    aux_output_dict,
+                    target_dict,
+                    matched_indices=(
+                        matched_indices["matched_indices"]
+                        if self.aux_loss_use_final_matches
+                        else None
+                    ),
                 )
                 for k, v in aux_loss_dict.items():
                     loss_str = f"aux_losses/{i}/{k}"
@@ -383,21 +397,25 @@ class EMCriterion(nn.Module):
 
     def __reweight_loss(self, loss_name, loss_tensor):
         if "class" in loss_name:
-            return loss_tensor * self.loss_coef_class
+            loss_tensor = loss_tensor * self.loss_coef_class
         elif "bce" in loss_name:
-            return loss_tensor * self.loss_coef_mask_bce
+            loss_tensor = loss_tensor * self.loss_coef_mask_bce
         elif "dice" in loss_name:
-            return loss_tensor * self.loss_coef_mask_dice
+            loss_tensor = loss_tensor * self.loss_coef_mask_dice
         elif "incidence_nll" in loss_name:
-            return loss_tensor * self.loss_coef_incidence_nll
+            loss_tensor = loss_tensor * self.loss_coef_incidence_nll
         elif "incidence_likelihood" in loss_name:
-            return loss_tensor * self.loss_coef_incidence_likelihood
+            loss_tensor = loss_tensor * self.loss_coef_incidence_likelihood
         elif "incidence_huber" in loss_name:
-            return loss_tensor * self.loss_coef_incidence_huber
+            loss_tensor = loss_tensor * self.loss_coef_incidence_huber
         elif "salience" in loss_name:
-            return loss_tensor * self.loss_coef_salience
+            loss_tensor = loss_tensor * self.loss_coef_salience
         else:
             raise ValueError(f"Unrecognized loss {loss_name}: {loss_tensor}")
+
+        if "aux_loss" in loss_name and self.aux_loss_weight != 1.0:
+            loss_tensor = loss_tensor * self.aux_loss_weight
+        return loss_tensor
 
     def compute_total_loss(self, loss_dict: dict[str, Tensor]) -> Tensor:
         weighted_loss_dict = {

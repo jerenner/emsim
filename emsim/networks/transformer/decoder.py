@@ -103,6 +103,7 @@ class EMTransformerDecoder(nn.Module):
         std_head: Optional[nn.Module] = None,
         segmentation_head: Optional[nn.Module] = None,
         look_forward_twice: bool = True,
+        detach_updated_positions: bool = True,
     ):
         super().__init__()
         self.layers = nn.ModuleList(
@@ -111,6 +112,7 @@ class EMTransformerDecoder(nn.Module):
         self.num_layers = num_layers
         self.d_model = decoder_layer.d_model
         self.look_forward_twice = look_forward_twice
+        self.detach_updated_positions = detach_updated_positions
         self.query_pos_encoding = FourierEncoding(
             2, decoder_layer.d_model, dtype=torch.double
         )
@@ -236,7 +238,10 @@ class EMTransformerDecoder(nn.Module):
             layer_output_queries.append(queries)
             layer_output_segmentation.append(query_segmentation)
 
-            query_reference_points = new_reference_points.detach()
+            if self.detach_updated_positions:
+                query_reference_points = new_reference_points.detach()
+            else:
+                query_reference_points = new_reference_points
 
         stacked_query_logits = torch.stack(layer_output_logits)
         stacked_query_positions = torch.stack(layer_output_positions)

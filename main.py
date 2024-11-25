@@ -45,14 +45,16 @@ _logger.setLevel(logging.INFO)
 @hydra.main(version_base=None, config_path="./configs", config_name="config")
 def main(cfg: DictConfig):
     output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
-    tb_logger = TensorBoardLogger(
-        output_dir,
-        name=(
-            cfg.tensorboard_name
-            if cfg.tensorboard_name is not None
-            else "lightning_logs"
-        ),
-    )
+    if cfg.log_tensorboard:
+        tb_logger = TensorBoardLogger(
+            output_dir,
+            name=(
+                cfg.tensorboard_name
+                if cfg.tensorboard_name is not None
+                else "lightning_logs"
+            ),
+        )
+        tb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
     fabric = Fabric(
         strategy=DDPStrategy(find_unused_parameters=cfg.ddp.find_unused_parameters),
         # strategy="ddp_find_unused_parameters_true",
@@ -62,14 +64,13 @@ def main(cfg: DictConfig):
         loggers=[
             tb_logger,
             # CSVLogger(output_dir + "/csv_logs"),
-        ],
+        ] if cfg.log_tensorboard else None,
     )
     if fabric.is_global_zero:
         _logger.info("Setting up...")
         _logger.info(print(yaml.dump(OmegaConf.to_container(cfg, resolve=True))))
     fabric.seed_everything(cfg.seed + fabric.global_rank)
     fabric.launch()
-    tb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
     model = EMModel.from_config(cfg)
 
     train_dataset, eval_dataset = make_test_train_datasets(

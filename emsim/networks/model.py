@@ -125,6 +125,7 @@ class EMModel(nn.Module):
             layer_filter_ratio=cfg.transformer.layer_filter_ratio,
             encoder_max_tokens=cfg.transformer.max_tokens,
             n_query_embeddings=cfg.transformer.query_embeddings,
+            decoder_detach_updated_positions=cfg.transformer.decoder_detach_updated_positions,
         )
         criterion = EMCriterion(
             loss_coef_class=cfg.criterion.loss_coef_class,
@@ -140,7 +141,9 @@ class EMModel(nn.Module):
             matcher_cost_coef_dist=cfg.criterion.matcher.cost_coef_dist,
             matcher_cost_coef_nll=cfg.criterion.matcher.cost_coef_nll,
             matcher_cost_coef_likelihood=cfg.criterion.matcher.cost_coef_likelihood,
-            aux_loss=cfg.criterion.aux_loss,
+            use_aux_loss=cfg.criterion.aux_loss.use_aux_loss,
+            aux_loss_use_final_matches=cfg.criterion.aux_loss.use_final_matches,
+            aux_loss_weight=cfg.criterion.aux_loss.aux_loss_weight,
             n_aux_losses=cfg.transformer.decoder_layers - 1,
         )
         salience_criterion = ElectronSalienceCriterion(

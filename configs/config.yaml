@@ -25,6 +25,7 @@ transformer:
   max_tokens: 10000
   query_embeddings: 200
   decoder_detach_updated_positions: true
+  decoder_look_forward_twice: true
 
 criterion:
   aux_loss:

@@ -125,6 +125,7 @@ class EMModel(nn.Module):
             layer_filter_ratio=cfg.transformer.layer_filter_ratio,
             encoder_max_tokens=cfg.transformer.max_tokens,
             n_query_embeddings=cfg.transformer.query_embeddings,
+            decoder_look_forward_twice=cfg.transformer.decoder_look_forward_twice,
             decoder_detach_updated_positions=cfg.transformer.decoder_detach_updated_positions,
         )
         criterion = EMCriterion(

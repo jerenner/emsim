@@ -61,10 +61,14 @@ def main(cfg: DictConfig):
         accelerator="gpu",
         num_nodes=cfg.ddp.nodes,
         devices=cfg.ddp.devices,
-        loggers=[
-            tb_logger,
-            # CSVLogger(output_dir + "/csv_logs"),
-        ] if cfg.log_tensorboard else None,
+        loggers=(
+            [
+                tb_logger,
+                # CSVLogger(output_dir + "/csv_logs"),
+            ]
+            if cfg.log_tensorboard
+            else None
+        ),
     )
     if fabric.is_global_zero:
         _logger.info("Setting up...")
@@ -239,6 +243,15 @@ def load(checkpoint_file: str, model, optimizer, fabric: Fabric):
 
 def _elapsed_time_str(elapsed_time):
     return str(datetime.timedelta(seconds=int(elapsed_time)))
+
+
+def __debug_find_unused_parameters(model):
+    unused_parameters = []
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            unused_parameters.append(name)
+    if len(unused_parameters) > 0:
+        _logger.debug(f"Unused parameters: {unused_parameters}")
 
 
 if __name__ == "__main__":

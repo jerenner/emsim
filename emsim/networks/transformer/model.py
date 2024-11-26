@@ -43,6 +43,7 @@ class EMTransformer(nn.Module):
         layer_filter_ratio: tuple = (1.0, 0.8, 0.6, 0.6, 0.4, 0.2),
         encoder_max_tokens: int = 10000,
         n_query_embeddings: int = 1000,
+        decoder_look_forward_twice: bool = True,
         decoder_detach_updated_positions: bool = True,
     ):
         super().__init__()
@@ -108,6 +109,7 @@ class EMTransformer(nn.Module):
             position_offset_head=self.query_pos_offset_head,
             std_head=self.std_head,
             segmentation_head=self.segmentation_head,
+            look_forward_twice=decoder_look_forward_twice,
             detach_updated_positions=decoder_detach_updated_positions,
         )
 

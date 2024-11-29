@@ -10,6 +10,7 @@ unet:
   stem_channels: 16
   act_layer: "relu"
   norm_layer: "batchnorm1d"
+  convert_sync_batch_norm: true
 
 transformer:
   d_model: 256
@@ -72,6 +73,7 @@ print_interval: 10
 resume_file: null
 tensorboard_name: null
 log_tensorboard: true
+clear_cache_interval: 1000
 
 ddp:
   nodes: 2

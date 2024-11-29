@@ -200,6 +200,10 @@ def train(
             model.train()
 
         iter_time.update(time.time() - t0)
+        # MinkowskiEngine says to clear the cache periodically
+        if i > 0 and i % cfg.clear_cache_interval == 0:
+            torch.cuda.empty_cache()
+
     if fabric.is_global_zero:
         elapsed_time_str = _elapsed_time_str(elapsed_time)
         _logger.info(f"Training complete in {elapsed_time_str}.")

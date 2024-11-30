@@ -19,7 +19,7 @@ from .matcher import HungarianMatcher
 from ...utils.sparse_utils import (
     gather_from_sparse_tensor,
     union_sparse_indices,
-    spconv_to_torch_sparse,
+    sparse_squeeze_dense_dim,
 )
 from ...utils.batching_utils import split_batch_concatted_tensor
 
@@ -196,18 +196,45 @@ class EMCriterion(nn.Module):
         image_size = (
             target_dict["image_size_pixels_rc"].flip(-1).to(pred_positions.device)
         )
+        n_queries = torch.cat(
+            [
+                predicted_dict["query_batch_offsets"],
+                predicted_dict["query_batch_offsets"].new_tensor(
+                    [predicted_dict["output_queries"].shape[0]]
+                ),
+            ]
+        ).diff()
+        image_size_per_query = torch.cat(
+            [
+                size.expand(n_queries, -1)
+                for size, n_queries in zip(image_size.unbind(0), n_queries)
+            ],
+            0,
+        )
+        image_size_per_electron = torch.cat(
+            [
+                size.expand(n_elecs, -1)
+                for size, n_elecs in zip(
+                    image_size.unbind(0), target_dict["batch_size"]
+                )
+            ],
+            0,
+        )
         distance_nll_loss = self.get_distance_nll_loss(
-            pred_positions, pred_std_cholesky, true_positions, image_size
+            pred_positions, pred_std_cholesky, true_positions, image_size_per_electron
         )
         distance_likelihood_loss = self.get_distance_likelihood_loss(
-            pred_positions, pred_std_cholesky, true_positions, image_size
+            pred_positions, pred_std_cholesky, true_positions, image_size_per_electron
         )
         huber_loss = self.get_distance_huber_loss(pred_positions, true_positions)
 
         if update_metrics:
             with torch.no_grad():
                 localization_error = (
-                    (pred_positions * image_size - true_positions * image_size)
+                    (
+                        pred_positions * image_size_per_electron
+                        - true_positions * image_size_per_electron
+                    )
                     .square()
                     .sum(-1)
                     .sqrt()
@@ -215,8 +242,10 @@ class EMCriterion(nn.Module):
                 self.train_metrics["localization_error"].update(localization_error)
                 centroid_error = (
                     (
-                        target_dict["normalized_centers_of_mass_xy"] * image_size
-                        - target_dict["normalized_incidence_points_xy"] * image_size
+                        target_dict["normalized_centers_of_mass_xy"]
+                        * image_size_per_electron
+                        - target_dict["normalized_incidence_points_xy"]
+                        * image_size_per_electron
                     )
                     .square()
                     .sum(-1)
@@ -341,11 +370,11 @@ class EMCriterion(nn.Module):
         pred_centers: Tensor,
         pred_std_cholesky: Tensor,
         true_incidence_points: Tensor,
-        image_size: Tensor,
+        image_size_per_query: Tensor,
     ) -> Tensor:
         loss = -torch.distributions.MultivariateNormal(
-            pred_centers * image_size, scale_tril=pred_std_cholesky
-        ).log_prob(true_incidence_points * image_size)
+            pred_centers * image_size_per_query, scale_tril=pred_std_cholesky
+        ).log_prob(true_incidence_points * image_size_per_query)
         # print(torch.isinf(loss).any())
         # loss = loss.clamp(-1e7, 1e7)
         # loss = torch.clamp_max(loss, 1e7)
@@ -356,11 +385,11 @@ class EMCriterion(nn.Module):
         pred_centers: Tensor,
         pred_std_cholesky: Tensor,
         true_incidence_points: Tensor,
-        image_size: Tensor,
+        image_size_per_query: Tensor,
     ) -> Tensor:
         loss = torch.distributions.MultivariateNormal(
-            pred_centers * image_size, scale_tril=pred_std_cholesky
-        ).log_prob(true_incidence_points * image_size)
+            pred_centers * image_size_per_query, scale_tril=pred_std_cholesky
+        ).log_prob(true_incidence_points * image_size_per_query)
         loss = 1 - loss.exp()
         return loss.mean()
 

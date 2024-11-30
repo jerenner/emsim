@@ -46,7 +46,7 @@ class HungarianMatcher(nn.Module):
             ]
         ).diff()
         n_electrons = target_dict["batch_size"]
-        image_size_xy = target_dict["image_size_pixels_rc"].flip(-1)
+        image_sizes_xy = target_dict["image_size_pixels_rc"].flip(-1)
         segmap = target_dict["segmentation_mask"].to(
             predicted_dict["pred_segmentation_logits"].device
         )
@@ -75,7 +75,7 @@ class HungarianMatcher(nn.Module):
             predicted_dict["query_batch_offsets"],
             incidence_points,
             target_dict["electron_batch_offsets"],
-            image_size_xy,
+            image_sizes_xy,
         )
         likelihood_cost = get_likelihood_distance_cost(
             predicted_dict["pred_positions"],
@@ -83,7 +83,7 @@ class HungarianMatcher(nn.Module):
             predicted_dict["query_batch_offsets"],
             incidence_points,
             target_dict["electron_batch_offsets"],
-            image_size_xy,
+            image_sizes_xy,
         )
 
         total_costs = [
@@ -337,7 +337,7 @@ def get_nll_distance_cost(
     query_batch_offsets: Tensor,
     true_positions: Tensor,
     electron_batch_offsets: Tensor,
-    image_size_xy: Tensor,
+    image_sizes_xy: Tensor,
 ):
     predicted_pos_per_image = torch.tensor_split(
         predicted_positions, query_batch_offsets[1:].cpu(), 0
@@ -348,7 +348,7 @@ def get_nll_distance_cost(
     true_pos_per_image = torch.tensor_split(
         true_positions, electron_batch_offsets[1:].cpu(), 0
     )
-    image_size_per_image = torch.tensor_split(image_size_xy, 1)
+    image_size_per_image = image_sizes_xy.unbind(0)
 
     return [
         batch_nll_distance_loss(pred, std, true, size).cpu()
@@ -383,7 +383,7 @@ def get_likelihood_distance_cost(
     query_batch_offsets: Tensor,
     true_positions: Tensor,
     electron_batch_offsets: Tensor,
-    image_size_xy: Tensor,
+    image_sizes_xy: Tensor,
 ):
     predicted_pos_per_image = torch.tensor_split(
         predicted_positions, query_batch_offsets[1:].cpu(), 0
@@ -394,7 +394,7 @@ def get_likelihood_distance_cost(
     true_pos_per_image = torch.tensor_split(
         true_positions, electron_batch_offsets[1:].cpu(), 0
     )
-    image_size_per_image = torch.tensor_split(image_size_xy, 1)
+    image_size_per_image = image_sizes_xy.unbind(0)
 
     return [
         batch_likelihood_distance_loss(pred, std, true, size).cpu()

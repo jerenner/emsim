@@ -1,4 +1,5 @@
 import re
+from typing import Optional
 
 import numpy as np
 import sparse
@@ -19,6 +20,15 @@ def torch_sparse_to_pydata_sparse(tensor: Tensor):
         tensor.shape,
         has_duplicates=False,
     )
+
+
+def pydata_sparse_to_torch_sparse(sparse_array: sparse.SparseArray, device: Optional[torch.device] = None):
+    return torch.sparse_coo_tensor(
+            indices=sparse_array.coords,
+            values=sparse_array.data,
+            size=sparse_array.shape,
+            device=device,
+        ).coalesce()
 
 
 def sparse_select(tensor: Tensor, axis: int, index: int):

@@ -14,6 +14,7 @@ from emsim.geant.io import read_files
 from emsim.utils.misc_utils import (
     random_chunks,
 )
+from emsim.utils.sparse_utils import pydata_sparse_to_torch_sparse
 
 # keys in here will not be batched in the collate fn
 _KEYS_TO_NOT_BATCH = ("local_trajectories_pixels", "hybrid_sparse_tensors")
@@ -65,9 +66,7 @@ def make_test_train_datasets(
     shuffle: bool = True,
     seed: Optional[int] = None,
 ):
-    electrons = read_files(
-        pixels_file=pixels_file, trajectory_file=trajectory_file
-    )
+    electrons = read_files(pixels_file=pixels_file, trajectory_file=trajectory_file)
     assert 0 < train_percentage <= 1
     train_test_split = int(len(electrons) * train_percentage)
     train_electrons = electrons[:train_test_split]
@@ -83,7 +82,7 @@ def make_test_train_datasets(
             transform=transform,
             noise_std=noise_std,
             shuffle=shuffle,
-            seed=seed
+            seed=seed,
         )
     else:
         train_dataset = None
@@ -98,12 +97,13 @@ def make_test_train_datasets(
             transform=transform,
             noise_std=noise_std,
             shuffle=False,
-            seed=seed
+            seed=seed,
         )
     else:
         test_dataset = None
 
     return train_dataset, test_dataset
+
 
 class GeantElectronDataset(IterableDataset):
     def __init__(
@@ -175,7 +175,9 @@ class GeantElectronDataset(IterableDataset):
             batch.update(multiscale_peak_normalized_maps(stacked_sparse_arrays))
 
             # image size info
-            batch["image_size_pixels_rc"] = np.array([self.grid.ymax_pixel, self.grid.xmax_pixel])
+            batch["image_size_pixels_rc"] = np.array(
+                [self.grid.ymax_pixel, self.grid.xmax_pixel]
+            )
             batch["image_size_um_xy"] = np.array([self.grid.xmax_um, self.grid.ymax_um])
 
             # bounding boxes
@@ -209,9 +211,7 @@ class GeantElectronDataset(IterableDataset):
                 [np.array([elec.incidence.x, elec.incidence.y]) for elec in elecs]
             )
             normalized_incidence_points_xy = (
-                incidence_points_xy
-                * 1000
-                / batch["image_size_um_xy"]
+                incidence_points_xy * 1000 / batch["image_size_um_xy"]
             )
             incidence_points_pixels_rc = np.fliplr(
                 incidence_points_xy
@@ -523,16 +523,14 @@ def electron_collate_fn(
                     to_stack = _sparse_pad([sample[key] for sample in batch])
                     sparse_batched = sparse.stack(to_stack, axis=0)
 
-                out_batch[key + "_indices"] = torch.tensor(sparse_batched.coords)
-                out_batch[key + "_values"] = torch.tensor(sparse_batched.data)
-                out_batch[key + "_shape"] = sparse_batched.shape
+                out_batch[key] = pydata_sparse_to_torch_sparse(sparse_batched)
 
                 # batch offsets for the nonzero points in the sparse tensor
                 # (can find this later by finding first appearance of each batch
                 # index but more efficient to do it here)
-                out_batch[key + "_batch_offsets"] = torch.as_tensor(
-                    np.cumsum([0] + [item.nnz for item in to_stack][:-1])
-                )
+                # out_batch[key + "2_batch_offsets"] = torch.as_tensor(
+                #     np.cumsum([0] + [item.nnz for item in to_stack][:-1])
+                # )
             else:
                 out_batch[key] = torch.as_tensor(
                     np.concatenate([sample[key] for sample in batch], axis=0)

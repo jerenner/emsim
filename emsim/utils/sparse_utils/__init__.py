@@ -1,5 +1,6 @@
 from .base import (
     torch_sparse_to_pydata_sparse,
+    pydata_sparse_to_torch_sparse,
     sparse_select,
     sparse_index_select,
     sparse_flatten_hw,
@@ -18,6 +19,7 @@ from .base import (
 
 __all__ = [
     "torch_sparse_to_pydata_sparse",
+    "pydata_sparse_to_torch_sparse",
     "sparse_select",
     "sparse_index_select",
     "sparse_flatten_hw",

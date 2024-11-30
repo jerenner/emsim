@@ -58,10 +58,12 @@ try:
     )
 
     __all__.extend(
-        "torch_sparse_to_minkowski",
-        "minkowski_to_torch_sparse",
-        "MinkowskiGELU",
-        "MinkowskiLayerNorm",
+        [
+            "torch_sparse_to_minkowski",
+            "minkowski_to_torch_sparse",
+            "MinkowskiGELU",
+            "MinkowskiLayerNorm",
+        ]
     )
 except ImportError:
     pass

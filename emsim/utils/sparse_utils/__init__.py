@@ -13,6 +13,7 @@ from .base import (
     bhwn_to_nhw_iterator_over_batches_torch,
     flatten_multi_level_sparse_maps_to_nested,
     nested_flattened_tensors_to_sparse_tensors,
+    sparse_squeeze_dense_dim,
 )
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "bhwn_to_nhw_iterator_over_batches_torch",
     "flatten_multi_level_sparse_maps_to_nested",
     "nested_flattened_tensors_to_sparse_tensors",
+    "sparse_squeeze_dense_dim",
 ]
 
 try:
@@ -55,6 +57,7 @@ try:
         minkowski_to_torch_sparse,
         MinkowskiGELU,
         MinkowskiLayerNorm,
+        _get_me_layer,
     )
 
     __all__.extend(
@@ -63,6 +66,7 @@ try:
             "minkowski_to_torch_sparse",
             "MinkowskiGELU",
             "MinkowskiLayerNorm",
+            "_get_me_layer",
         ]
     )
 except ImportError:

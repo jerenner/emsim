@@ -23,6 +23,8 @@ _TO_DEFAULT_COLLATE = (
     "image",
     "batch_size",
     "noiseless_image",
+    "image_size_pixels_rc",
+    "image_size_um_xy",
 )
 
 # these sparse arrays get stacked with an extra batch dimension

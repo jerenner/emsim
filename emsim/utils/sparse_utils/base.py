@@ -57,6 +57,19 @@ def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
     ).coalesce()
 
 
+def sparse_squeeze_dense_dim(tensor: Tensor):
+    assert tensor.is_sparse
+    assert tensor.dense_dim() > 0, "Tensor has no dense dim to squeeze"
+    assert tensor.shape[-1] == 1, f"Tensor dense dim is non-singleton: {tensor.shape=}"
+    tensor = tensor.coalesce()
+    return torch.sparse_coo_tensor(
+        tensor.indices(),
+        tensor.values().squeeze(-1),
+        tensor.shape[:-1],
+        requires_grad=tensor.requires_grad
+    ).coalesce()
+
+
 def sparse_flatten_hw(tensor: Tensor):
     assert tensor.is_sparse
     tensor = tensor.coalesce()

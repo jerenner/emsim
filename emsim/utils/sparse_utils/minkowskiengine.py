@@ -21,7 +21,8 @@ def torch_sparse_to_minkowski(tensor: Tensor):
 
 
 def minkowski_to_torch_sparse(
-    tensor: ME.SparseTensor, full_scale_spatial_shape: Union[Tensor, list[int]]
+    tensor: ME.SparseTensor,
+    full_scale_spatial_shape: Optional[Union[Tensor, list[int]]] = None,
 ):
     if isinstance(tensor, Tensor):
         assert tensor.is_sparse
@@ -29,12 +30,17 @@ def minkowski_to_torch_sparse(
     assert isinstance(tensor, ME.SparseTensor)
     min_coords = torch.zeros([tensor.dimension], dtype=torch.int, device=tensor.device)
     if full_scale_spatial_shape is not None:
-        max_coords = torch.tensor(
-            full_scale_spatial_shape, dtype=torch.int, device=tensor.device
-        )
+        if isinstance(full_scale_spatial_shape, list):
+            max_coords = torch.tensor(
+                full_scale_spatial_shape, dtype=torch.int, device=tensor.device
+            )
+        else:
+            assert isinstance(full_scale_spatial_shape, Tensor)
+            max_coords = full_scale_spatial_shape.to(tensor.C)
     else:
         max_coords = None
-    return __me_sparse(tensor, min_coords, max_coords)
+    out = __me_sparse(tensor, min_coords, max_coords)[0].coalesce()
+    return out
 
 
 def __me_sparse(
@@ -124,8 +130,6 @@ def __me_sparse(
     return sparse_tensor, min_coords, tensor_stride
 
 
-
-
 class MinkowskiLayerNorm(nn.Module):
     def __init__(
         self,
@@ -165,3 +169,16 @@ class MinkowskiLayerNorm(nn.Module):
 
 class MinkowskiGELU(MinkowskiNonlinearityBase):
     MODULE = nn.GELU
+
+
+def _get_me_layer(layer: Union[str, nn.Module]):
+    if isinstance(layer, nn.Module):
+        return layer
+    if layer.lower() == "relu":
+        return ME.MinkowskiReLU
+    elif layer.lower() == "gelu":
+        return MinkowskiGELU
+    elif layer.lower() == "batchnorm1d":
+        return ME.MinkowskiBatchNorm
+    else:
+        raise ValueError(f"Unexpected layer {layer}")

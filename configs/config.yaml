@@ -74,6 +74,8 @@ resume_file: null
 tensorboard_name: null
 log_tensorboard: true
 clear_cache_interval: 1000
+log_level: "INFO"
+compile: false
 
 ddp:
   nodes: 2

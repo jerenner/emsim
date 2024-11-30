@@ -39,11 +39,11 @@ from emsim.preprocessing import NSigmaSparsifyTransform
 
 
 _logger = logging.getLogger(__name__)
-_logger.setLevel(logging.INFO)
 
 
 @hydra.main(version_base=None, config_path="./configs", config_name="config")
 def main(cfg: DictConfig):
+    _logger.setLevel(cfg.log_level)
     output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     if cfg.log_tensorboard:
         tb_logger = TensorBoardLogger(
@@ -76,7 +76,13 @@ def main(cfg: DictConfig):
     fabric.seed_everything(cfg.seed + fabric.global_rank)
     fabric.launch()
     model = EMModel.from_config(cfg)
+    if cfg.compile:
+        if fabric.is_global_zero:
+            _logger.info("torch.compile-ing model...")
+        model = torch.compile(model, dynamic=True)
 
+    if fabric.is_global_zero:
+        _logger.info("Making datasets...")
     train_dataset, eval_dataset = make_test_train_datasets(
         pixels_file=os.path.join(cfg.dataset.directory, cfg.dataset.pixels_file),
         events_per_image_range=cfg.dataset.events_per_image_range,
@@ -90,6 +96,8 @@ def main(cfg: DictConfig):
             max_pixels_to_keep=cfg.dataset.max_pixels_to_keep,
         ),
     )
+    if fabric.is_global_zero:
+        _logger.info("Making dataloaders...")
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         cfg.batch_size,
@@ -113,6 +121,8 @@ def main(cfg: DictConfig):
     )
 
     ## prepare fabric
+    if fabric.is_global_zero:
+        _logger.info("Setting up distributed...")
     model, optimizer = fabric.setup(model, optimizer)
     train_dataloader, eval_dataloader = fabric.setup_dataloaders(
         train_dataloader, eval_dataloader
@@ -152,7 +162,7 @@ def train(
     model.train()
     iter_loader = iter(train_dataloader)
     if fabric.is_global_zero:
-        _logger.info("Begin training")
+        _logger.info("Begin training.")
     epoch = 0
     training_start_time = time.time()
     for i in range(start_iter, cfg.num_steps):
@@ -166,11 +176,12 @@ def train(
             iter_loader = iter(train_dataloader)
             batch = next(iter_loader)
 
-        batch = unpack_sparse_tensors(batch)
         loss_dict, _ = model(batch)
         total_loss = loss_dict["loss"]
         fabric.backward(total_loss)
         fabric.clip_gradients(model, optimizer, cfg.max_grad_norm)
+        if cfg.ddp.find_unused_parameters:
+            __debug_find_unused_parameters(model)
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()

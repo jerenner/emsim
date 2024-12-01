@@ -6,6 +6,7 @@ import MinkowskiEngine as ME
 from MinkowskiEngine.MinkowskiNonlinearity import MinkowskiNonlinearityBase
 
 
+@torch.compiler.disable
 def torch_sparse_to_minkowski(tensor: Tensor):
     assert isinstance(tensor, Tensor)
     assert tensor.is_sparse

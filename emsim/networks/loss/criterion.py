@@ -19,6 +19,7 @@ from .matcher import HungarianMatcher
 from ...utils.sparse_utils import (
     gather_from_sparse_tensor,
     union_sparse_indices,
+    minkowski_to_torch_sparse,
     sparse_squeeze_dense_dim,
 )
 from ...utils.batching_utils import split_batch_concatted_tensor
@@ -334,10 +335,16 @@ class EMCriterion(nn.Module):
             unioned_predicted.values(), unioned_true.values()
         )
         if update_metrics:
-            self.train_metrics["mask_classification"].update(
-                unioned_predicted.values(), unioned_true.values().bool().int()
-            )
+            self.__update_mask_class_metric(unioned_predicted, unioned_true)
         return loss
+
+    @torch.compiler.disable
+    def __update_mask_class_metric(
+        self, unioned_predicted: Tensor, unioned_true: Tensor
+    ):
+        self.train_metrics["mask_classification"].update(
+            unioned_predicted.values(), unioned_true.values().bool().int()
+        )
 
     def compute_mask_dice_loss(
         self,
@@ -408,7 +415,14 @@ class EMCriterion(nn.Module):
         target_dict: dict[str, Tensor],
     ):
         predicted_foreground_masks = [
-            spconv_to_torch_sparse(mask, squeeze=True)
+            sparse_squeeze_dense_dim(
+                minkowski_to_torch_sparse(
+                    mask,
+                    full_scale_spatial_shape=target_dict["image_size_pixels_rc"].max(0)[
+                        0
+                    ],
+                )
+            )
             for mask in predicted_dict["score_dict"]["score_feature_maps"]
         ]
 

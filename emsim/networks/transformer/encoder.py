@@ -1,10 +1,10 @@
 import copy
 from typing import Union, Optional
-import spconv.pytorch as spconv
 import numpy as np
 
 from torch import Tensor, nn
 import torch
+import MinkowskiEngine as ME
 
 from emsim.networks.transformer.blocks import (
     FFNBlock,
@@ -15,7 +15,7 @@ from emsim.networks.transformer.blocks import (
 from emsim.networks.positional_encoding import FourierEncoding
 from emsim.networks.positional_encoding import ij_indices_to_normalized_xy
 from emsim.utils.sparse_utils import (
-    spconv_to_torch_sparse,
+    minkowski_to_torch_sparse,
     gather_from_sparse_tensor,
     scatter_to_sparse_tensor,
     linearize_sparse_and_index_tensors,
@@ -140,8 +140,8 @@ class EMTransformerEncoder(nn.Module):
 
     def forward(
         self,
-        feature_maps: list[spconv.SparseConvTensor],
-        position_encoding: list[spconv.SparseConvTensor],
+        feature_maps: list[ME.SparseTensor],
+        position_encoding: list[ME.SparseTensor],
         spatial_shapes: Tensor,
         token_salience_scores: list[Tensor],  # foreground scores
         token_ij_level_indices: list[Tensor],
@@ -149,8 +149,8 @@ class EMTransformerEncoder(nn.Module):
         token_layer_subset_indices: list[Tensor],
     ):
         # stack the spconv tensors over the batch dimension for faster indexing
-        stacked_feature_maps = self.stack_sparse_tensors(feature_maps)
-        stacked_pos_encodings = self.stack_sparse_tensors(position_encoding)
+        stacked_feature_maps = self.stack_sparse_tensors(feature_maps, spatial_shapes[-1])
+        stacked_pos_encodings = self.stack_sparse_tensors(position_encoding, spatial_shapes[-1])
         for layer_index, layer in enumerate(self.layers):
             indices_for_layer = [
                 indices[layer_index] for indices in token_layer_subset_indices
@@ -247,11 +247,11 @@ class EMTransformerEncoder(nn.Module):
         return stacked_feature_maps
 
     @staticmethod
-    def stack_sparse_tensors(tensor_list: list[spconv.SparseConvTensor]):
+    def stack_sparse_tensors(tensor_list: list[ME.SparseTensor], full_scale_spatial_shape: Tensor):
         converted_tensors = [
             (
-                spconv_to_torch_sparse(tensor)
-                if isinstance(tensor, spconv.SparseConvTensor)
+                minkowski_to_torch_sparse(tensor, full_scale_spatial_shape)
+                if isinstance(tensor, ME.SparseTensor)
                 else tensor
             )
             for tensor in tensor_list

@@ -1,3 +1,4 @@
+import torch
 from torch import nn, Tensor
 import MinkowskiEngine as ME
 from typing import Optional, Union
@@ -6,6 +7,7 @@ from .blocks import MinkowskiSparseResnetV2Stage
 from ....utils.sparse_utils import torch_sparse_to_minkowski
 
 
+@torch.compiler.disable
 class MinkowskiSparseResnetV2(nn.Module):
     def __init__(
         self,

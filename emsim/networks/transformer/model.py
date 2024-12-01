@@ -1,27 +1,29 @@
+from typing import Union, Optional
+
 import numpy as np
-import spconv.pytorch as spconv
 import torch
 import torchvision
+import spconv.pytorch as spconv
 from spconv.pytorch import functional as Fsp
 from torch import Tensor, nn
+import MinkowskiEngine as ME
 
 from emsim.networks.positional_encoding import (
     ij_indices_to_normalized_xy,
     normalized_xy_of_stacked_feature_maps,
 )
 from emsim.networks.transformer.std_dev_head import StdDevHead
-
 from ...utils.batching_utils import split_batch_concatted_tensor
 from ...utils.misc_utils import inverse_sigmoid
 from ...utils.sparse_utils import (
     batch_offsets_from_sparse_tensor_indices,
-    spconv_sparse_mult,
 )
-from ..salience_mask_predictor import SpconvSparseMaskPredictor
 from ..positional_encoding import FourierEncoding
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
 from ..segmentation_map import SegmentationMapPredictor, PatchedSegmentationMapPredictor
+from ..salience_mask_predictor import SpconvSparseMaskPredictor
+from ..me_salience_mask_predictor import MESparseMaskPredictor
 
 
 class EMTransformer(nn.Module):
@@ -32,7 +34,7 @@ class EMTransformer(nn.Module):
         dim_feedforward: int,
         n_feature_levels: int,
         n_deformable_points: int,
-        backbone_indice_keys: list[str],
+        backbone_indice_keys: Optional[list[str]] = None,
         dropout: float = 0.1,
         activation_fn="gelu",
         norm_first: bool = True,
@@ -45,10 +47,17 @@ class EMTransformer(nn.Module):
         n_query_embeddings: int = 1000,
         decoder_look_forward_twice: bool = True,
         decoder_detach_updated_positions: bool = True,
+        sparse_library: str = "minkowskiengine",
+        dimension: int = 2,
     ):
         super().__init__()
         self.two_stage_num_proposals = n_query_embeddings
-        self.salience_mask_predictor = SpconvSparseMaskPredictor(d_model, d_model)
+        if sparse_library == "spconv":
+            self.salience_mask_predictor = SpconvSparseMaskPredictor(d_model, d_model)
+        elif sparse_library == "minkowskiengine":
+            self.salience_mask_predictor = MESparseMaskPredictor(d_model, d_model)
+        else:
+            raise ValueError(f"Unrecognized sparse_library: `{sparse_library=}`")
         self.pos_embedding = FourierEncoding(3, d_model, dtype=torch.double)
         self.n_levels = n_feature_levels
         self.classification_head = nn.Linear(d_model, 1)
@@ -81,12 +90,26 @@ class EMTransformer(nn.Module):
         self.segmentation_head = PatchedSegmentationMapPredictor(d_model)
         self.std_head = StdDevHead(d_model)
 
-        self.salience_unpoolers = nn.ModuleList(
-            [
-                spconv.SparseInverseConv2d(1, 1, 3, indice_key=key)
-                for key in backbone_indice_keys[::-1]
-            ]
-        )
+        if sparse_library == "spconv":
+            self.salience_unpoolers = nn.ModuleList(
+                [
+                    spconv.SparseInverseConv2d(1, 1, 3, indice_key=key)
+                    for key in backbone_indice_keys[::-1]
+                ]
+            )
+        elif sparse_library == "minkowskiengine":
+            self.salience_unpoolers = nn.ModuleList(
+                [
+                    torch.compiler.disable(
+                        ME.MinkowskiConvolutionTranspose(
+                            1, 1, 3, stride=2, dimension=dimension
+                        )
+                    )
+                    for _ in range(len(level_filter_ratio) - 1)
+                ]
+            )
+        else:
+            raise ValueError(f"Unrecognized sparse_library: `{sparse_library=}`")
         self.register_buffer("level_filter_ratio", torch.tensor(level_filter_ratio))
         self.register_buffer("layer_filter_ratio", torch.tensor(layer_filter_ratio))
         self.encoder_max_tokens = encoder_max_tokens
@@ -129,22 +152,28 @@ class EMTransformer(nn.Module):
         self.decoder.reset_parameters()
         self.segmentation_head.reset_parameters()
 
-    def forward(self, encoded_features: list[spconv.SparseConvTensor]):
+    def forward(
+        self,
+        encoded_features: list[ME.SparseTensor],
+        image_size: Optional[Union[Tensor, list[int]]],
+    ):
         assert len(encoded_features) == self.n_levels
 
-        pos_embed = self.get_position_encoding(encoded_features)
+        pos_embed = self.get_position_encoding(encoded_features, image_size)
         pos_embed = [p.to(encoded_features[0].features.dtype) for p in pos_embed]
         pos_embed = [
-            spconv.SparseConvTensor(
-                pos, feat.indices, feat.spatial_shape, feat.batch_size
+            ME.SparseTensor(
+                pos,
+                coordinate_map_key=feat.coordinate_map_key,
+                coordinate_manager=feat.coordinate_manager,
             )
             for pos, feat in zip(pos_embed, encoded_features)
         ]
 
         feat_plus_pos_embed = [
-            Fsp.sparse_add(feat, pos) for feat, pos in zip(encoded_features, pos_embed)
+            feat + pos for feat, pos in zip(encoded_features, pos_embed)
         ]
-        score_dict = self.level_wise_salience_filtering(feat_plus_pos_embed)
+        score_dict = self.level_wise_salience_filtering(feat_plus_pos_embed, image_size)
 
         encoder_out = self.encoder(
             encoded_features,
@@ -269,71 +298,81 @@ class EMTransformer(nn.Module):
             score_dict,
         )
 
-    def get_position_encoding(self, encoded_features: list[spconv.SparseConvTensor]):
-        spatial_sizes = [
-            encoded.indices.new_tensor(encoded.spatial_shape)
-            for encoded in encoded_features
-        ]
-        ij_indices = [encoded.indices[:, 1:] for encoded in encoded_features]
-        normalized_xy = [
-            ij_indices_to_normalized_xy(ij, ss)
-            for ij, ss in zip(ij_indices, spatial_sizes)
-        ]
+    def get_position_encoding(
+        self,
+        encoded_features: Union[list[spconv.SparseConvTensor], list[ME.SparseTensor]],
+        full_spatial_shape: Optional[Tensor],
+    ):
+        if isinstance(encoded_features[0], spconv.SparseConvTensor):
+            spatial_sizes = [
+                encoded.indices.new_tensor(encoded.spatial_shape)
+                for encoded in encoded_features
+            ]
+            ij_indices = [encoded.indices[:, 1:] for encoded in encoded_features]
+            normalized_xy = [
+                ij_indices_to_normalized_xy(ij, ss)
+                for ij, ss in zip(ij_indices, spatial_sizes)
+            ]
+        elif isinstance(encoded_features[0], ME.SparseTensor):
+            ij_indices = [encoded.C[:, 1:] for encoded in encoded_features]
+            normalized_xy = [
+                ij_indices_to_normalized_xy(ij, full_spatial_shape) for ij in ij_indices
+            ]
+        else:
+            raise ValueError(
+                "Expected features to be either spconv.SparseConvTensor or "
+                f"MinkowskiEngine.SparseTensor, got {type(encoded_features[0])}"
+            )
 
         normalized_x_y_level = [
             torch.cat(
-                [xy, xy.new_full([xy.shape[0], 1], i / (len(encoded_features)) - 1)], -1
+                [xy, xy.new_full([xy.shape[0], 1], i / (len(encoded_features) - 1))], -1
             )
             for i, xy in enumerate(normalized_xy)
         ]
 
-        batch_offsets = np.cumsum([pos.shape[0] for pos in normalized_x_y_level])[:-1]
+        batch_offsets = torch.cumsum(
+            torch.tensor([pos.shape[0] for pos in normalized_x_y_level]), 0
+        )[:-1]
         stacked_pos = torch.cat(normalized_x_y_level, 0)
         embedding = self.pos_embedding(stacked_pos)
-        embedding = torch.tensor_split(embedding, batch_offsets.tolist(), 0)
+        embedding = torch.tensor_split(embedding, batch_offsets, 0)
         return embedding
 
-    def level_wise_salience_filtering(self, features: list[spconv.SparseConvTensor]):
-        sorted_features = sorted(features, key=lambda x: x.spatial_size)
-        batch_size = sorted_features[0].batch_size
+    def level_wise_salience_filtering(
+        self, features: list[ME.SparseTensor], full_spatial_shape: Tensor
+    ):
+        batch_size = len(features[0].decomposition_permutations)
 
-        token_nums = torch.stack(
+        token_nums = torch.tensor(
             [
-                torch.unique(feat.indices[:, 0], return_counts=True)[1]
+                [dp.shape[0] for dp in feat.decomposition_permutations]
                 for feat in features
             ],
-            dim=1,
-        )
-        assert token_nums.shape[0] == features[0].batch_size
+            device=features[0].device,
+        ).T
+        assert token_nums.shape == (batch_size, len(features))
 
         score = None
         scores = []
         spatial_shapes = []
         selected_scores = [[] for _ in range(batch_size)]
-        selected_ij_indices = [[] for _ in range(batch_size)]
+        selected_bijl_indices = [[] for _ in range(batch_size)]
         selected_normalized_xy = [[] for _ in range(batch_size)]
         selected_level_indices = [[] for _ in range(batch_size)]
-        for level_index, feature_map in enumerate(sorted_features):
-            spatial_shape = torch.tensor(
-                feature_map.spatial_shape, device=feature_map.features.device
-            )
+        for level_index, feature_map in enumerate(features):
             if level_index > 0:
                 upsampler = self.salience_unpoolers[level_index - 1]
                 alpha = self.alpha[level_index - 1]
                 upsampled_score = upsampler(score)
-                upsampled_score = upsampled_score.replace_feature(
-                    upsampled_score.features * alpha
-                )
-                map_times_upsampled = spconv_sparse_mult(feature_map, upsampled_score)
-                feature_map = Fsp.sparse_add(feature_map, map_times_upsampled)
+                upsampled_score = upsampled_score * alpha
+                map_times_upsampled = feature_map * upsampled_score
+                feature_map = feature_map + map_times_upsampled
 
-            score = self.salience_mask_predictor(feature_map)
+            score: ME.SparseTensor = self.salience_mask_predictor(feature_map)
 
             # get the indices of each batch element's entries in the sparse values
-            batch_element_indices = [
-                (score.indices[:, 0] == i).nonzero().squeeze(1)
-                for i in range(score.batch_size)
-            ]
+            batch_element_indices = score.decomposition_permutations
             token_counts = torch.tensor(
                 [b.numel() for b in batch_element_indices],
                 device=self.level_filter_ratio.device,
@@ -342,10 +381,14 @@ class EMTransformer(nn.Module):
                 token_counts * self.level_filter_ratio[level_index]
             ).int()
 
-            score_values_split = [
-                score.features[i].squeeze(1) for i in batch_element_indices
+            score_values_split = [score.F[i].squeeze(1) for i in batch_element_indices]
+            score_bij_indices_split = [score.C[i] for i in batch_element_indices]
+
+            # scale indices by tensor stride
+            score_bij_indices_split = [
+                indices // indices.new_tensor([1, *score.tensor_stride])
+                for indices in score_bij_indices_split
             ]
-            score_ij_indices_split = [score.indices[i] for i in batch_element_indices]
 
             # take top k elements for each batch element for this level
             top_elements = [
@@ -356,40 +399,42 @@ class EMTransformer(nn.Module):
             selected_scores_by_batch, selected_inds_by_batch = [
                 list(i) for i in zip(*top_elements)
             ]
-            selected_ij_indices_by_batch: list[Tensor] = [
+            selected_bij_indices_by_batch: list[Tensor] = [
                 spatial_indices[batch_indices]
                 # spatial_indices[batch_indices, 1:]
                 for spatial_indices, batch_indices in zip(
-                    score_ij_indices_split, selected_inds_by_batch
+                    score_bij_indices_split, selected_inds_by_batch
                 )
             ]
             selected_normalized_xy_positions_by_batch = [
-                ij_indices_to_normalized_xy(ij_indices[:, 1:], spatial_shape)
-                for ij_indices in selected_ij_indices_by_batch
+                ij_indices_to_normalized_xy(ij_indices[:, 1:], full_spatial_shape)
+                for ij_indices in selected_bij_indices_by_batch
             ]
             # append level index as a z dimension
-            selected_ij_indices_by_batch = [
+            selected_bij_indices_by_batch = [
                 torch.cat(
                     [
-                        ij_indices,
-                        ij_indices.new_full([ij_indices.shape[0], 1], level_index),
+                        bij_indices,
+                        bij_indices.new_full([bij_indices.shape[0], 1], level_index),
                     ],
                     dim=1,
                 )
-                for ij_indices in selected_ij_indices_by_batch
+                for bij_indices in selected_bij_indices_by_batch
             ]
 
             scores.append(score)
-            spatial_shapes.append(spatial_shape)
+            spatial_shapes.append(
+                full_spatial_shape // full_spatial_shape.new_tensor(score.tensor_stride)
+            )
             for i in range(batch_size):
                 selected_scores[i].append(selected_scores_by_batch[i])
                 selected_normalized_xy[i].append(
                     selected_normalized_xy_positions_by_batch[i]
                 )
-                selected_ij_indices[i].append(selected_ij_indices_by_batch[i])
+                selected_bijl_indices[i].append(selected_bij_indices_by_batch[i])
                 selected_level_indices[i].append(
-                    selected_ij_indices_by_batch[i].new_full(
-                        [selected_ij_indices_by_batch[i].shape[0]], level_index
+                    selected_bij_indices_by_batch[i].new_full(
+                        [selected_bij_indices_by_batch[i].shape[0]], level_index
                     )
                 )
 
@@ -398,8 +443,8 @@ class EMTransformer(nn.Module):
         selected_normalized_xy = [
             torch.cat(positions_b) for positions_b in selected_normalized_xy
         ]
-        selected_ij_indices = [
-            torch.cat(indices_b, 0) for indices_b in selected_ij_indices
+        selected_bijl_indices = [
+            torch.cat(indices_b, 0) for indices_b in selected_bijl_indices
         ]
         selected_level_indices = [
             torch.cat(indices_b, 0) for indices_b in selected_level_indices
@@ -438,7 +483,7 @@ class EMTransformer(nn.Module):
             # "selected_token_ij_level_indices": torch.nested.as_nested_tensor(
             #     selected_ij_indices
             # ),
-            "selected_token_ij_level_indices": selected_ij_indices,
+            "selected_token_ij_level_indices": selected_bijl_indices,
             # "selected_token_level_indices": torch.nested.as_nested_tensor(
             #     selected_level_indices
             # ),

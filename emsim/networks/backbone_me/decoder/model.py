@@ -1,3 +1,4 @@
+import torch
 from torch import nn, Tensor
 import MinkowskiEngine as ME
 
@@ -8,7 +9,7 @@ from .blocks import (
     MinkowskiSparseInverseResnetV2Stage,
 )
 
-
+@torch.compiler.disable
 class MinkowskiSparseUnetDecoder(nn.Module):
     def __init__(
         self,

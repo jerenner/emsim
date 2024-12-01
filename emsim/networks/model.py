@@ -2,14 +2,20 @@ import spconv.pytorch as spconv
 import torch
 from omegaconf import DictConfig
 from torch import Tensor, nn
+import logging
 
 from ..utils.misc_utils import _get_layer
+from ..utils.sparse_utils.minkowskiengine import _get_me_layer
 from ..utils.sparse_utils import spconv_to_torch_sparse
 from .loss.criterion import EMCriterion
 from .loss.salience_criterion import ElectronSalienceCriterion
 from .sparse_resnet.unet import SparseResnetUnet
+from .backbone_me.unet import MinkowskiSparseResnetUnet
 from .transformer.model import EMTransformer
-from .value_encoder import ValueEncoder
+from .me_value_encoder import ValueEncoder
+
+
+_logger = logging.getLogger(__name__)
 
 
 class EMModel(nn.Module):
@@ -33,9 +39,15 @@ class EMModel(nn.Module):
 
     def forward(self, batch: dict):
         image = batch["image_sparsified"]
+        _logger.debug("Begin backbone")
         features = self.backbone(image)
         features = self.channel_uniformizer(features)
 
+        assert (
+            batch["image_size_pixels_rc"].unique(dim=0).shape[0] == 1
+        ), "Expected all images to be the same size"
+
+        _logger.debug("Begin transformer")
         (
             output_logits,
             output_positions,
@@ -47,7 +59,7 @@ class EMModel(nn.Module):
             encoder_positions,
             encoder_out,
             score_dict,
-        ) = self.transformer(features)
+        ) = self.transformer(features, batch["image_size_pixels_rc"][0])
 
         output = {
             "pred_logits": output_logits[-1],
@@ -85,6 +97,7 @@ class EMModel(nn.Module):
                         output_queries[:-1],
                     )
                 ]
+            _logger.debug("Begin loss calculation")
             return self.compute_loss(batch, output)
 
         return output
@@ -96,16 +109,14 @@ class EMModel(nn.Module):
 
     @classmethod
     def from_config(cls, cfg: DictConfig):
-        backbone = SparseResnetUnet(
+        backbone = MinkowskiSparseResnetUnet(
             encoder_layers=cfg.unet.encoder.layers,
             decoder_layers=cfg.unet.decoder.layers,
             encoder_channels=cfg.unet.encoder.channels,
             decoder_channels=cfg.unet.decoder.channels,
             stem_channels=cfg.unet.stem_channels,
-            act_layer=_get_layer(cfg.unet.act_layer),
-            norm_layer=_get_layer(cfg.unet.norm_layer),
-            encoder_drop_path_rate=cfg.unet.encoder.drop_path_rate,
-            decoder_drop_path_rate=cfg.unet.decoder.drop_path_rate,
+            act_layer=_get_me_layer(cfg.unet.act_layer),
+            norm_layer=_get_me_layer(cfg.unet.norm_layer),
         )
         channel_uniformizer = ValueEncoder(
             [info["num_chs"] for info in backbone.feature_info], cfg.transformer.d_model
@@ -116,7 +127,6 @@ class EMModel(nn.Module):
             dim_feedforward=cfg.transformer.dim_feedforward,
             n_feature_levels=len(backbone.feature_info),
             n_deformable_points=cfg.transformer.n_deformable_points,
-            backbone_indice_keys=backbone.downsample_indice_keys,
             dropout=cfg.transformer.dropout,
             activation_fn=_get_layer(cfg.transformer.activation_fn),
             n_encoder_layers=cfg.transformer.encoder_layers,

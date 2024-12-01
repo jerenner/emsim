@@ -7,6 +7,7 @@ import MinkowskiEngine as ME
 from emsim.utils.sparse_utils import MinkowskiGELU, MinkowskiLayerNorm
 
 
+@torch.compiler.disable
 class MESparseMaskPredictor(nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int, dimension: int = 2):
         super().__init__()

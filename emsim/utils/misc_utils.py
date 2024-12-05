@@ -1,15 +1,22 @@
 import numpy as np
-from typing import Any, List, Union
+from typing import Any, List, Union, Optional
 
 import torch
 from torch import nn
 
 
-def random_chunks(x: List[Any], min_size: int, max_size: int):
+def random_chunks(
+    x: List[Any],
+    min_size: int,
+    max_size: int,
+    rng: Optional[np.random.Generator] = None,
+):
     if min_size == max_size:
         chunk_sizes = np.full(shape=[len(x) // min_size], fill_value=min_size)
     else:
-        chunk_sizes = np.random.randint(min_size, max_size, size=len(x) // min_size)
+        if rng is None:
+            rng = np.random.default_rng()
+        chunk_sizes = rng.integers(min_size, max_size, size=len(x) // min_size)
     chunk_sizes = np.concatenate([[0], chunk_sizes], 0)
     start_indices = np.cumsum(chunk_sizes)
     chunked = [

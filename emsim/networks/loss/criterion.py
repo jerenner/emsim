@@ -48,6 +48,7 @@ class EMCriterion(nn.Module):
         aux_loss_use_final_matches=False,
         aux_loss_weight=1.0,
         n_aux_losses: int = 0,
+        detach_likelihood_mean: bool = False
     ):
         super().__init__()
         self.loss_coef_class = loss_coef_class
@@ -61,6 +62,7 @@ class EMCriterion(nn.Module):
         self.aux_loss = use_aux_loss
         self.aux_loss_use_final_matches = aux_loss_use_final_matches
         self.aux_loss_weight = aux_loss_weight
+        self.detach_likelihood_mean = detach_likelihood_mean
 
         self.salience_criterion = ElectronSalienceCriterion(
             salience_alpha, salience_gamma
@@ -369,7 +371,6 @@ class EMCriterion(nn.Module):
             den_sum = den_i.coalesce().values().sum()
             losses.append(1 - (num_sum + 1) / (den_sum + 1))
         loss = torch.stack(losses).mean()
-        # loss.register_hook(lambda x: print("dice loss"))
         return loss
 
     def get_distance_nll_loss(
@@ -379,6 +380,8 @@ class EMCriterion(nn.Module):
         true_incidence_points: Tensor,
         image_size_per_query: Tensor,
     ) -> Tensor:
+        if self.detach_likelihood_mean:
+            pred_centers = pred_centers.detach()
         loss = -torch.distributions.MultivariateNormal(
             pred_centers * image_size_per_query, scale_tril=pred_std_cholesky
         ).log_prob(true_incidence_points * image_size_per_query)
@@ -394,6 +397,8 @@ class EMCriterion(nn.Module):
         true_incidence_points: Tensor,
         image_size_per_query: Tensor,
     ) -> Tensor:
+        if self.detach_likelihood_mean:
+            pred_centers = pred_centers.detach()
         loss = torch.distributions.MultivariateNormal(
             pred_centers * image_size_per_query, scale_tril=pred_std_cholesky
         ).log_prob(true_incidence_points * image_size_per_query)
@@ -478,7 +483,7 @@ class EMCriterion(nn.Module):
                 if isinstance(v, MetricCollection):
                     out.update(flatten_metrics(v))
                 else:
-                    out[k] = v.compute().item()
+                    out[k] = v.compute()
             return out
 
         log_dict = {}

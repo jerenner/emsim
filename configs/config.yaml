@@ -47,6 +47,7 @@ criterion:
   loss_coef_incidence_nll: 0.1
   loss_coef_incidence_likelihood: 10.0
   loss_coef_incidence_huber: 100.0
+  detach_likelihood_mean: false
   salience:
     alpha: 0.25
     gamma: 2.0
@@ -55,6 +56,7 @@ dataset:
   directory: "./data"
   # pixels_file: "pixelated_5um_tracks_thinned_4um_back_20k_300keV.txt"
   pixels_file: "pixelated_5um_tracks_thinned_4um_back_1M_300keV.txt"
+  num_workers: 6
   train_percentage: 0.95
   events_per_image_range: [100, 200]
   noise_std: 1.0

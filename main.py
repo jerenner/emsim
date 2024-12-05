@@ -12,6 +12,8 @@ import logging
 import torch
 from torch import Tensor, nn
 
+import MinkowskiEngine as ME
+
 import lightning as L
 from lightning.fabric import Fabric
 from lightning.fabric.strategies import DDPStrategy
@@ -34,11 +36,16 @@ from emsim.geant.dataset import (
     GeantElectronDataset,
     make_test_train_datasets,
     electron_collate_fn,
+    worker_init_fn,
 )
+from emsim.geant.io import convert_electron_pixel_file_to_hdf5
 from emsim.preprocessing import NSigmaSparsifyTransform
 
 
 _logger = logging.getLogger(__name__)
+
+# torch._dynamo.config.capture_scalar_outputs = True
+torch.set_float32_matmul_precision("high")
 
 
 @hydra.main(version_base=None, config_path="./configs", config_name="config")
@@ -76,15 +83,25 @@ def main(cfg: DictConfig):
     fabric.seed_everything(cfg.seed + fabric.global_rank)
     fabric.launch()
     model = EMModel.from_config(cfg)
+    if cfg.unet.convert_sync_batch_norm and fabric.world_size > 1:
+        model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
     if cfg.compile:
         if fabric.is_global_zero:
             _logger.info("torch.compile-ing model...")
         model = torch.compile(model, dynamic=True)
 
-    if fabric.is_global_zero:
-        _logger.info("Making datasets...")
+    electron_hdf_file = os.path.join(
+        cfg.dataset.directory, os.path.splitext(cfg.dataset.pixels_file)[0] + ".hdf5"
+    )
+    if not os.path.exists(electron_hdf_file):
+        if fabric.is_global_zero:
+            pixels_file = os.path.join(cfg.dataset.directory, cfg.dataset.pixels_file)
+            _logger.info(f"Converting {pixels_file} to {electron_hdf_file}...")
+            convert_electron_pixel_file_to_hdf5(pixels_file, electron_hdf_file)
+            _logger.info("Done converting.")
+    fabric.barrier()
     train_dataset, eval_dataset = make_test_train_datasets(
-        pixels_file=os.path.join(cfg.dataset.directory, cfg.dataset.pixels_file),
+        electron_hdf_file=electron_hdf_file,
         events_per_image_range=cfg.dataset.events_per_image_range,
         pixel_patch_size=cfg.dataset.pixel_patch_size,
         hybrid_sparse_tensors=False,
@@ -95,22 +112,23 @@ def main(cfg: DictConfig):
             cfg.dataset.pixel_patch_size,
             max_pixels_to_keep=cfg.dataset.max_pixels_to_keep,
         ),
+        shared_shuffle_seed=cfg.seed,
     )
-    if fabric.is_global_zero:
-        _logger.info("Making dataloaders...")
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         cfg.batch_size,
         collate_fn=electron_collate_fn,
         pin_memory=True,
-        num_workers=1,
+        num_workers=cfg.dataset.num_workers,
+        worker_init_fn=worker_init_fn,
     )
     eval_dataloader = torch.utils.data.DataLoader(
         eval_dataset,
         cfg.batch_size,
         collate_fn=electron_collate_fn,
         pin_memory=True,
-        num_workers=1,
+        num_workers=cfg.dataset.num_workers,
+        worker_init_fn=worker_init_fn,
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
@@ -121,8 +139,6 @@ def main(cfg: DictConfig):
     )
 
     ## prepare fabric
-    if fabric.is_global_zero:
-        _logger.info("Setting up distributed...")
     model, optimizer = fabric.setup(model, optimizer)
     train_dataloader, eval_dataloader = fabric.setup_dataloaders(
         train_dataloader, eval_dataloader
@@ -158,7 +174,7 @@ def train(
     start_iter: int = 0,
 ):
     ## main training loop
-    iter_time = RunningMean(cfg.print_interval).to(fabric.device)
+    iter_timer = RunningMean(cfg.print_interval).to(fabric.device)
     model.train()
     iter_loader = iter(train_dataloader)
     if fabric.is_global_zero:
@@ -180,8 +196,8 @@ def train(
         total_loss = loss_dict["loss"]
         fabric.backward(total_loss)
         fabric.clip_gradients(model, optimizer, cfg.max_grad_norm)
-        if cfg.ddp.find_unused_parameters:
-            __debug_find_unused_parameters(model)
+        # if cfg.ddp.find_unused_parameters:
+        #     __debug_find_unused_parameters(model)
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()
@@ -195,11 +211,13 @@ def train(
             log_str = model.criterion.make_log_str(metric_log_dict)
             elapsed_time = time.time() - training_start_time
             elapsed_time_str = _elapsed_time_str(elapsed_time)
+            iter_time = iter_timer.compute()
 
             log_str = f"Iter {i} (Epoch {epoch}) -- ({elapsed_time_str}) -- " + log_str
-            log_str = log_str + f" iter_time: {iter_time.compute()}\n"
+            log_str = log_str + f" iter_time: {iter_time}\n"
             if fabric.is_global_zero:
                 _logger.info(log_str)
+            metric_log_dict["iter_time"] = iter_time
             log_dict.update(metric_log_dict)
 
         log_dict = model.criterion.tensorboardify_keys(log_dict)
@@ -210,13 +228,13 @@ def train(
             eval(epoch, i, model, eval_dataloader, fabric)
             model.train()
 
-        iter_time.update(time.time() - t0)
+        iter_timer.update(time.time() - t0)
         # MinkowskiEngine says to clear the cache periodically
         if i > 0 and i % cfg.clear_cache_interval == 0:
             torch.cuda.empty_cache()
 
     if fabric.is_global_zero:
-        elapsed_time_str = _elapsed_time_str(elapsed_time)
+        elapsed_time_str = _elapsed_time_str(time.time() - training_start_time)
         _logger.info(f"Training complete in {elapsed_time_str}.")
 
 

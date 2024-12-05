@@ -1,16 +1,24 @@
+import os
 from math import ceil, floor
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple, Union
+import logging
 
 import numpy as np
 import sparse
+import h5py
 import torch
+from torch import Tensor
 import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 
 from emsim.dataclasses import BoundingBox, IonizationElectronPixel, PixelSet
 from emsim.geant.dataclasses import GeantElectron, Trajectory, GeantGridsize
-from emsim.geant.io import read_files
+from emsim.geant.io import (
+    read_files,
+    convert_electron_pixel_file_to_hdf5,
+    read_electrons_from_hdf,
+)
 from emsim.utils.misc_utils import (
     random_chunks,
 )
@@ -52,29 +60,32 @@ _SPARSE_CONCAT = []
 
 ELECTRON_IONIZATION_MEV = 3.6e-6
 
+_logger = logging.getLogger()
+
 
 def make_test_train_datasets(
-    pixels_file: str,
+    electron_hdf_file: str,
     events_per_image_range: tuple[int],
     pixel_patch_size: int = 5,
     hybrid_sparse_tensors: bool = True,
-    trajectory_file: Optional[str] = None,
     train_percentage: float = 0.95,
     processor: Callable = None,
     transform: Callable = None,
     noise_std: float = 1.0,
     shuffle: bool = True,
-    seed: Optional[int] = None,
+    shared_shuffle_seed: Optional[int] = None,
 ):
-    electrons = read_files(pixels_file=pixels_file, trajectory_file=trajectory_file)
-    assert 0 < train_percentage <= 1
-    train_test_split = int(len(electrons) * train_percentage)
-    train_electrons = electrons[:train_test_split]
-    test_electrons = electrons[train_test_split:]
+    with h5py.File(electron_hdf_file, "r") as file:
+        num_electrons = file["num_electrons"][()]
+    train_test_split = int(num_electrons * train_percentage)
+    electron_indices = np.arange(num_electrons)
+    train_indices = electron_indices[:train_test_split]
+    test_indices = electron_indices[train_test_split:]
 
-    if len(train_electrons) > 0:
+    if len(train_indices) > 0:
         train_dataset = GeantElectronDataset(
-            electrons=train_electrons,
+            electron_hdf_file=electron_hdf_file,
+            electron_indices=train_indices,
             events_per_image_range=events_per_image_range,
             pixel_patch_size=pixel_patch_size,
             hybrid_sparse_tensors=hybrid_sparse_tensors,
@@ -82,14 +93,15 @@ def make_test_train_datasets(
             transform=transform,
             noise_std=noise_std,
             shuffle=shuffle,
-            seed=seed,
+            shared_shuffle_seed=shared_shuffle_seed,
         )
     else:
         train_dataset = None
 
-    if len(test_electrons) > 0:
+    if len(test_indices) > 0:
         test_dataset = GeantElectronDataset(
-            electrons=test_electrons,
+            electron_hdf_file=electron_hdf_file,
+            electron_indices=test_indices,
             events_per_image_range=events_per_image_range,
             pixel_patch_size=pixel_patch_size,
             hybrid_sparse_tensors=hybrid_sparse_tensors,
@@ -97,7 +109,7 @@ def make_test_train_datasets(
             transform=transform,
             noise_std=noise_std,
             shuffle=False,
-            seed=seed,
+            shared_shuffle_seed=shared_shuffle_seed,
         )
     else:
         test_dataset = None
@@ -105,22 +117,30 @@ def make_test_train_datasets(
     return train_dataset, test_dataset
 
 
+def worker_init_fn(worker_id: int):
+    worker_info = torch.utils.data.get_worker_info()
+    dataset: GeantElectronDataset = worker_info.dataset
+    dataset._set_noise_source_seed(worker_info.seed)
+
+
 class GeantElectronDataset(IterableDataset):
     def __init__(
         self,
-        electrons: list[GeantElectron],
-        events_per_image_range: tuple[int],
+        electron_hdf_file: str,
+        electron_indices: np.ndarray,
+        events_per_image_range: tuple[int, int],
         pixel_patch_size: int = 5,
         hybrid_sparse_tensors: bool = True,
         processor: Callable = None,
         transform: Callable = None,
         noise_std: float = 1.0,
         shuffle: bool = True,
-        seed: Optional[int] = None,
+        shared_shuffle_seed: Optional[int] = None,
     ):
         self.hybrid_sparse_tensors = hybrid_sparse_tensors
-        self.electrons = electrons
-        self.grid = self.electrons[0].grid
+        self.electron_hdf_file = electron_hdf_file
+        self._electron_indices = electron_indices
+        self.grid = read_electrons_from_hdf(electron_hdf_file, [0])[0].grid
         self.pixel_to_mm = np.array(self.grid.pixel_size_um) / 1000
 
         assert len(events_per_image_range) == 2
@@ -132,16 +152,43 @@ class GeantElectronDataset(IterableDataset):
         self.shuffle = shuffle
         self.processor = processor
         self.transform = transform
-        self._rng = np.random.default_rng(seed=seed)
+        self._shuffler = np.random.default_rng(seed=shared_shuffle_seed)
+        self._noise_source = np.random.default_rng()
+
+    def _set_noise_source_seed(self, seed: int):
+        self._noise_source = np.random.default_rng(seed=seed)
 
     def __iter__(self):
-        elec_indices = list(range(len(self.electrons)))
-        if self.shuffle:
-            self._rng.shuffle(elec_indices)
-        chunks = random_chunks(elec_indices, *self.events_per_image_range)
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            worker_id = worker_info.id
+            num_workers = worker_info.num_workers
+            gpu_rank = torch.distributed.get_rank()
+            gpu_world_size = torch.distributed.get_world_size()
 
-        for chunk in chunks:
-            elecs: list[GeantElectron] = [self.electrons[i] for i in chunk]
+            total_worker_rank = worker_id + gpu_rank * num_workers
+            total_workers = num_workers * gpu_world_size
+
+        elec_indices = self._electron_indices.copy()
+        if self.shuffle:
+            self._shuffler.shuffle(elec_indices)
+
+        chunks = random_chunks(
+            elec_indices, *self.events_per_image_range, self._shuffler
+        )
+        num_chunks = len(chunks)
+        chunks_per_worker = int(num_chunks / total_workers)
+        this_worker_start = total_worker_rank * chunks_per_worker
+        this_worker_end = (total_worker_rank + 1) * chunks_per_worker
+        chunks_this_loader = chunks[this_worker_start:this_worker_end]
+        _logger.debug(
+            f"{total_worker_rank=}: {this_worker_start=}, {this_worker_end=}, {chunks_per_worker=}"
+        )
+
+        for chunk in chunks_this_loader:
+            elecs: list[GeantElectron] = read_electrons_from_hdf(
+                self.electron_hdf_file, chunk
+            )
             batch = {}
             batch["electron_ids"] = np.array([elec.id for elec in elecs], dtype=int)
             batch["batch_size"] = len(elecs)
@@ -269,6 +316,7 @@ class GeantElectronDataset(IterableDataset):
                 batch = self.transform(batch)
 
             yield batch
+        _logger.debug(f"End of epoch for worker {total_worker_rank}")
 
     def make_composite_image(
         self, stacked_sparse_arrays: sparse.SparseArray, noise_std: float = 0.0
@@ -277,7 +325,7 @@ class GeantElectronDataset(IterableDataset):
         image = summed.todense()
 
         if noise_std > 0:
-            image = image + self._rng.normal(
+            image = image + self._shuffler.normal(
                 0.0, self.noise_std, size=image.shape
             ).astype(image.dtype)
 

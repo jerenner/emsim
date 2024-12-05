@@ -9,13 +9,14 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor):
     return torch.tensor_split(tensor, batch_offsets[1:].cpu())
 
 
+@torch.compiler.disable
 def deconcat_add_batch_dim(tensor: Tensor, batch_offsets: Tensor, pad_value=0):
     assert batch_offsets.ndim == 1
-    if batch_offsets[-1] != len(tensor):
+    if batch_offsets[-1] != tensor.shape[0]:
         batch_offsets = torch.cat(
             [batch_offsets, batch_offsets.new_tensor([len(tensor)])]
         )
-    batchsize = len(batch_offsets) - 1
+    batchsize = batch_offsets.shape[0] - 1
     seq_lens = batch_offsets[1:] - batch_offsets[:-1]
     max_len = max(seq_lens)
     feature_dim = tensor.shape[-1]
@@ -38,6 +39,7 @@ def concatted_to_nested_tensor(tensor: Tensor, batch_offsets: Tensor):
     return torch.nested.as_nested_tensor(list(*split_tensor))
 
 
+@torch.compiler.disable
 def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] = None):
     batch_size = tensor.shape[0]
     max_len = tensor.shape[1]
@@ -48,9 +50,9 @@ def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] =
     batch_offsets = torch.cat(
         [nonpadded_batch_sizes.new_zeros([1]), nonpadded_batch_sizes.cumsum(-1)]
     ).to("cpu")
-    out = tensor.new_zeros(nonpadded_batch_sizes.sum().item(), *tensor.shape[2:])
+    out = tensor.new_zeros(torch.Size([nonpadded_batch_sizes.sum(), *tensor.shape[2:]]))
 
-    assert len(tensor) == len(batch_offsets[:-1])
+    assert tensor.shape[0] == len(batch_offsets[:-1])
 
     for b, (batch, nonpadded_size, batch_start_index, batch_end_index) in enumerate(
         zip(tensor, nonpadded_batch_sizes, batch_offsets[:-1], batch_offsets[1:])

@@ -8,6 +8,7 @@ from torch import nn, Tensor
 import MinkowskiEngine as ME
 
 
+@torch.compiler.disable
 class MinkowskiInverseSparseBottleneckV2(nn.Module):
     def __init__(
         self,

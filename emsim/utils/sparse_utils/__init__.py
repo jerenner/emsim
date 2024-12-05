@@ -36,22 +36,22 @@ __all__ = [
     "sparse_squeeze_dense_dim",
 ]
 
-try:
-    from .spconv import (
-        torch_sparse_to_spconv,
-        spconv_to_torch_sparse,
-        spconv_sparse_mult,
-    )
+# try:
+#     from .spconv import (
+#         torch_sparse_to_spconv,
+#         spconv_to_torch_sparse,
+#         spconv_sparse_mult,
+#     )
 
-    __all__.extend(
-        [
-            "torch_sparse_to_spconv",
-            "spconv_to_torch_sparse",
-            "spconv_sparse_mult",
-        ]
-    )
-except ImportError:
-    pass
+#     __all__.extend(
+#         [
+#             "torch_sparse_to_spconv",
+#             "spconv_to_torch_sparse",
+#             "spconv_sparse_mult",
+#         ]
+#     )
+# except ImportError:
+#     pass
 
 try:
     from .minkowskiengine import (

@@ -6,6 +6,7 @@ from typing import Optional
 from functools import partial
 
 
+@torch.compiler.disable
 class MinkowskiSparseBottleneckV2(nn.Module):
     def __init__(
         self,
@@ -26,7 +27,7 @@ class MinkowskiSparseBottleneckV2(nn.Module):
         super().__init__()
         self.stage_index = stage_index
         self.block_index = block_index
-        self.in_reduction = in_reduction or 2 **  stage_index
+        self.in_reduction = in_reduction or 2**stage_index
         self.out_reduction = out_reduction or self.in_reduction
         if act_layer == ME.MinkowskiReLU:
             act_layer = partial(act_layer, inplace=True)
@@ -136,3 +137,26 @@ class MinkowskiSparseResnetV2Stage(nn.Module):
     def forward(self, x):
         x = self.blocks(x)
         return x
+
+
+@torch.compiler.disable
+class MinkowskiStem(nn.Module):
+    def __init__(
+        self,
+        in_chans: int,
+        stem_channels: int,
+        kernel_size: int,
+        bias: bool,
+        dimension: int,
+    ):
+        super().__init__()
+        self.conv = ME.MinkowskiConvolution(
+            in_chans,
+            stem_channels,
+            kernel_size=kernel_size,
+            bias=bias,
+            dimension=dimension,
+        )
+
+    def forward(self, x):
+        return self.conv(x)

@@ -9,7 +9,7 @@ from .blocks import (
     MinkowskiSparseInverseResnetV2Stage,
 )
 
-@torch.compiler.disable
+# @torch.compiler.disable
 class MinkowskiSparseUnetDecoder(nn.Module):
     def __init__(
         self,

@@ -3,11 +3,11 @@ from torch import nn, Tensor
 import MinkowskiEngine as ME
 from typing import Optional, Union
 
-from .blocks import MinkowskiSparseResnetV2Stage
+from .blocks import MinkowskiSparseResnetV2Stage, MinkowskiStem
 from ....utils.sparse_utils import torch_sparse_to_minkowski
 
 
-@torch.compiler.disable
+# @torch.compiler.disable
 class MinkowskiSparseResnetV2(nn.Module):
     def __init__(
         self,
@@ -23,7 +23,7 @@ class MinkowskiSparseResnetV2(nn.Module):
     ):
         super().__init__()
         self.feature_info = []
-        self.stem = ME.MinkowskiConvolution(
+        self.stem = MinkowskiStem(
             in_chans,
             stem_channels,
             kernel_size=7,

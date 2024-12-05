@@ -85,37 +85,102 @@ def convert_electron_pixel_file_to_hdf5(pixels_file: str, h5_file: str, h5_mode=
     if len(electrons) == 0:
         raise ValueError(f"Found no valid electrons in file {pixels_file}")
     with h5py.File(h5_file, h5_mode) as file:
-        file.create_dataset("num_electrons", data=len(electrons), dtype=np.uint32)
-        first = electrons[0]
-        grid_group = file.create_group("grid")
-        for k, v in first.grid.__dict__.items():
-            grid_group.create_dataset(k, data=v, dtype=np.uint16)
-        for i, electron in enumerate(electrons):
-            group = file.create_group(str(i))
-            group["id"] = i
-            incidence_group = group.create_group("incidence")
-            for k, v in electron.incidence.__dict__.items():
-                incidence_group.create_dataset(k, data=v)
-            # group.create_dataset("id", data=electron.id)
-            # group.create_dataset("incidence/x", data=electron.incidence.x)
-            # group.create_dataset("incidence/y", data=electron.incidence.y)
-            # group.create_dataset("incidence/z", data=electron.incidence.z)
-            # group.create_dataset("incidence/e0", data=electron.incidence.e0)
+        file.create_dataset(
+            "id",
+            data=np.array([electron.id for electron in electrons], dtype=np.uint32),
+        )
 
-            pixel_group = group.create_group("pixels")
-            pixels: List[IonizationElectronPixel] = electron.pixels._pixels
-            pixel_group.create_dataset("x", data=np.array([p.x for p in pixels]))
-            pixel_group.create_dataset("y", data=np.array([p.y for p in pixels]))
-            pixel_group.create_dataset(
-                "ionization_electrons", data=np.array([p.data for p in pixels])
-            )
+        # grid data
+        grid_group = file.create_group("grid")
+        first = electrons[0]
+        for k, v in first.grid.__dict__.items():
+            grid_group.create_dataset(k, data=v)
+
+        # incidence point data
+        incidence = {
+            k: np.array([elec.incidence.__dict__[k] for elec in electrons])
+            for k in electrons[0].incidence.__dict__
+        }
+        incidence_group = file.create_group("incidence")
+        incidence_group.create_dataset("id", dtype=np.uint32, data=incidence["id"])
+        incidence_group.create_dataset("x", dtype=float, data=incidence["x"])
+        incidence_group.create_dataset("y", dtype=float, data=incidence["y"])
+        incidence_group.create_dataset("z", dtype=float, data=incidence["z"])
+        incidence_group.create_dataset("e0", dtype=float, data=incidence["e0"])
+
+        # pixels data
+        pixels_group = file.create_group("pixels")
+
+        def _pixels_data(electrons: list[GeantElectron], field: str, dtype=np.dtype):
+            return [
+                np.array([pixel.__dict__[field] for pixel in elec.pixels], dtype=dtype)
+                for elec in electrons
+            ]
+
+        pixels_group.create_dataset(
+            "x",
+            dtype=h5py.vlen_dtype(np.uint16),
+            data=_pixels_data(electrons, "x", np.uint16),
+        )
+        pixels_group.create_dataset(
+            "y",
+            dtype=h5py.vlen_dtype(np.uint16),
+            data=_pixels_data(electrons, "y", np.uint16),
+        )
+        pixels_group.create_dataset(
+            "ionization_electrons",
+            dtype=h5py.vlen_dtype(np.uint32),
+            data=_pixels_data(electrons, "ionization_electrons", np.uint32),
+        )
 
 
 def read_electrons_from_hdf(
-    h5_file: str, electron_ids: list[int]
+    h5_file: str, electron_ids: np.ndarray[int]
 ) -> list[GeantElectron]:
+    n_electrons = len(electron_ids)
+    sort_order = np.argsort(electron_ids)
+    unsort_order = np.argsort(sort_order)
     with h5py.File(h5_file, "r") as f:
-        electrons = [read_single_electron_from_hdf(f, id) for id in electron_ids]
+        grid_group = f["grid"]
+        grid = GeantGridsize(**{key: grid_group[key][()].item() for key in grid_group.keys()})
+
+        incidence = {
+            "id": np.zeros(n_electrons, dtype=np.uint32),
+            "x": np.zeros(n_electrons, dtype=float),
+            "y": np.zeros(n_electrons, dtype=float),
+            "z": np.zeros(n_electrons, dtype=float),
+            "e0": np.zeros(n_electrons, dtype=float),
+        }
+        for k, v in incidence.items():
+            v[sort_order] = f["incidence"][k][electron_ids[sort_order]]
+
+        pixels = {
+            k: f["pixels"][k][electron_ids[sort_order]][unsort_order]
+            for k in f["pixels"].keys()
+        }
+
+        electrons = []
+    for i, electron_id in enumerate(electron_ids):
+        incidence_i = IncidencePoint(**{key: incidence[key][i] for key in incidence})
+
+        pixels_i = {key: pixels[key][i] for key in pixels}
+        pixels_i = [
+            IonizationElectronPixel(x_i, y_i, elecs_i)
+            for x_i, y_i, elecs_i in zip(
+                pixels_i["x"], pixels_i["y"], pixels_i["ionization_electrons"]
+            )
+        ]
+
+        electrons.append(
+            GeantElectron(
+                id=int(electron_id),
+                incidence=incidence_i,
+                pixels=PixelSet(pixels_i),
+                grid=grid,
+                trajectory=None,
+            )
+        )
+
     return electrons
 
 

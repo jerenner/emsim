@@ -51,6 +51,7 @@ torch.set_float32_matmul_precision("high")
 @hydra.main(version_base=None, config_path="./configs", config_name="config")
 def main(cfg: DictConfig):
     _logger.setLevel(cfg.log_level)
+    _logger.info("Starting...")
     output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     if cfg.log_tensorboard:
         tb_logger = TensorBoardLogger(

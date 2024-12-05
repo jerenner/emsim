@@ -76,7 +76,7 @@ def make_test_train_datasets(
     shared_shuffle_seed: Optional[int] = None,
 ):
     with h5py.File(electron_hdf_file, "r") as file:
-        num_electrons = file["num_electrons"][()]
+        num_electrons = len(file["id"])
     train_test_split = int(num_electrons * train_percentage)
     electron_indices = np.arange(num_electrons)
     train_indices = electron_indices[:train_test_split]
@@ -140,7 +140,7 @@ class GeantElectronDataset(IterableDataset):
         self.hybrid_sparse_tensors = hybrid_sparse_tensors
         self.electron_hdf_file = electron_hdf_file
         self._electron_indices = electron_indices
-        self.grid = read_electrons_from_hdf(electron_hdf_file, [0])[0].grid
+        self.grid = read_electrons_from_hdf(electron_hdf_file, np.array([0]))[0].grid
         self.pixel_to_mm = np.array(self.grid.pixel_size_um) / 1000
 
         assert len(events_per_image_range) == 2

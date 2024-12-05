@@ -4,7 +4,7 @@ from torch import nn, Tensor
 import spconv.pytorch as spconv
 
 
-class ValueEncoder(nn.Module):
+class SpconvValueEncoder(nn.Module):
     def __init__(self, in_channels: list[int], out_channels: int):
         super().__init__()
         self.layers = nn.ModuleList(

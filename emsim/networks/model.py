@@ -1,4 +1,3 @@
-import spconv.pytorch as spconv
 import torch
 from omegaconf import DictConfig
 from torch import Tensor, nn
@@ -6,10 +5,8 @@ import logging
 
 from ..utils.misc_utils import _get_layer
 from ..utils.sparse_utils.minkowskiengine import _get_me_layer
-from ..utils.sparse_utils import spconv_to_torch_sparse
 from .loss.criterion import EMCriterion
 from .loss.salience_criterion import ElectronSalienceCriterion
-from .sparse_resnet.unet import SparseResnetUnet
 from .backbone_me.unet import MinkowskiSparseResnetUnet
 from .transformer.model import EMTransformer
 from .me_value_encoder import ValueEncoder
@@ -26,6 +23,7 @@ class EMModel(nn.Module):
         transformer: nn.Module,
         criterion: nn.Module,
         salience_criterion: nn.Module,
+        # denoising_generator: nn.Module,
     ):
         super().__init__()
 
@@ -34,6 +32,7 @@ class EMModel(nn.Module):
         self.transformer = transformer
         self.criterion = criterion
         self.salience_criterion = salience_criterion
+        # self.denoising_generator = denoising_generator
 
         self.aux_loss = getattr(self.criterion, "aux_loss", False)
 
@@ -156,6 +155,7 @@ class EMModel(nn.Module):
             aux_loss_use_final_matches=cfg.criterion.aux_loss.use_final_matches,
             aux_loss_weight=cfg.criterion.aux_loss.aux_loss_weight,
             n_aux_losses=cfg.transformer.decoder_layers - 1,
+            detach_likelihood_mean=cfg.criterion.detach_likelihood_mean,
         )
         salience_criterion = ElectronSalienceCriterion(
             alpha=cfg.criterion.salience.alpha, gamma=cfg.criterion.salience.gamma

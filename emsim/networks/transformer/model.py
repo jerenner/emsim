@@ -3,8 +3,6 @@ from typing import Union, Optional
 import numpy as np
 import torch
 import torchvision
-import spconv.pytorch as spconv
-from spconv.pytorch import functional as Fsp
 from torch import Tensor, nn
 import MinkowskiEngine as ME
 
@@ -22,7 +20,6 @@ from ..positional_encoding import FourierEncoding
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
 from ..segmentation_map import SegmentationMapPredictor, PatchedSegmentationMapPredictor
-from ..salience_mask_predictor import SpconvSparseMaskPredictor
 from ..me_salience_mask_predictor import MESparseMaskPredictor
 
 
@@ -53,6 +50,8 @@ class EMTransformer(nn.Module):
         super().__init__()
         self.two_stage_num_proposals = n_query_embeddings
         if sparse_library == "spconv":
+            from ..salience_mask_predictor import SpconvSparseMaskPredictor
+
             self.salience_mask_predictor = SpconvSparseMaskPredictor(d_model, d_model)
         elif sparse_library == "minkowskiengine":
             self.salience_mask_predictor = MESparseMaskPredictor(d_model, d_model)
@@ -91,6 +90,7 @@ class EMTransformer(nn.Module):
         self.std_head = StdDevHead(d_model)
 
         if sparse_library == "spconv":
+            import spconv.pytorch as spconv
             self.salience_unpoolers = nn.ModuleList(
                 [
                     spconv.SparseInverseConv2d(1, 1, 3, indice_key=key)
@@ -300,24 +300,25 @@ class EMTransformer(nn.Module):
 
     def get_position_encoding(
         self,
-        encoded_features: Union[list[spconv.SparseConvTensor], list[ME.SparseTensor]],
+        # encoded_features: Union[list[spconv.SparseConvTensor], list[ME.SparseTensor]],
+        encoded_features: list[ME.SparseTensor],
         full_spatial_shape: Optional[Tensor],
     ):
-        if isinstance(encoded_features[0], spconv.SparseConvTensor):
-            spatial_sizes = [
-                encoded.indices.new_tensor(encoded.spatial_shape)
-                for encoded in encoded_features
-            ]
-            ij_indices = [encoded.indices[:, 1:] for encoded in encoded_features]
-            normalized_xy = [
-                ij_indices_to_normalized_xy(ij, ss)
-                for ij, ss in zip(ij_indices, spatial_sizes)
-            ]
-        elif isinstance(encoded_features[0], ME.SparseTensor):
+        if isinstance(encoded_features[0], ME.SparseTensor):
             ij_indices = [encoded.C[:, 1:] for encoded in encoded_features]
             normalized_xy = [
                 ij_indices_to_normalized_xy(ij, full_spatial_shape) for ij in ij_indices
             ]
+        # elif isinstance(encoded_features[0], spconv.SparseConvTensor):
+        #     spatial_sizes = [
+        #         encoded.indices.new_tensor(encoded.spatial_shape)
+        #         for encoded in encoded_features
+        #     ]
+        #     ij_indices = [encoded.indices[:, 1:] for encoded in encoded_features]
+        #     normalized_xy = [
+        #         ij_indices_to_normalized_xy(ij, ss)
+        #         for ij, ss in zip(ij_indices, spatial_sizes)
+        #     ]
         else:
             raise ValueError(
                 "Expected features to be either spconv.SparseConvTensor or "

@@ -1,6 +1,5 @@
 import math
 
-import spconv.pytorch as spconv
 import torch
 from torch import Tensor, nn
 from torch.nn.init import constant_, xavier_uniform_

@@ -1,6 +1,5 @@
 from torch import Tensor, nn
 import torch
-import spconv.pytorch as spconv
 
 from emsim.networks.transformer.attn import SelfAttentionWithRoPE
 from emsim.networks.ms_deform_attn import SparseMSDeformableAttention

@@ -24,9 +24,7 @@ from transformers import get_cosine_schedule_with_warmup
 
 from emsim.networks import (
     EMModel,
-    SparseResnetUnet,
     EMTransformer,
-    ValueEncoder,
     ElectronSalienceCriterion,
     EMCriterion,
 )

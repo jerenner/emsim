@@ -63,7 +63,7 @@ def gaussian_profile(file_path, nframes, baseline, th_single_elec, plot_results=
     
     with h5py.File(file_path, 'r') as f0:
         data = f0['frames']
-        frames = data[0:nframes, :, :]
+        frames = data[0:nframes, :, :].astype('float32')
         
         # Subtract baseline and apply threshold
         sub_frames = frames - baseline

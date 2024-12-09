@@ -74,6 +74,7 @@ class SelfAttentionBlock(nn.Module):
                     query_with_pos_embed,
                     query,
                     key_padding_mask=pad_mask,
+                    need_weights=False,
                 )[0]
             )
         else:
@@ -83,6 +84,7 @@ class SelfAttentionBlock(nn.Module):
                     query_with_pos_embed,
                     query,
                     key_padding_mask=pad_mask,
+                    need_weights=False,
                 )[0]
             )
             query = self.norm(query)

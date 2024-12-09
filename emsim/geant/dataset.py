@@ -158,31 +158,40 @@ class GeantElectronDataset(IterableDataset):
     def _set_noise_source_seed(self, seed: int):
         self._noise_source = np.random.default_rng(seed=seed)
 
-    def __iter__(self):
+    def _set_total_worker_rank(self):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             worker_id = worker_info.id
-            num_workers = worker_info.num_workers
-            gpu_rank = torch.distributed.get_rank()
-            gpu_world_size = torch.distributed.get_world_size()
+            num_workers_per_gpu = worker_info.num_workers
+            if torch.distributed.is_initialized():
+                gpu_rank = torch.distributed.get_rank()
+                gpu_world_size = torch.distributed.get_world_size()
+            else:
+                gpu_rank = 0
+                gpu_world_size = 1
 
-            total_worker_rank = worker_id + gpu_rank * num_workers
-            total_workers = num_workers * gpu_world_size
+            self.total_worker_rank = worker_id + gpu_rank * num_workers_per_gpu
+            self.total_workers = num_workers_per_gpu * gpu_world_size
+        else:
+            self.total_workers = 1
+            self.total_worker_rank = 0
 
-        elec_indices = self._electron_indices.copy()
+    def __iter__(self):
+        self._set_total_worker_rank()
+        shuffled_elec_indices = self._electron_indices.copy()
         if self.shuffle:
-            self._shuffler.shuffle(elec_indices)
+            self._shuffler.shuffle(shuffled_elec_indices)
 
         chunks = random_chunks(
-            elec_indices, *self.events_per_image_range, self._shuffler
+            shuffled_elec_indices, *self.events_per_image_range, self._shuffler
         )
         num_chunks = len(chunks)
-        chunks_per_worker = int(num_chunks / total_workers)
-        this_worker_start = total_worker_rank * chunks_per_worker
-        this_worker_end = (total_worker_rank + 1) * chunks_per_worker
+        chunks_per_worker = int(num_chunks / self.total_workers)
+        this_worker_start = self.total_worker_rank * chunks_per_worker
+        this_worker_end = (self.total_worker_rank + 1) * chunks_per_worker
         chunks_this_loader = chunks[this_worker_start:this_worker_end]
         _logger.debug(
-            f"{total_worker_rank=}: {this_worker_start=}, {this_worker_end=}, {chunks_per_worker=}"
+            f"{self.total_worker_rank=}: {this_worker_start=}, {this_worker_end=}, {chunks_per_worker=}"
         )
 
         for chunk in chunks_this_loader:
@@ -270,9 +279,7 @@ class GeantElectronDataset(IterableDataset):
             batch["incidence_points_xy"] = incidence_points_xy.astype(np.float32)
             batch["normalized_incidence_points_xy"] = normalized_incidence_points_xy
             batch["incidence_points_pixels_rc"] = incidence_points_pixels_rc
-            batch["local_incidence_points_pixels_xy"] = (
-                local_incidence_points_pixels.astype(np.float32)
-            )
+            batch["local_incidence_points_pixels_xy"] = local_incidence_points_pixels
 
             # center of mass for each patch
             local_centers_of_mass_pixels = charge_2d_center_of_mass(patches)
@@ -316,7 +323,7 @@ class GeantElectronDataset(IterableDataset):
                 batch = self.transform(batch)
 
             yield batch
-        _logger.debug(f"End of epoch for worker {total_worker_rank}")
+        _logger.debug(f"End of epoch for worker {self.total_worker_rank}")
 
     def make_composite_image(
         self, stacked_sparse_arrays: sparse.SparseArray, noise_std: float = 0.0
@@ -325,7 +332,7 @@ class GeantElectronDataset(IterableDataset):
         image = summed.todense()
 
         if noise_std > 0:
-            image = image + self._shuffler.normal(
+            image = image + self._noise_source.normal(
                 0.0, self.noise_std, size=image.shape
             ).astype(image.dtype)
 

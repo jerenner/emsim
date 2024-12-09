@@ -274,7 +274,6 @@ class DenoisingGenerator(nn.Module):
         n_total_queries_per_image = (
             n_main_queries_per_image + n_denoising_queries_per_image
         )
-        print(n_total_queries_per_image)
 
         padded_seq_length = max(n_total_queries_per_image)
         attn_masks = []

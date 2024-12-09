@@ -97,7 +97,8 @@ class EMModel(nn.Module):
                     )
                 ]
             _logger.debug("Begin loss calculation")
-            return self.compute_loss(batch, output)
+            loss_dict, output = self.compute_loss(batch, output)
+            return loss_dict, output
 
         return output
 

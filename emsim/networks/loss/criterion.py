@@ -210,7 +210,7 @@ class EMCriterion(nn.Module):
         image_size_per_query = torch.cat(
             [
                 size.expand(n_queries, -1)
-                for size, n_queries in zip(image_size.unbind(0), n_queries)
+                for size, n_queries in zip(image_size, n_queries)
             ],
             0,
         )
@@ -218,7 +218,7 @@ class EMCriterion(nn.Module):
             [
                 size.expand(n_elecs, -1)
                 for size, n_elecs in zip(
-                    image_size.unbind(0), target_dict["batch_size"]
+                    image_size, target_dict["batch_size"]
                 )
             ],
             0,

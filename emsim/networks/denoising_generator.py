@@ -16,13 +16,13 @@ class DenoisingGenerator(nn.Module):
         d_model: int,
         max_denoising_group_size: int = 300,
         max_total_denoising_queries: int = 1200,
-        position_noise_var: float = 1.0,
+        position_noise_variance: float = 1.0,
     ):
         super().__init__()
         self.d_model = d_model
         self.max_denoising_group_size = max_denoising_group_size
         self.max_total_denoising_queries = max_total_denoising_queries
-        self.position_noise_scale = position_noise_var
+        self.position_noise_scale = position_noise_variance
         self.dn_query_embedding = nn.Embedding(max_denoising_group_size, d_model)
 
     def forward(self, batch_dict: dict[str, Tensor]):
@@ -106,6 +106,7 @@ class DenoisingGenerator(nn.Module):
         denoising_queries: Tensor,
         denoising_reference_points: Tensor,
         electron_batch_offsets: Tensor,
+        n_attn_heads: int,
         mask_main_queries_from_denoising: bool = False,
     ):
         assert denoising_queries.ndim == 4  # (electron, dn group, pos/neg, feature)
@@ -125,6 +126,9 @@ class DenoisingGenerator(nn.Module):
         denoising_reference_points_per_image = split_batch_concatted_tensor(
             denoising_reference_points, electron_batch_offsets
         )
+        n_denoising_queries_per_image = [
+            q.shape[0] for q in denoising_queries_per_image
+        ]
 
         denoising_positive_mask = torch.zeros(
             denoising_queries.shape[:-1],
@@ -181,12 +185,20 @@ class DenoisingGenerator(nn.Module):
             0,
         )
 
+        assert stacked_queries.shape[:-1] == stacked_refpoints.shape[:-1]
+        total_main_queries = sum(n_main_queries_per_image)
+        total_denoising_queries = sum(
+            [q * n_dn_groups * 2 for q in n_denoising_queries_per_image]
+        )
+        assert stacked_queries.shape[0] == total_main_queries + total_denoising_queries
+
         attn_mask = DenoisingGenerator.make_attn_mask(
             main_queries,
             query_batch_offsets,
             denoising_queries,
             electron_batch_offsets,
             n_dn_groups,
+            n_attn_heads,
             mask_main_queries_from_denoising,
         )
         dn_batch_mask_dict = {
@@ -238,41 +250,63 @@ class DenoisingGenerator(nn.Module):
         denoising_queries: Tensor,
         electron_batch_offsets: Tensor,
         n_denoising_groups: int,
+        n_attn_heads: int,
         mask_main_queries_from_denoising: bool = False,
     ):
         assert denoising_queries.ndim == 4  # electron, dn group, pos/neg, 2
+        batch_size = len(query_batch_offsets)
 
-        def _max_seq_length(queries: Tensor, batch_offsets: Tensor):
+        def _queries_per_image(batch_offsets: Tensor, total_queries: int):
             ext_batch_offsets = torch.cat(
-                [batch_offsets, batch_offsets.new_tensor([len(queries)])]
+                [batch_offsets, batch_offsets.new_tensor([total_queries])]
             )
-            query_nums_per_image = ext_batch_offsets[1:] - ext_batch_offsets[:-1]
-            return max(query_nums_per_image)
+            return ext_batch_offsets[1:] - ext_batch_offsets[:-1]
 
-        main_seq_length = _max_seq_length(main_queries, query_batch_offsets)
-        denoising_seq_length = _max_seq_length(
-            denoising_queries, electron_batch_offsets
-        ) * n_denoising_groups * 2
-        combined_seq_length = main_seq_length + denoising_seq_length
-
-        attn_mask = torch.zeros(
-            [combined_seq_length, combined_seq_length],
-            dtype=torch.bool,
-            device=main_queries.device,
+        n_main_queries_per_image = _queries_per_image(
+            query_batch_offsets, main_queries.shape[0]
         )
-        # mask out denoising queries from main queries
-        attn_mask[:main_seq_length, main_seq_length:] = True
+        electron_batch_offsets = electron_batch_offsets.to(query_batch_offsets)
+        n_denoising_queries_per_image = (
+            _queries_per_image(electron_batch_offsets, denoising_queries.shape[0])
+            * n_denoising_groups
+            * 2
+        )
+        n_total_queries_per_image = (
+            n_main_queries_per_image + n_denoising_queries_per_image
+        )
+        print(n_total_queries_per_image)
 
-        assert denoising_seq_length % n_denoising_groups == 0
-        dn_group_size = denoising_seq_length // n_denoising_groups
-        for i in range(n_denoising_groups):
-            dn_start_row = dn_start_col = main_seq_length + dn_group_size * i
-            dn_end_row = dn_end_col = main_seq_length + dn_group_size * (i + i)
-            # Mask this group out from the other dn groups
-            attn_mask[dn_start_row:dn_end_row, main_seq_length:dn_start_col] = True
-            attn_mask[dn_start_row:dn_end_row, :dn_end_col] = True
+        padded_seq_length = max(n_total_queries_per_image)
+        attn_masks = []
+        for i, (n_main, n_denoising) in enumerate(
+            zip(n_main_queries_per_image, n_denoising_queries_per_image)
+        ):
+            mask = torch.zeros(
+                [padded_seq_length, padded_seq_length],
+                dtype=torch.bool,
+                device=main_queries.device,
+            )
+            # mask out denoising queries from main queries
+            mask[:n_main, n_main:] = True
 
             if mask_main_queries_from_denoising:
-                attn_mask[dn_start_row:dn_end_row, :main_seq_length] = True
+                mask[n_main:, :n_main] = True
+
+            assert n_denoising % n_denoising_groups == 0
+            dn_group_size = n_denoising // n_denoising_groups
+            for i in range(n_denoising_groups):
+                dn_start_row = dn_start_col = n_main + dn_group_size * i
+                dn_end_row = dn_end_col = n_main + dn_group_size * (i + 1)
+                assert dn_end_col <= padded_seq_length
+                # Mask this group out from the other dn groups
+                mask[dn_start_row:dn_end_row, n_main:dn_start_col] = True
+                mask[dn_start_row:dn_end_row, dn_end_col:] = True
+            attn_masks.append(mask)
+
+        attn_mask = torch.stack(attn_masks)
+        attn_mask = attn_mask.unsqueeze(1).expand(-1, n_attn_heads, -1, -1)
+        attn_mask = attn_mask.reshape(
+            batch_size * n_attn_heads, padded_seq_length, padded_seq_length
+        )
 
         return attn_mask

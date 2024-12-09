@@ -1,7 +1,9 @@
+from typing import Optional
+import logging
+
 import torch
 from omegaconf import DictConfig
 from torch import Tensor, nn
-import logging
 
 from ..utils.misc_utils import _get_layer
 from ..utils.sparse_utils.minkowskiengine import _get_me_layer
@@ -10,6 +12,7 @@ from .loss.salience_criterion import ElectronSalienceCriterion
 from .backbone_me.unet import MinkowskiSparseResnetUnet
 from .transformer.model import EMTransformer
 from .me_value_encoder import ValueEncoder
+from .denoising_generator import DenoisingGenerator
 
 
 _logger = logging.getLogger(__name__)
@@ -23,7 +26,7 @@ class EMModel(nn.Module):
         transformer: nn.Module,
         criterion: nn.Module,
         salience_criterion: nn.Module,
-        # denoising_generator: nn.Module,
+        denoising_generator: Optional[nn.Module] = None,
     ):
         super().__init__()
 
@@ -32,7 +35,7 @@ class EMModel(nn.Module):
         self.transformer = transformer
         self.criterion = criterion
         self.salience_criterion = salience_criterion
-        # self.denoising_generator = denoising_generator
+        self.denoising_generator = denoising_generator
 
         self.aux_loss = getattr(self.criterion, "aux_loss", False)
 
@@ -46,6 +49,12 @@ class EMModel(nn.Module):
             batch["image_size_pixels_rc"].unique(dim=0).shape[0] == 1
         ), "Expected all images to be the same size"
 
+        if self.training and self.denoising_generator is not None:
+            denoising_queries, noised_positions = self.denoising_generator(batch)
+            denoising_batch_offsets = batch["electron_batch_offsets"]
+        else:
+            denoising_queries = noised_positions = denoising_batch_offsets = None
+
         _logger.debug("Begin transformer")
         (
             output_logits,
@@ -54,11 +63,18 @@ class EMModel(nn.Module):
             output_queries,
             segmentation_logits,
             query_batch_offsets,
+            denoising_out,
             encoder_logits,
             encoder_positions,
             encoder_out,
             score_dict,
-        ) = self.transformer(features, batch["image_size_pixels_rc"][0])
+        ) = self.transformer(
+            features,
+            batch["image_size_pixels_rc"][0],
+            denoising_queries,
+            noised_positions,
+            denoising_batch_offsets,
+        )
 
         output = {
             "pred_logits": output_logits[-1],
@@ -137,6 +153,7 @@ class EMModel(nn.Module):
             n_query_embeddings=cfg.transformer.query_embeddings,
             decoder_look_forward_twice=cfg.transformer.decoder_look_forward_twice,
             decoder_detach_updated_positions=cfg.transformer.decoder_detach_updated_positions,
+            mask_main_queries_from_denoising=cfg.denoising.mask_main_queries_from_denoising,
         )
         criterion = EMCriterion(
             loss_coef_class=cfg.criterion.loss_coef_class,
@@ -161,10 +178,20 @@ class EMModel(nn.Module):
         salience_criterion = ElectronSalienceCriterion(
             alpha=cfg.criterion.salience.alpha, gamma=cfg.criterion.salience.gamma
         )
+        if cfg.denoising.use_denoising:
+            denoising_generator = DenoisingGenerator(
+                d_model=cfg.transformer.d_model,
+                max_denoising_group_size=cfg.denoising.max_denoising_group_size,
+                max_total_denoising_queries=cfg.denoising.max_total_denoising_queries,
+                position_noise_variance=cfg.denoising.position_noise_variance,
+            )
+        else:
+            denoising_generator = None
         return cls(
             backbone=backbone,
             channel_uniformizer=channel_uniformizer,
             transformer=transformer,
             criterion=criterion,
             salience_criterion=salience_criterion,
+            denoising_generator=denoising_generator,
         )

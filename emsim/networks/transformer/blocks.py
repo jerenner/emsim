@@ -63,7 +63,7 @@ class SelfAttentionBlock(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, query, query_pos_embedding, pad_mask=None):
+    def forward(self, query, query_pos_embedding, pad_mask=None, attn_mask=None):
         residual = query
         query_with_pos_embed = query + query_pos_embedding
         if self.norm_first:
@@ -75,6 +75,7 @@ class SelfAttentionBlock(nn.Module):
                     query,
                     key_padding_mask=pad_mask,
                     need_weights=False,
+                    attn_mask=attn_mask,
                 )[0]
             )
         else:
@@ -85,6 +86,7 @@ class SelfAttentionBlock(nn.Module):
                     query,
                     key_padding_mask=pad_mask,
                     need_weights=False,
+                    attn_mask=attn_mask,
                 )[0]
             )
             query = self.norm(query)

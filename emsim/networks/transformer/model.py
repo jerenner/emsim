@@ -21,6 +21,7 @@ from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
 from ..segmentation_map import SegmentationMapPredictor, PatchedSegmentationMapPredictor
 from ..me_salience_mask_predictor import MESparseMaskPredictor
+from ..denoising_generator import DenoisingGenerator
 
 
 class EMTransformer(nn.Module):
@@ -46,6 +47,7 @@ class EMTransformer(nn.Module):
         decoder_detach_updated_positions: bool = True,
         sparse_library: str = "minkowskiengine",
         dimension: int = 2,
+        mask_main_queries_from_denoising: bool = False,
     ):
         super().__init__()
         self.two_stage_num_proposals = n_query_embeddings
@@ -91,6 +93,7 @@ class EMTransformer(nn.Module):
 
         if sparse_library == "spconv":
             import spconv.pytorch as spconv
+
             self.salience_unpoolers = nn.ModuleList(
                 [
                     spconv.SparseInverseConv2d(1, 1, 3, indice_key=key)
@@ -135,6 +138,7 @@ class EMTransformer(nn.Module):
             look_forward_twice=decoder_look_forward_twice,
             detach_updated_positions=decoder_detach_updated_positions,
         )
+        self.mask_main_queries_from_denoising = mask_main_queries_from_denoising
 
     def reset_parameters(self):
         self.salience_mask_predictor.reset_parameters()
@@ -156,6 +160,9 @@ class EMTransformer(nn.Module):
         self,
         encoded_features: list[ME.SparseTensor],
         image_size: Optional[Union[Tensor, list[int]]],
+        denoising_queries: Optional[Tensor] = None,
+        denoising_reference_points: Optional[Tensor] = None,
+        denoising_batch_offsets: Optional[Tensor] = None,
     ):
         assert len(encoded_features) == self.n_levels
 
@@ -199,7 +206,7 @@ class EMTransformer(nn.Module):
             size=encoder_out.shape,
             is_coalesced=encoder_out.is_coalesced(),
         ).coalesce()
-        encoder_out_logits = self.classification_head(encoder_out_normalized.values())
+        encoder_out_logits: Tensor = self.classification_head(encoder_out_normalized.values())
 
         num_topk = self.two_stage_num_proposals * 4
         topk_by_image = [
@@ -264,19 +271,41 @@ class EMTransformer(nn.Module):
         queries = [q[:size] for q, size in zip(queries, nms_topk_query_batch_sizes)]
         queries = torch.cat(queries)
 
-        (
-            decoder_out_logits,
-            decoder_out_positions,
-            decoder_out_queries,
-            decoder_out_std,
-            decoder_out_segmentation_logits,
-        ) = self.decoder(
+        if self.training and (
+            denoising_queries is not None and denoising_reference_points is not None
+        ):
+            queries, reference_points, attn_mask, dn_batch_mask_dict = (
+                DenoisingGenerator.stack_main_and_denoising_queries(
+                    queries,
+                    reference_points,
+                    nms_topk_query_batch_offsets,
+                    denoising_queries,
+                    denoising_queries,
+                    denoising_batch_offsets,
+                    self.decoder.layers[0].n_heads,
+                    self.mask_main_queries_from_denoising,
+                )
+            )
+            denoising = True
+        else:
+            attn_mask = None
+            denoising = False
+
+        decoder_out = self.decoder(
             queries=queries,
             query_reference_points=reference_points,
             query_batch_offsets=nms_topk_query_batch_offsets,
             stacked_feature_maps=encoder_out_normalized,
             spatial_shapes=score_dict["spatial_shapes"],
+            attn_mask=attn_mask,
         )
+
+        if denoising:
+            decoder_out, denoising_out = self.unstack_main_denoising_outputs(
+                decoder_out, dn_batch_mask_dict
+            )
+        else:
+            denoising_out = None
 
         # segmentation_logits = self.segmentation_head(
         #     encoder_out,
@@ -286,12 +315,13 @@ class EMTransformer(nn.Module):
         # )
 
         return (
-            decoder_out_logits,
-            decoder_out_positions,
-            decoder_out_std,
-            decoder_out_queries,
-            decoder_out_segmentation_logits,
+            decoder_out["logits"],
+            decoder_out["positions"],
+            decoder_out["std"],
+            decoder_out["queries"],
+            decoder_out["segmentation_logits"],
             nms_topk_query_batch_offsets,
+            denoising_out,
             nms_topk_logits,
             nms_encoder_out_positions,
             encoder_out,
@@ -495,6 +525,16 @@ class EMTransformer(nn.Module):
             "selected_token_sorted_indices": selected_token_sorted_indices,
             "per_layer_subset_indices": per_layer_subset_indices,
         }
+
+    def unstack_main_denoising_outputs(self, decoder_out, dn_batch_mask_dict):
+        # def split_layer_stacked_output(output_tensor: Tensor, dn_batch_mask_dict: dict):
+
+
+        logits = decoder_out["logits"]
+        positions = decoder_out["positions"]
+        queries = decoder_out["queries"]
+        std = decoder_out["std"]
+        segmentation_logits = decoder_out["segmentation_logits"]
 
     @torch.no_grad()
     def nms_on_topk_index(

@@ -64,6 +64,7 @@ class TransformerDecoderLayer(nn.Module):
         batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         spatial_shapes: Tensor,
+        attn_mask: Optional[Tensor] = None,
     ):
         queries_batched, pad_mask = deconcat_add_batch_dim(queries, batch_offsets)
         pos_encoding_batched, pad_mask_2 = deconcat_add_batch_dim(
@@ -71,7 +72,7 @@ class TransformerDecoderLayer(nn.Module):
         )
         assert torch.equal(pad_mask, pad_mask_2)
 
-        x = self.self_attn(queries_batched, pos_encoding_batched, pad_mask)
+        x = self.self_attn(queries_batched, pos_encoding_batched, pad_mask, attn_mask)
         x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
         assert torch.equal(batch_offsets, batch_offsets_2)
 
@@ -188,6 +189,7 @@ class EMTransformerDecoder(nn.Module):
         query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         spatial_shapes: Tensor,
+        attn_mask: Optional[Tensor] = None,
     ):
         layer_output_logits = []
         layer_output_positions = []
@@ -205,6 +207,7 @@ class EMTransformerDecoder(nn.Module):
                 query_batch_offsets,
                 stacked_feature_maps,
                 spatial_shapes,
+                attn_mask,
             )
 
             queries_normed = self.norm(queries)
@@ -247,13 +250,13 @@ class EMTransformerDecoder(nn.Module):
         stacked_query_positions = torch.stack(layer_output_positions)
         stacked_queries = torch.stack(layer_output_queries)
         stacked_std = torch.stack(layer_output_std)
-        return (
-            stacked_query_logits,
-            stacked_query_positions,
-            stacked_queries,
-            stacked_std,
-            layer_output_segmentation,
-        )
+        return {
+            "logits": stacked_query_logits,
+            "positions": stacked_query_positions,
+            "queries": stacked_queries,
+            "std": stacked_std,
+            "segmentation_logits": layer_output_segmentation,
+        }
 
     def _get_class_head(self, layer_index):
         if self.layers_share_heads:

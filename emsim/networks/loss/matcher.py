@@ -42,7 +42,7 @@ class HungarianMatcher(nn.Module):
         n_queries = torch.cat(
             [
                 predicted_dict["query_batch_offsets"],
-                torch.tensor([predicted_dict["output_queries"].shape[-2]]),
+                torch.tensor([predicted_dict["pred_logits"].shape[-2]]),
             ]
         ).diff()
         n_electrons = target_dict["batch_size"]

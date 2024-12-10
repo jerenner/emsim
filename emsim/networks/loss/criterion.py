@@ -203,7 +203,7 @@ class EMCriterion(nn.Module):
             [
                 predicted_dict["query_batch_offsets"],
                 predicted_dict["query_batch_offsets"].new_tensor(
-                    [predicted_dict["output_queries"].shape[0]]
+                    [predicted_dict["pred_logits"].shape[0]]
                 ),
             ]
         ).diff()

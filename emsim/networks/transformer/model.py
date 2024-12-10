@@ -537,7 +537,9 @@ class EMTransformer(nn.Module):
     ):
 
         main_out = {}
-        denoising_out = {}
+        denoising_out = {
+            "electron_batch_offsets": dn_batch_mask_dict["electron_batch_offsets"]
+        }
 
         for key, value in decoder_out.items():
             if isinstance(value, Tensor):
@@ -571,7 +573,7 @@ class EMTransformer(nn.Module):
                             )
                         )
 
-                    def stack_sparse_segmaps(segmaps: list[Tensor]):
+                    def restack_sparse_segmaps(segmaps: list[Tensor]):
                         max_elecs = max([segmap.shape[-1] for segmap in segmaps])
                         segmaps = [
                             segmap.sparse_resize_(
@@ -581,10 +583,10 @@ class EMTransformer(nn.Module):
                             )
                             for segmap in segmaps
                         ]
-                        return torch.stack(segmaps, 0)
+                        return torch.stack(segmaps, 0).coalesce()
 
-                    main_out[key].append(stack_sparse_segmaps(main))
-                    denoising_out[key].append(stack_sparse_segmaps(denoising))
+                    main_out[key].append(restack_sparse_segmaps(main))
+                    denoising_out[key].append(restack_sparse_segmaps(denoising))
 
         return main_out, denoising_out
 

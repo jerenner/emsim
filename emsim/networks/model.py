@@ -85,7 +85,7 @@ class EMModel(nn.Module):
             "query_batch_offsets": query_batch_offsets,
         }
 
-        output["output_queries"] = output_queries[-1]
+        # output["output_queries"] = output_queries[-1]
         output["enc_outputs"] = {
             "pred_logits": encoder_logits,
             "pred_positions": encoder_positions,
@@ -102,26 +102,58 @@ class EMModel(nn.Module):
                         "pred_std_dev_cholesky": cholesky,
                         "query_batch_offsets": query_batch_offsets,
                         "pred_segmentation_logits": seg_logits,
-                        "output_queries": queries,
+                        # "output_queries": queries,
                     }
-                    for logits, positions, cholesky, seg_logits, queries in zip(
+                    # for logits, positions, cholesky, seg_logits, queries in zip(
+                    for logits, positions, cholesky, seg_logits in zip(
                         output_logits[:-1],
                         output_positions[:-1],
                         std_dev_cholesky[:-1],
                         segmentation_logits[:-1],
-                        output_queries[:-1],
+                        # output_queries[:-1],
                     )
                 ]
             _logger.debug("Begin loss calculation")
             loss_dict, output = self.compute_loss(batch, output)
+            if denoising_out is not None:
+                denoising_loss_dict = self.compute_denoising_loss(batch, denoising_out)
+                loss_dict.update(denoising_loss_dict)
             return loss_dict, output
 
         return output
 
-    def compute_loss(self, batch: dict[str, Tensor], output: dict[dict, str]):
+    def compute_loss(self, batch: dict[str, Tensor], output: dict[str, Tensor]):
         loss_dict, matched_indices = self.criterion(output, batch)
         output.update(matched_indices)
         return loss_dict, output
+
+    def compute_denoising_loss(self, batch: dict[str, Tensor], denoising_out: dict[str, Tensor]):
+        denoising_output = {
+            "pred_logits": denoising_out["logits"][-1],
+            "pred_positions": denoising_out["positions"][-1],
+            "pred_std_dev_cholesky": denoising_out["std"][-1],
+            "pred_segmentation_logits": denoising_out["segmentation_logits"][-1],
+            "query_batch_offsets": denoising_out["electron_batch_offsets"]
+        }
+
+        if self.aux_loss:
+            denoising_output["aux_outputs"] =  [
+                {
+                    "pred_logits": logits,
+                    "pred_positions": positions,
+                    "pred_std_dev_cholesky": cholesky,
+                    "query_batch_offsets": denoising_out["electron_batch_offsets"],
+                    "pred_segmentation_logits": seg_logits,
+                    # "output_queries": queries,
+                }
+                for logits, positions, cholesky, seg_logits, queries in zip(
+                    denoising_out["logits"][:-1],
+                    denoising_out["positions"][:-1],
+                    denoising_out["std"][:-1],
+                    denoising_out["segmentation_logits"][:-1],
+                    # output_queries[:-1],
+                )
+            ]
 
     @classmethod
     def from_config(cls, cfg: DictConfig):

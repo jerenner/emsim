@@ -209,6 +209,7 @@ class DenoisingGenerator(nn.Module):
             "n_denoising_queries_per_image": n_denoising_queries_per_image,
             "n_denoising_groups": n_dn_groups,
             "n_total_gt_electrons": n_electrons,
+            "electron_batch_offsets": electron_batch_offsets,
         }
         return stacked_queries, stacked_refpoints, attn_mask, dn_batch_mask_dict
 

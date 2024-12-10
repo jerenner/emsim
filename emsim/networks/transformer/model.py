@@ -15,6 +15,7 @@ from ...utils.batching_utils import split_batch_concatted_tensor
 from ...utils.misc_utils import inverse_sigmoid
 from ...utils.sparse_utils import (
     batch_offsets_from_sparse_tensor_indices,
+    sparse_index_select,
 )
 from ..positional_encoding import FourierEncoding
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
@@ -206,7 +207,9 @@ class EMTransformer(nn.Module):
             size=encoder_out.shape,
             is_coalesced=encoder_out.is_coalesced(),
         ).coalesce()
-        encoder_out_logits: Tensor = self.classification_head(encoder_out_normalized.values())
+        encoder_out_logits: Tensor = self.classification_head(
+            encoder_out_normalized.values()
+        )
 
         num_topk = self.two_stage_num_proposals * 4
         topk_by_image = [
@@ -280,21 +283,23 @@ class EMTransformer(nn.Module):
                     reference_points,
                     nms_topk_query_batch_offsets,
                     denoising_queries,
-                    denoising_queries,
+                    denoising_reference_points,
                     denoising_batch_offsets,
                     self.decoder.layers[0].n_heads,
                     self.mask_main_queries_from_denoising,
                 )
             )
             denoising = True
+            query_batch_offsets = dn_batch_mask_dict["stacked_batch_offsets"]
         else:
             attn_mask = None
             denoising = False
+            query_batch_offsets = nms_topk_query_batch_offsets
 
         decoder_out = self.decoder(
             queries=queries,
             query_reference_points=reference_points,
-            query_batch_offsets=nms_topk_query_batch_offsets,
+            query_batch_offsets=query_batch_offsets,
             stacked_feature_maps=encoder_out_normalized,
             spatial_shapes=score_dict["spatial_shapes"],
             attn_mask=attn_mask,
@@ -306,6 +311,7 @@ class EMTransformer(nn.Module):
             )
         else:
             denoising_out = None
+        # denoising_out = None
 
         # segmentation_logits = self.segmentation_head(
         #     encoder_out,
@@ -526,15 +532,61 @@ class EMTransformer(nn.Module):
             "per_layer_subset_indices": per_layer_subset_indices,
         }
 
-    def unstack_main_denoising_outputs(self, decoder_out, dn_batch_mask_dict):
-        # def split_layer_stacked_output(output_tensor: Tensor, dn_batch_mask_dict: dict):
+    def unstack_main_denoising_outputs(
+        self, decoder_out: dict[str, Tensor], dn_batch_mask_dict: dict[str, Tensor]
+    ):
 
+        main_out = {}
+        denoising_out = {}
 
-        logits = decoder_out["logits"]
-        positions = decoder_out["positions"]
-        queries = decoder_out["queries"]
-        std = decoder_out["std"]
-        segmentation_logits = decoder_out["segmentation_logits"]
+        for key, value in decoder_out.items():
+            if isinstance(value, Tensor):
+                main_out[key], denoising_out[key] = (
+                    DenoisingGenerator.unstack_main_and_denoising_tensor(
+                        value, dn_batch_mask_dict
+                    )
+                )
+            else:
+                assert key == "segmentation_logits"
+                main_out[key] = []
+                denoising_out[key] = []
+                for layer_seg_logits in value:
+                    main = []
+                    denoising = []
+                    for logits, main_end, n_dn in zip(
+                        layer_seg_logits,
+                        dn_batch_mask_dict["n_main_queries_per_image"],
+                        dn_batch_mask_dict["n_denoising_queries_per_image"],
+                    ):
+                        logits: Tensor
+                        logits = logits.coalesce()
+                        dn_end = main_end + n_dn
+                        main_i = sparse_index_select(
+                            logits, logits.ndim - 1, torch.arange(0, main_end)
+                        )
+                        main.append(main_i)
+                        denoising.append(
+                            sparse_index_select(
+                                logits, logits.ndim - 1, torch.arange(main_end, dn_end)
+                            )
+                        )
+
+                    def stack_sparse_segmaps(segmaps: list[Tensor]):
+                        max_elecs = max([segmap.shape[-1] for segmap in segmaps])
+                        segmaps = [
+                            segmap.sparse_resize_(
+                                [*segmap.shape[:-1], max_elecs],
+                                segmap.sparse_dim(),
+                                segmap.dense_dim(),
+                            )
+                            for segmap in segmaps
+                        ]
+                        return torch.stack(segmaps, 0)
+
+                    main_out[key].append(stack_sparse_segmaps(main))
+                    denoising_out[key].append(stack_sparse_segmaps(denoising))
+
+        return main_out, denoising_out
 
     @torch.no_grad()
     def nms_on_topk_index(

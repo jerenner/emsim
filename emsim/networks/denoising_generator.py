@@ -180,7 +180,7 @@ class DenoisingGenerator(nn.Module):
         stacked_batch_offsets = torch.cumsum(
             torch.tensor(
                 [0, *[queries.shape[0] for queries in stacked_queries_per_image[:-1]]],
-                device=stacked_queries.device,
+                device=query_batch_offsets.device,
             ),
             0,
         )
@@ -206,6 +206,7 @@ class DenoisingGenerator(nn.Module):
             "denoising_positive_mask": denoising_positive_mask,
             "stacked_batch_offsets": stacked_batch_offsets,
             "n_main_queries_per_image": n_main_queries_per_image,
+            "n_denoising_queries_per_image": n_denoising_queries_per_image,
             "n_denoising_groups": n_dn_groups,
             "n_total_gt_electrons": n_electrons,
         }
@@ -221,24 +222,41 @@ class DenoisingGenerator(nn.Module):
         n_denoising_groups = dn_batch_mask_dict["n_denoising_groups"]
         n_total_gt_electrons = dn_batch_mask_dict["n_total_gt_electrons"]
 
-        batch_split_tensor = split_batch_concatted_tensor(
-            stacked_tensor, stacked_batch_offsets
+        if stacked_tensor.ndim == 2:  # query x feature
+            dummy_layer_dim = True
+            stacked_tensor = stacked_tensor.unsqueeze(0)
+        else:
+            assert stacked_tensor.ndim in [3, 4]  # decoder layer x query x feature
+            dummy_layer_dim = False
+
+        batch_split_tensor = torch.tensor_split(
+            stacked_tensor,
+            stacked_batch_offsets[1:].cpu(),
+            dim=1,
         )
 
         main_parts = [
-            queries[mask] for queries, mask in zip(batch_split_tensor, main_query_masks)
+            queries[:, mask]
+            for queries, mask in zip(batch_split_tensor, main_query_masks)
         ]
         denoising_parts = [
-            queries[mask.logical_not()]
+            queries[:, mask.logical_not()]
             for queries, mask in zip(batch_split_tensor, main_query_masks)
         ]
 
-        catted_main_parts = torch.cat(main_parts)
-        catted_denoising_parts = torch.cat(denoising_parts)
+        catted_main_parts = torch.cat(main_parts, dim=1)
+        catted_denoising_parts = torch.cat(denoising_parts, dim=1)
 
         reshaped_denoising_parts = catted_denoising_parts.view(
-            n_total_gt_electrons, n_denoising_groups, 2, -1
+            catted_denoising_parts.shape[0],
+            n_total_gt_electrons,
+            n_denoising_groups,
+            2,
+            -1,
         )
+        if dummy_layer_dim:
+            catted_main_parts = catted_main_parts.squeeze(0)
+            reshaped_denoising_parts = reshaped_denoising_parts.squeeze(0)
 
         return catted_main_parts, reshaped_denoising_parts
 
@@ -300,6 +318,10 @@ class DenoisingGenerator(nn.Module):
                 # Mask this group out from the other dn groups
                 mask[dn_start_row:dn_end_row, n_main:dn_start_col] = True
                 mask[dn_start_row:dn_end_row, dn_end_col:] = True
+
+            # mask out the padding queries just for completeness
+            mask[n_main + n_denoising :] = True
+
             attn_masks.append(mask)
 
         attn_mask = torch.stack(attn_masks)

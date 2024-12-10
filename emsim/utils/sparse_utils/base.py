@@ -47,7 +47,8 @@ def sparse_select(tensor: Tensor, axis: int, index: int):
 def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
     assert tensor.is_sparse
     tensor = tensor.coalesce()
-    assert tensor.ndim <= 1
+    assert index.ndim <= 1
+    assert axis >= 0, f"Negative axis not supported ({axis=})"
     index_masks = [tensor.indices()[axis] == i for i in index]
     new_values = [tensor.values()[mask] for mask in index_masks]
     new_indices = [
@@ -317,7 +318,7 @@ def scatter_to_sparse_tensor(
     return out
 
 
-def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor):
+def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor) -> Tensor:
     """Gets the batch offsets from an index tensor where the first element of the
     first dimension is the batch index, e.g. the indices() tensor of a sparse
     torch.Tensor.

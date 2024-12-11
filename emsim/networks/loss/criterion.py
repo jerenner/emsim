@@ -21,6 +21,8 @@ from ...utils.sparse_utils import (
     union_sparse_indices,
     minkowski_to_torch_sparse,
     sparse_squeeze_dense_dim,
+    sparse_index_select,
+    sparse_resize,
 )
 from ...utils.batching_utils import split_batch_concatted_tensor
 
@@ -46,9 +48,11 @@ class EMCriterion(nn.Module):
         matcher_cost_coef_likelihood: float = 1.0,
         use_aux_loss=True,
         aux_loss_use_final_matches=False,
-        aux_loss_weight=1.0,
+        aux_loss_weight: float = 1.0,
         n_aux_losses: int = 0,
-        detach_likelihood_mean: bool = False
+        detach_likelihood_mean: bool = False,
+        use_denoising_loss: bool = False,
+        denoising_loss_weight: float = 1.0,
     ):
         super().__init__()
         self.loss_coef_class = loss_coef_class
@@ -63,6 +67,8 @@ class EMCriterion(nn.Module):
         self.aux_loss_use_final_matches = aux_loss_use_final_matches
         self.aux_loss_weight = aux_loss_weight
         self.detach_likelihood_mean = detach_likelihood_mean
+        self.use_denoising_loss = use_denoising_loss
+        self.denoising_loss_weight = denoising_loss_weight
 
         self.salience_criterion = ElectronSalienceCriterion(
             salience_alpha, salience_gamma
@@ -85,8 +91,6 @@ class EMCriterion(nn.Module):
                 "loss_incidence_nll": MeanMetric(),
                 "loss_incidence_likelihood": MeanMetric(),
                 "loss_incidence_huber": MeanMetric(),
-                "loss_salience": MeanMetric(),
-                "loss": MeanMetric(),
             }
         )
         if use_aux_loss:
@@ -103,6 +107,16 @@ class EMCriterion(nn.Module):
                     self.train_losses.update(
                         {f"aux_losses/{i}/{loss_name}": MeanMetric()}
                     )
+        if use_denoising_loss:
+            self.train_losses.update(
+                {"dn/" + k: MeanMetric() for k in self.train_losses}
+            )
+        self.train_losses.update(
+            {
+                "loss_salience": MeanMetric(),
+                "loss": MeanMetric(),
+            }
+        )
 
         self.train_metrics = nn.ModuleDict(
             {
@@ -128,6 +142,29 @@ class EMCriterion(nn.Module):
                 ),
             },
         )
+        if use_denoising_loss:
+            self.dn_metrics = nn.ModuleDict(
+                {
+                    "query_classification": MetricCollection(
+                        [BinaryAccuracy(), BinaryPrecision(), BinaryRecall()],
+                        prefix="dn/query/",
+                    ),
+                    "mask_classification": MetricCollection(
+                        [BinaryAccuracy(), BinaryPrecision(), BinaryRecall()],
+                        prefix="dn/mask/",
+                    ),
+                    "localization_error": MetricCollection(
+                        [MinMetric(), MeanMetric(), MaxMetric()],
+                        prefix="dn/localization_error/",
+                    ),
+                    "localization_minus_centroid_error": MetricCollection(
+                        [MinMetric(), MeanMetric(), MaxMetric()],
+                        prefix="dn/localization_minus_centroid_error/",
+                    ),
+                },
+            )
+        else:
+            self.dn_metrics = None
 
         self.eval_metrics = MultitaskWrapper(
             {
@@ -149,18 +186,34 @@ class EMCriterion(nn.Module):
         target_dict: dict[str, Tensor],
         matched_indices: Optional[Tensor] = None,
         update_metrics: bool = False,
+        is_denoising: bool = False,
     ):
         if matched_indices is None:
             matched_indices = [
                 indices.to(device=predicted_dict["pred_logits"].device)
                 for indices in self.matcher(predicted_dict, target_dict)
             ]
+            assert not is_denoising
+
+        n_gt_electrons_per_image = target_dict["batch_size"]
+        if is_denoising:
+            n_gt_electrons_per_image = (
+                n_gt_electrons_per_image
+                * predicted_dict["dn_batch_mask_dict"]["n_denoising_groups"]
+            )
+        if update_metrics:
+            if is_denoising:
+                metrics = self.dn_metrics
+            else:
+                metrics = self.train_metrics
+        else:
+            metrics = None
 
         class_loss = self.compute_class_loss(
             predicted_dict,
             matched_indices,
             self.no_electron_weight,
-            update_metrics=update_metrics,
+            metrics=metrics,
         )
 
         # reorder query and electron tensors in order of matched indices
@@ -173,7 +226,7 @@ class EMCriterion(nn.Module):
         bce_loss = self.compute_mask_bce_loss(
             sorted_predicted_logits,
             sorted_true_segmentation,
-            update_metrics=update_metrics,
+            metrics=metrics,
         )
         dice_loss = self.compute_mask_dice_loss(
             sorted_predicted_logits,
@@ -192,6 +245,11 @@ class EMCriterion(nn.Module):
         )
         true_positions = _sort_tensor(
             target_dict["normalized_incidence_points_xy"].to(pred_positions),
+            target_dict["electron_batch_offsets"],
+            [inds[1] for inds in matched_indices],
+        )
+        centroid_positions = _sort_tensor(
+            target_dict["normalized_centers_of_mass_xy"].to(true_positions),
             target_dict["electron_batch_offsets"],
             [inds[1] for inds in matched_indices],
         )
@@ -214,12 +272,11 @@ class EMCriterion(nn.Module):
             ],
             0,
         )
+        # for scaling the positions from normalized coords to pixels
         image_size_per_electron = torch.cat(
             [
                 size.expand(n_elecs, -1)
-                for size, n_elecs in zip(
-                    image_size, target_dict["batch_size"]
-                )
+                for size, n_elecs in zip(image_size, n_gt_electrons_per_image)
             ],
             0,
         )
@@ -232,30 +289,23 @@ class EMCriterion(nn.Module):
         huber_loss = self.get_distance_huber_loss(pred_positions, true_positions)
 
         if update_metrics:
+            if not is_denoising:
+                metrics = self.train_metrics
+            else:
+                metrics = self.dn_metrics
             with torch.no_grad():
-                localization_error = (
-                    (
-                        pred_positions * image_size_per_electron
-                        - true_positions * image_size_per_electron
-                    )
-                    .square()
-                    .sum(-1)
-                    .sqrt()
+                localization_error = torch.linalg.vector_norm(
+                    (pred_positions - true_positions) * image_size_per_electron,
+                    dim=-1,
                 )
-                self.train_metrics["localization_error"].update(localization_error)
-                centroid_error = (
-                    (
-                        target_dict["normalized_centers_of_mass_xy"]
-                        * image_size_per_electron
-                        - target_dict["normalized_incidence_points_xy"]
-                        * image_size_per_electron
-                    )
-                    .square()
-                    .sum(-1)
-                    .sqrt()
+                metrics["localization_error"].update(localization_error)
+                centroid_error = torch.linalg.vector_norm(
+                    (centroid_positions - true_positions) * image_size_per_electron,
+                    dim=-1,
                 )
-                self.train_metrics["centroid_error"].update(centroid_error)
-                self.train_metrics["localization_minus_centroid_error"].update(
+                if "centroid_error" in metrics:
+                    metrics["centroid_error"].update(centroid_error)
+                metrics["localization_minus_centroid_error"].update(
                     localization_error - centroid_error
                 )
 
@@ -280,22 +330,40 @@ class EMCriterion(nn.Module):
         )
 
         if "aux_outputs" in predicted_dict:
-            for i, aux_output_dict in enumerate(predicted_dict["aux_outputs"]):
-                aux_loss_dict, aux_matched_indices = self.compute_losses(
-                    aux_output_dict,
+            aux_loss_dict, aux_matched_indices = self.compute_aux_losses(
+                predicted_dict["aux_outputs"],
+                target_dict,
+                matched_indices=(
+                    matched_indices["matched_indices"]
+                    if self.aux_loss_use_final_matches
+                    else None
+                ),
+            )
+            loss_dict.update(aux_loss_dict)
+            matched_indices.update(aux_matched_indices)
+
+        if self.use_denoising_loss and "denoising_output" in predicted_dict:
+            denoising_output = predicted_dict["denoising_output"]
+            denoising_losses, _ = self.compute_losses(
+                denoising_output,
+                target_dict,
+                matched_indices=denoising_output["denoising_matched_indices"],
+                update_metrics=True,
+                is_denoising=True,
+            )
+            denoising_losses = {"dn/" + k: v for k, v in denoising_losses.items()}
+            if "aux_outputs" in denoising_output:
+                dn_aux_loss_dict, _ = self.compute_aux_losses(
+                    denoising_output["aux_outputs"],
                     target_dict,
-                    matched_indices=(
-                        matched_indices["matched_indices"]
-                        if self.aux_loss_use_final_matches
-                        else None
-                    ),
+                    matched_indices=denoising_output["denoising_matched_indices"],
+                    is_denoising=True,
                 )
-                for k, v in aux_loss_dict.items():
-                    loss_str = f"aux_losses/{i}/{k}"
-                    loss_dict[loss_str] = v
-                matched_indices.update(
-                    {k + f"/{i}": v for k, v in aux_matched_indices.items()}
+                denoising_losses.update(
+                    {"dn/" + k: v for k, v in dn_aux_loss_dict.items()}
                 )
+            assert all([k not in loss_dict for k in denoising_losses])
+            loss_dict.update(denoising_losses)
 
         loss_dict["loss_salience"] = self.compute_salience_loss(
             predicted_dict, target_dict
@@ -305,26 +373,50 @@ class EMCriterion(nn.Module):
 
         return loss_dict, matched_indices
 
+    def compute_aux_losses(
+        self,
+        aux_outputs: list[dict],
+        target_dict: dict[str, Tensor],
+        matched_indices: Optional[Tensor] = None,
+        is_denoising: bool = False,
+    ):
+        aux_loss_dict = {}
+        matched_indices_dict = {}
+        for i, aux_output_dict in enumerate(aux_outputs):
+            aux_losses_i, aux_indices_i = self.compute_losses(
+                aux_output_dict,
+                target_dict,
+                matched_indices,
+                is_denoising=is_denoising,
+            )
+            for k, v in aux_losses_i.items():
+                loss_str = f"aux_losses/{i}/{k}"
+                aux_loss_dict[loss_str] = v
+            matched_indices_dict.update(
+                {k + f"/{i}": v for k, v in aux_indices_i.items()}
+            )
+        return aux_loss_dict, matched_indices_dict
+
     def compute_class_loss(
         self,
         predicted_dict: dict[str, Tensor],
         matched_indices: list[Tensor],
         no_electron_weight: float,
-        update_metrics: bool = False,
+        metrics: Optional[nn.Module] = None,
     ) -> Tensor:
         pred_logits, labels, weights = get_query_class_preds_targets_weights(
             predicted_dict, matched_indices, no_electron_weight
         )
         loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float(), weights)
-        if update_metrics:
-            self.train_metrics["query_classification"].update(pred_logits, labels)
+        if metrics:
+            metrics["query_classification"].update(pred_logits, labels)
         return loss
 
     def compute_mask_bce_loss(
         self,
         sorted_predicted_logits: Tensor,
         sorted_true: Tensor,
-        update_metrics: bool = False,
+        metrics: Optional[nn.Module] = None,
     ) -> Tensor:
         assert sorted_predicted_logits.shape == sorted_true.shape
 
@@ -336,15 +428,16 @@ class EMCriterion(nn.Module):
         loss = F.binary_cross_entropy_with_logits(
             unioned_predicted.values(), unioned_true.values()
         )
-        if update_metrics:
-            self.__update_mask_class_metric(unioned_predicted, unioned_true)
+        if metrics:
+            self.__update_mask_class_metric(metrics, unioned_predicted, unioned_true)
         return loss
 
+    @staticmethod
     @torch.compiler.disable
     def __update_mask_class_metric(
-        self, unioned_predicted: Tensor, unioned_true: Tensor
+        metrics: nn.ModuleDict, unioned_predicted: Tensor, unioned_true: Tensor
     ):
-        self.train_metrics["mask_classification"].update(
+        metrics["mask_classification"].update(
             unioned_predicted.values(), unioned_true.values().bool().int()
         )
 
@@ -378,13 +471,13 @@ class EMCriterion(nn.Module):
         pred_centers: Tensor,
         pred_std_cholesky: Tensor,
         true_incidence_points: Tensor,
-        image_size_per_query: Tensor,
+        image_size_per_electron: Tensor,
     ) -> Tensor:
         if self.detach_likelihood_mean:
             pred_centers = pred_centers.detach()
         loss = -torch.distributions.MultivariateNormal(
-            pred_centers * image_size_per_query, scale_tril=pred_std_cholesky
-        ).log_prob(true_incidence_points * image_size_per_query)
+            pred_centers * image_size_per_electron, scale_tril=pred_std_cholesky
+        ).log_prob(true_incidence_points * image_size_per_electron)
         # print(torch.isinf(loss).any())
         # loss = loss.clamp(-1e7, 1e7)
         # loss = torch.clamp_max(loss, 1e7)
@@ -463,6 +556,8 @@ class EMCriterion(nn.Module):
 
         if "aux_loss" in loss_name and self.aux_loss_weight != 1.0:
             loss_tensor = loss_tensor * self.aux_loss_weight
+        if "dn" in loss_name and self.denoising_loss_weight != 1.0:
+            loss_tensor = loss_tensor * self.denoising_loss_weight
         return loss_tensor
 
     def compute_total_loss(self, loss_dict: dict[str, Tensor]) -> Tensor:
@@ -473,8 +568,8 @@ class EMCriterion(nn.Module):
         return total_loss
 
     def log_losses(self, loss_dict: dict[str, Tensor]) -> None:
-        for k, v in loss_dict.items():
-            self.train_losses[k].update(v)
+        for k, v in self.train_losses.items():
+            v.update(loss_dict[k])
 
     def get_logs(self, reset_metrics: bool = True) -> None:
         def flatten_metrics(metric_dict):
@@ -508,6 +603,9 @@ class EMCriterion(nn.Module):
             loss_tracker.reset()
         for metric_tracker in self.train_metrics.values():
             metric_tracker.reset()
+        if self.dn_metrics is not None:
+            for metric_tracker in self.dn_metrics.values():
+                metric_tracker.reset()
         for metric_tracker in self.eval_metrics.values():
             metric_tracker.reset()
 
@@ -566,84 +664,21 @@ def _sort_predicted_true_maps(
         matched_indices,
     ):
 
-        predicted_map = predicted_map.coalesce()
-        true_map = true_map.coalesce()
+        reordered_predicted.append(sparse_index_select(predicted_map, 2, indices[0]))
+        reordered_true.append(sparse_index_select(true_map, 2, indices[1]))
 
-        pred_index_masks = [predicted_map.indices()[-1] == i for i in indices[0]]
-        true_index_masks = [true_map.indices()[-1] == i for i in indices[1]]
-
-        pred_indices = [
-            torch.cat(
-                [
-                    predicted_map.indices()[:-1, mask],
-                    predicted_map.indices().new_full([1, mask.count_nonzero()], i),
-                ]
+    def restack_sparse_segmaps(segmaps: list[Tensor]):
+        segmaps = [
+            sparse_resize(
+                segmap,
+                [*segmap.shape[:-1], max_elecs],
             )
-            for i, mask in enumerate(pred_index_masks)
+            for segmap in segmaps
         ]
-        pred_values = [predicted_map.values()[mask] for mask in pred_index_masks]
+        return torch.stack(segmaps, 0).coalesce()
 
-        true_indices = [
-            torch.cat(
-                [
-                    true_map.indices()[:-1, mask],
-                    true_map.indices().new_full([1, mask.count_nonzero()], i),
-                ]
-            )
-            for i, mask in enumerate(true_index_masks)
-        ]
-        true_values = [true_map.values()[mask] for mask in true_index_masks]
-
-        reordered_predicted.append(
-            torch.sparse_coo_tensor(
-                torch.cat(pred_indices, -1),
-                torch.cat(pred_values, 0),
-                (*predicted_map.shape[:-1], max_elecs),
-            )
-        )
-        reordered_true.append(
-            torch.sparse_coo_tensor(
-                torch.cat(true_indices, -1),
-                torch.cat(true_values, 0),
-                (*true_map.shape[:-1], max_elecs),
-            )
-        )
-
-        # pred_unbound = predicted_map.unbind(-1)
-        # true_unbound = true_map.unbind(-1)
-        # pred_unbound[0].register_hook(lambda _: print("pred_unbound"))
-        # reordered_pred_i = torch.stack([torch.select(predicted_map, -1, i) for i in indices[0]], -1).coalesce()
-        # reordered_true_i = torch.stack([torch.select(true_map, -1, i) for i in indices[1]], -1).coalesce()
-
-        # reordered_pred_i = torch.index_select(predicted_map, -1, indices[0]).coalesce()
-        # reordered_true_i = torch.index_select(true_map, -1, indices[1]).coalesce()
-
-    #     reordered_pred_i.register_hook(lambda _: print("reordered_pred_i"))
-
-    #     reordered_predicted.append(reordered_pred_i)
-    #     reordered_true.append(reordered_true_i)
-
-    # reordered_predicted = [
-    #     torch.sparse_coo_tensor(
-    #         pred.indices(),
-    #         pred.values(),
-    #         (*pred.shape[:-1], max_elecs),
-    #     )
-    #     for pred in reordered_predicted
-    # ]
-    # reordered_true = [
-    #     torch.sparse_coo_tensor(
-    #         true.indices(),
-    #         true.values(),
-    #         (*true.shape[:-1], max_elecs),
-    #     )
-    #     for true in reordered_true
-    # ]
-
-    reordered_predicted = torch.stack(reordered_predicted).coalesce()
-    reordered_true = torch.stack(reordered_true).coalesce()
-
-    # reordered_predicted.register_hook(lambda x: print("reordered_predicted"))
+    reordered_predicted = restack_sparse_segmaps(reordered_predicted).coalesce()
+    reordered_true = restack_sparse_segmaps(reordered_true).coalesce()
 
     return reordered_predicted, reordered_true
 

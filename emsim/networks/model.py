@@ -114,39 +114,60 @@ class EMModel(nn.Module):
                     )
                 ]
             _logger.debug("Begin loss calculation")
-            loss_dict, output = self.compute_loss(batch, output)
             if denoising_out is not None:
-                denoising_loss_dict = self.compute_denoising_loss(batch, denoising_out)
-                loss_dict.update(denoising_loss_dict)
+                denoising_output = self.prep_denoising_dict(denoising_out)
+                output["denoising_output"] = denoising_output
+            else:
+                denoising_output = None
+            loss_dict, output = self.compute_loss(batch, output)
             return loss_dict, output
 
         return output
 
-    def compute_loss(self, batch: dict[str, Tensor], output: dict[str, Tensor]):
+    def compute_loss(
+        self,
+        batch: dict[str, Tensor],
+        output: dict[str, Tensor],
+    ):
         loss_dict, matched_indices = self.criterion(output, batch)
         output.update(matched_indices)
         return loss_dict, output
 
-    def compute_denoising_loss(self, batch: dict[str, Tensor], denoising_out: dict[str, Tensor]):
+    def prep_denoising_dict(self, denoising_out: dict[str, Tensor]):
+        dn_batch_mask_dict = denoising_out["dn_batch_mask_dict"]
+        flattened_batch_offsets = (
+            dn_batch_mask_dict["electron_batch_offsets"]
+            * dn_batch_mask_dict["n_denoising_groups"]
+            * 2
+        )
         denoising_output = {
-            "pred_logits": denoising_out["logits"][-1],
-            "pred_positions": denoising_out["positions"][-1],
-            "pred_std_dev_cholesky": denoising_out["std"][-1],
+            "pred_logits": denoising_out["logits"][-1].flatten(0, -2),
+            "pred_positions": denoising_out["positions"][-1].flatten(0, -2),
+            "pred_std_dev_cholesky": denoising_out["std"][-1].flatten(0, -3),
             "pred_segmentation_logits": denoising_out["segmentation_logits"][-1],
-            "query_batch_offsets": denoising_out["electron_batch_offsets"]
+            "query_batch_offsets": flattened_batch_offsets,
         }
+        denoising_output.update(
+            {
+                "dn_batch_mask_dict": dn_batch_mask_dict,
+                "denoising_matched_indices": dn_batch_mask_dict[
+                    "denoising_matched_indices"
+                ],
+            }
+        )
 
         if self.aux_loss:
-            denoising_output["aux_outputs"] =  [
+            denoising_output["aux_outputs"] = [
                 {
-                    "pred_logits": logits,
-                    "pred_positions": positions,
-                    "pred_std_dev_cholesky": cholesky,
-                    "query_batch_offsets": denoising_out["electron_batch_offsets"],
+                    "pred_logits": logits.flatten(0, -2),
+                    "pred_positions": positions.flatten(0, -2),
+                    "pred_std_dev_cholesky": cholesky.flatten(0, -3),
                     "pred_segmentation_logits": seg_logits,
+                    "query_batch_offsets": flattened_batch_offsets,
+                    "dn_batch_mask_dict": dn_batch_mask_dict,
                     # "output_queries": queries,
                 }
-                for logits, positions, cholesky, seg_logits, queries in zip(
+                for logits, positions, cholesky, seg_logits in zip(
                     denoising_out["logits"][:-1],
                     denoising_out["positions"][:-1],
                     denoising_out["std"][:-1],
@@ -154,6 +175,8 @@ class EMModel(nn.Module):
                     # output_queries[:-1],
                 )
             ]
+
+        return denoising_output
 
     @classmethod
     def from_config(cls, cfg: DictConfig):
@@ -206,6 +229,8 @@ class EMModel(nn.Module):
             aux_loss_weight=cfg.criterion.aux_loss.aux_loss_weight,
             n_aux_losses=cfg.transformer.decoder_layers - 1,
             detach_likelihood_mean=cfg.criterion.detach_likelihood_mean,
+            use_denoising_loss=cfg.denoising.use_denoising,
+            denoising_loss_weight=cfg.denoising.denoising_loss_weight,
         )
         salience_criterion = ElectronSalienceCriterion(
             alpha=cfg.criterion.salience.alpha, gamma=cfg.criterion.salience.gamma

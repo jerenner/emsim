@@ -22,13 +22,15 @@ def torch_sparse_to_pydata_sparse(tensor: Tensor):
     )
 
 
-def pydata_sparse_to_torch_sparse(sparse_array: sparse.SparseArray, device: Optional[torch.device] = None):
+def pydata_sparse_to_torch_sparse(
+    sparse_array: sparse.SparseArray, device: Optional[torch.device] = None
+):
     return torch.sparse_coo_tensor(
-            indices=sparse_array.coords,
-            values=sparse_array.data,
-            size=sparse_array.shape,
-            device=device,
-        ).coalesce()
+        indices=sparse_array.coords,
+        values=sparse_array.data,
+        size=sparse_array.shape,
+        device=device,
+    ).coalesce()
 
 
 def sparse_select(tensor: Tensor, axis: int, index: int):
@@ -49,6 +51,9 @@ def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
     tensor = tensor.coalesce()
     assert index.ndim <= 1
     assert axis >= 0, f"Negative axis not supported ({axis=})"
+    assert (
+        index.max() <= tensor.shape[axis]
+    ), "index tensor has entries out of bounds for axis"
     index_masks = [tensor.indices()[axis] == i for i in index]
     new_values = [tensor.values()[mask] for mask in index_masks]
     new_indices = [
@@ -77,7 +82,18 @@ def sparse_squeeze_dense_dim(tensor: Tensor):
         tensor.indices(),
         tensor.values().squeeze(-1),
         tensor.shape[:-1],
-        requires_grad=tensor.requires_grad
+        requires_grad=tensor.requires_grad,
+    ).coalesce()
+
+
+def sparse_resize(tensor: Tensor, new_shape: list[int]):
+    assert tensor.is_sparse
+    assert len(new_shape) == tensor.ndim
+    assert all(new >= old for new, old in zip(new_shape, tensor.shape))
+    return torch.sparse_coo_tensor(
+        tensor.indices(),
+        tensor.values(),
+        new_shape
     ).coalesce()
 
 

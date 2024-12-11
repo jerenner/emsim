@@ -126,16 +126,13 @@ class DenoisingGenerator(nn.Module):
         denoising_reference_points_per_image = split_batch_concatted_tensor(
             denoising_reference_points, electron_batch_offsets
         )
-        n_denoising_queries_per_image = [
-            q.shape[0] for q in denoising_queries_per_image
-        ]
+        n_electrons_per_image = [q.shape[0] for q in denoising_queries_per_image]
 
         denoising_positive_mask = torch.zeros(
             denoising_queries.shape[:-1],
             dtype=torch.bool,
-            device=denoising_queries.device,
         )
-        denoising_positive_mask[:, 0] = True
+        denoising_positive_mask[..., 0] = True
 
         # flatten denoising group dim and pos/neg dim
         denoising_queries_per_image = [
@@ -188,7 +185,7 @@ class DenoisingGenerator(nn.Module):
         assert stacked_queries.shape[:-1] == stacked_refpoints.shape[:-1]
         total_main_queries = sum(n_main_queries_per_image)
         total_denoising_queries = sum(
-            [q * n_dn_groups * 2 for q in n_denoising_queries_per_image]
+            [q * n_dn_groups * 2 for q in n_electrons_per_image]
         )
         assert stacked_queries.shape[0] == total_main_queries + total_denoising_queries
 
@@ -201,15 +198,34 @@ class DenoisingGenerator(nn.Module):
             n_attn_heads,
             mask_main_queries_from_denoising,
         )
+
+        # make matched indices for loss calculation
+        denoising_matched_indices = []
+        dn_pos_mask_by_image = split_batch_concatted_tensor(
+            denoising_positive_mask, electron_batch_offsets
+        )
+        for n_elecs, dn_pos in zip(n_electrons_per_image, dn_pos_mask_by_image):
+            electron_indices = torch.arange(n_elecs).unsqueeze(1)
+            electron_indices = electron_indices.expand(-1, n_dn_groups).flatten()
+
+            query_indices = torch.arange(n_elecs * n_dn_groups * 2)
+            query_indices = query_indices.view(n_elecs, n_dn_groups, 2)
+            query_indices = query_indices[dn_pos]
+
+            denoising_matched_indices.append(
+                torch.stack([query_indices, electron_indices])
+            )
+
         dn_batch_mask_dict = {
             "main_query_masks": main_mask_per_image,
             "denoising_positive_mask": denoising_positive_mask,
             "stacked_batch_offsets": stacked_batch_offsets,
             "n_main_queries_per_image": n_main_queries_per_image,
-            "n_denoising_queries_per_image": n_denoising_queries_per_image,
+            "n_electrons_per_image": n_electrons_per_image,
             "n_denoising_groups": n_dn_groups,
             "n_total_gt_electrons": n_electrons,
             "electron_batch_offsets": electron_batch_offsets,
+            "denoising_matched_indices": denoising_matched_indices,
         }
         return stacked_queries, stacked_refpoints, attn_mask, dn_batch_mask_dict
 
@@ -253,7 +269,7 @@ class DenoisingGenerator(nn.Module):
             n_total_gt_electrons,
             n_denoising_groups,
             2,
-            -1,
+            *catted_denoising_parts.shape[2:],
         )
         if dummy_layer_dim:
             catted_main_parts = catted_main_parts.squeeze(0)

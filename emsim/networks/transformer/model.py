@@ -16,6 +16,7 @@ from ...utils.misc_utils import inverse_sigmoid
 from ...utils.sparse_utils import (
     batch_offsets_from_sparse_tensor_indices,
     sparse_index_select,
+    sparse_resize,
 )
 from ..positional_encoding import FourierEncoding
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
@@ -538,7 +539,8 @@ class EMTransformer(nn.Module):
 
         main_out = {}
         denoising_out = {
-            "electron_batch_offsets": dn_batch_mask_dict["electron_batch_offsets"]
+            "electron_batch_offsets": dn_batch_mask_dict["electron_batch_offsets"],
+            "dn_batch_mask_dict": dn_batch_mask_dict,
         }
 
         for key, value in decoder_out.items():
@@ -555,13 +557,14 @@ class EMTransformer(nn.Module):
                 for layer_seg_logits in value:
                     main = []
                     denoising = []
-                    for logits, main_end, n_dn in zip(
+                    for logits, main_end, n_elecs in zip(
                         layer_seg_logits,
                         dn_batch_mask_dict["n_main_queries_per_image"],
-                        dn_batch_mask_dict["n_denoising_queries_per_image"],
+                        dn_batch_mask_dict["n_electrons_per_image"],
                     ):
                         logits: Tensor
                         logits = logits.coalesce()
+                        n_dn = n_elecs * dn_batch_mask_dict["n_denoising_groups"] * 2
                         dn_end = main_end + n_dn
                         main_i = sparse_index_select(
                             logits, logits.ndim - 1, torch.arange(0, main_end)
@@ -576,10 +579,9 @@ class EMTransformer(nn.Module):
                     def restack_sparse_segmaps(segmaps: list[Tensor]):
                         max_elecs = max([segmap.shape[-1] for segmap in segmaps])
                         segmaps = [
-                            segmap.sparse_resize_(
+                            sparse_resize(
+                                segmap,
                                 [*segmap.shape[:-1], max_elecs],
-                                segmap.sparse_dim(),
-                                segmap.dense_dim(),
                             )
                             for segmap in segmaps
                         ]

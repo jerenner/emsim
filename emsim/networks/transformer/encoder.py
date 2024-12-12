@@ -149,8 +149,12 @@ class EMTransformerEncoder(nn.Module):
         token_layer_subset_indices: list[Tensor],
     ):
         # stack the spconv tensors over the batch dimension for faster indexing
-        stacked_feature_maps = self.stack_sparse_tensors(feature_maps, spatial_shapes[-1])
-        stacked_pos_encodings = self.stack_sparse_tensors(position_encoding, spatial_shapes[-1])
+        stacked_feature_maps = self.stack_sparse_tensors(
+            feature_maps, spatial_shapes[-1]
+        )
+        stacked_pos_encodings = self.stack_sparse_tensors(
+            position_encoding, spatial_shapes[-1]
+        )
         for layer_index, layer in enumerate(self.layers):
             indices_for_layer = [
                 indices[layer_index] for indices in token_layer_subset_indices
@@ -170,8 +174,10 @@ class EMTransformerEncoder(nn.Module):
             ]
             tokens_per_batch = [indices.shape[0] for indices in ij_indices_for_layer]
             batch_offsets = torch.tensor(
-                np.cumsum(np.concatenate([[0], tokens_per_batch]))[:-1]
-            )
+                [0, *tokens_per_batch],
+                device=stacked_feature_maps.device,
+                dtype=torch.int32,
+            ).cumsum(0)[:-1]
             stacked_ij_indices_for_layer = torch.cat(ij_indices_for_layer, 0)
             stacked_xy_positions_for_layer = torch.cat(xy_positions_for_layer, 0)
             query_for_layer = gather_from_sparse_tensor(
@@ -247,7 +253,9 @@ class EMTransformerEncoder(nn.Module):
         return stacked_feature_maps
 
     @staticmethod
-    def stack_sparse_tensors(tensor_list: list[ME.SparseTensor], full_scale_spatial_shape: Tensor):
+    def stack_sparse_tensors(
+        tensor_list: list[ME.SparseTensor], full_scale_spatial_shape: Tensor
+    ):
         converted_tensors = [
             (
                 minkowski_to_torch_sparse(tensor, full_scale_spatial_shape)

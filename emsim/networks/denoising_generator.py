@@ -14,7 +14,7 @@ class DenoisingGenerator(nn.Module):
     def __init__(
         self,
         d_model: int,
-        max_denoising_group_size: int = 300,
+        max_denoising_group_size: int = 400,
         max_total_denoising_queries: int = 1200,
         position_noise_variance: float = 1.0,
     ):
@@ -34,7 +34,9 @@ class DenoisingGenerator(nn.Module):
         max_electrons_per_image = electrons_per_image.max()
         assert max_electrons_per_image > 0, "Zero case unsupported"
 
-        n_denoising_groups = self.max_total_denoising_queries // max_electrons_per_image
+        n_denoising_groups = max(
+            self.max_total_denoising_queries // sum(electrons_per_image) // 2, 1
+        )
 
         noised_positions = self.make_pos_neg_noised_positions(
             true_positions, n_denoising_groups, image_size, electrons_per_image
@@ -109,14 +111,18 @@ class DenoisingGenerator(nn.Module):
         n_attn_heads: int,
         mask_main_queries_from_denoising: bool = False,
     ):
+        device = main_queries.device
         assert denoising_queries.ndim == 4  # (electron, dn group, pos/neg, feature)
         assert denoising_reference_points.ndim == 4
-        n_electrons = denoising_queries.shape[0]
-        n_dn_groups = denoising_queries.shape[1]
+        n_electrons = torch.tensor(denoising_queries.shape[0], device=device)
+        n_dn_groups = torch.tensor(denoising_queries.shape[1], device=device)
         main_queries_per_image = split_batch_concatted_tensor(
             main_queries, query_batch_offsets
         )
-        n_main_queries_per_image = [q.shape[0] for q in main_queries_per_image]
+        n_main_queries_per_image = torch.tensor(
+            [q.shape[0] for q in main_queries_per_image],
+            device=device,
+        )
         denoising_queries_per_image = split_batch_concatted_tensor(
             denoising_queries, electron_batch_offsets
         )
@@ -131,6 +137,7 @@ class DenoisingGenerator(nn.Module):
         denoising_positive_mask = torch.zeros(
             denoising_queries.shape[:-1],
             dtype=torch.bool,
+            device=device,
         )
         denoising_positive_mask[..., 0] = True
 
@@ -160,10 +167,8 @@ class DenoisingGenerator(nn.Module):
         main_mask_per_image = [
             torch.cat(
                 [
-                    torch.ones(main.shape[:-1], device=main.device, dtype=torch.bool),
-                    torch.zeros(
-                        denoising.shape[:-1], device=denoising.device, dtype=torch.bool
-                    ),
+                    torch.ones(main.shape[:-1], device=device, dtype=torch.bool),
+                    torch.zeros(denoising.shape[:-1], device=device, dtype=torch.bool),
                 ],
                 0,
             )
@@ -177,7 +182,7 @@ class DenoisingGenerator(nn.Module):
         stacked_batch_offsets = torch.cumsum(
             torch.tensor(
                 [0, *[queries.shape[0] for queries in stacked_queries_per_image[:-1]]],
-                device=query_batch_offsets.device,
+                device=device,
             ),
             0,
         )
@@ -204,13 +209,13 @@ class DenoisingGenerator(nn.Module):
         dn_pos_mask_by_image = split_batch_concatted_tensor(
             denoising_positive_mask, electron_batch_offsets
         )
-        for n_elecs, dn_pos in zip(n_electrons_per_image, dn_pos_mask_by_image):
-            electron_indices = torch.arange(n_elecs).unsqueeze(1)
+        for n_elecs, dn_positives in zip(n_electrons_per_image, dn_pos_mask_by_image):
+            electron_indices = torch.arange(n_elecs, device=device).unsqueeze(1)
             electron_indices = electron_indices.expand(-1, n_dn_groups).flatten()
 
-            query_indices = torch.arange(n_elecs * n_dn_groups * 2)
+            query_indices = torch.arange(n_elecs * n_dn_groups * 2, device=device)
             query_indices = query_indices.view(n_elecs, n_dn_groups, 2)
-            query_indices = query_indices[dn_pos]
+            query_indices = query_indices[dn_positives]
 
             denoising_matched_indices.append(
                 torch.stack([query_indices, electron_indices])

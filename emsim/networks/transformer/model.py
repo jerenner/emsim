@@ -567,30 +567,42 @@ class EMTransformer(nn.Module):
                         n_dn = n_elecs * dn_batch_mask_dict["n_denoising_groups"] * 2
                         dn_end = main_end + n_dn
                         main_i = sparse_index_select(
-                            logits, logits.ndim - 1, torch.arange(0, main_end)
+                            logits,
+                            logits.ndim - 1,
+                            torch.arange(
+                                0, main_end, device=logits.device, dtype=torch.int32
+                            ),
                         )
                         main.append(main_i)
                         denoising.append(
                             sparse_index_select(
-                                logits, logits.ndim - 1, torch.arange(main_end, dn_end)
+                                logits,
+                                logits.ndim - 1,
+                                torch.arange(
+                                    main_end,
+                                    dn_end,
+                                    device=logits.device,
+                                    dtype=torch.int32,
+                                ),
                             )
                         )
 
-                    def restack_sparse_segmaps(segmaps: list[Tensor]):
-                        max_elecs = max([segmap.shape[-1] for segmap in segmaps])
-                        segmaps = [
-                            sparse_resize(
-                                segmap,
-                                [*segmap.shape[:-1], max_elecs],
-                            )
-                            for segmap in segmaps
-                        ]
-                        return torch.stack(segmaps, 0).coalesce()
-
-                    main_out[key].append(restack_sparse_segmaps(main))
-                    denoising_out[key].append(restack_sparse_segmaps(denoising))
+                    main_out[key].append(self.__restack_sparse_segmaps(main))
+                    denoising_out[key].append(self.__restack_sparse_segmaps(denoising))
 
         return main_out, denoising_out
+
+    @staticmethod
+    def __restack_sparse_segmaps(segmaps: list[Tensor]):
+        max_elecs = max([segmap.shape[-1] for segmap in segmaps])
+        segmaps = [
+            sparse_resize(
+                segmap,
+                [*segmap.shape[:-1], max_elecs],
+            )
+            for segmap in segmaps
+        ]
+        return torch.stack(segmaps, 0).coalesce()
 
     @torch.no_grad()
     def nms_on_topk_index(

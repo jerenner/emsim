@@ -1,7 +1,6 @@
 import re
-from typing import Optional
+from typing import Optional, Union
 
-import numpy as np
 import sparse
 import torch
 from torch import Tensor
@@ -47,30 +46,74 @@ def sparse_select(tensor: Tensor, axis: int, index: int):
 
 
 def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
+    if not tensor.requires_grad:
+        return tensor.index_select(axis, index.long()).coalesce()
     assert tensor.is_sparse
     tensor = tensor.coalesce()
     assert index.ndim <= 1
-    assert axis >= 0, f"Negative axis not supported ({axis=})"
+    if axis < 0:
+        axis = tensor.ndim + axis
+    assert axis >= 0
     assert (
         index.max() <= tensor.shape[axis]
     ), "index tensor has entries out of bounds for axis"
-    index_masks = [tensor.indices()[axis] == i for i in index]
-    new_values = [tensor.values()[mask] for mask in index_masks]
-    new_indices = [
-        torch.cat(
-            [
-                tensor.indices()[:axis, mask],
-                tensor.indices().new_full([1, mask.count_nonzero().item()], i),
-                tensor.indices()[axis + 1 :, mask],
-            ]
-        )
-        for i, mask in enumerate(index_masks)
-    ]
+    tensor_indices = tensor.indices()
+    tensor_values = tensor.values()
+
+    new_indices, new_values = _sparse_index_select_inner(
+        tensor_indices, tensor_values, axis, index
+    )
     return torch.sparse_coo_tensor(
-        torch.cat(new_indices, -1),
-        torch.cat(new_values, 0),
-        (*tensor.shape[:axis], len(new_indices), *tensor.shape[axis + 1 :]),
+        new_indices,
+        new_values,
+        (*tensor.shape[:axis], len(index), *tensor.shape[axis + 1 :]),
     ).coalesce()
+
+
+# https://github.com/pytorch/pytorch/issues/69078#issuecomment-1087217720
+# fix not always working so jit commented out
+# @torch.jit.script
+def _sparse_index_select_inner(
+    tensor_indices: Tensor, tensor_values: Tensor, axis: int, index: Tensor
+):
+    index_masks = tensor_indices[axis] == index.unsqueeze(1)
+    match_count = index_masks.sum(1)
+    selected_items = index_masks.nonzero()[:, 1]
+    # new_values = torch.cat([tensor_values[mask] for mask in index_masks], 0)
+    new_values = tensor_values[selected_items]
+
+    leading_indices = tensor_indices[:axis, selected_items]
+    axis_indices = torch.repeat_interleave(
+        torch.arange(
+            index_masks.shape[0],
+            device=tensor_indices.device,
+            dtype=tensor_indices.dtype,
+        ),
+        match_count,
+    ).unsqueeze(0)
+    trailing_indices = tensor_indices[axis + 1 :, selected_items]
+    new_indices = torch.cat([leading_indices, axis_indices, trailing_indices], 0)
+    # new_indices = torch.cat([
+    #     torch.cat(
+    #         [
+    #             tensor_indices[:axis, mask],
+    #             i.expand(1, count),
+    #             # tensor_indices.new_full([1, count.item()], i),
+    #             tensor_indices[axis + 1 :, mask],
+    #         ]
+    #     )
+    #     for i, mask, count in zip(
+    #         torch.arange(
+    #             index_masks.shape[0],
+    #             device=tensor_indices.device,
+    #             dtype=tensor_indices.dtype,
+    #         ),
+    #         index_masks,
+    #         match_count,
+    #     )
+    # ], -1)
+
+    return new_indices, new_values
 
 
 def sparse_squeeze_dense_dim(tensor: Tensor):
@@ -91,9 +134,7 @@ def sparse_resize(tensor: Tensor, new_shape: list[int]):
     assert len(new_shape) == tensor.ndim
     assert all(new >= old for new, old in zip(new_shape, tensor.shape))
     return torch.sparse_coo_tensor(
-        tensor.indices(),
-        tensor.values(),
-        new_shape
+        tensor.indices(), tensor.values(), new_shape
     ).coalesce()
 
 
@@ -203,7 +244,7 @@ def gather_from_sparse_tensor(
     ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
 
     index_search = torch.searchsorted(
-        sparse_tensor_indices_linearized, index_tensor_linearized
+        sparse_tensor_indices_linearized, index_tensor_linearized, out_int32=True
     ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
     selected = sparse_tensor_values[index_search]
     if sparse_tensor.dense_dim() > 0:
@@ -244,9 +285,12 @@ def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tens
                 f"`sparse_tensor.sparse_dim()`, got {index_tensor.shape[-1]=} "
                 f"and {sparse_tensor.sparse_dim()=}"
             )
-    sparse_shape = sparse_tensor.shape[: sparse_tensor.sparse_dim()]
+    sparse_shape = index_tensor.new_tensor(
+        sparse_tensor.shape[: sparse_tensor.sparse_dim()]
+    )
+    sparse_shape_1 = torch.cat([sparse_shape, sparse_shape.new_tensor([1])])
     dim_linear_offsets = index_tensor.new_tensor(
-        [np.prod((sparse_shape + (1,))[i + 1 :]) for i in range(len(sparse_shape))]
+        [torch.prod(sparse_shape_1[i + 1 :]) for i in range(len(sparse_shape))]
     )
 
     sparse_tensor_indices_linear = (
@@ -266,7 +310,7 @@ def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tens
     )
 
     assert index_tensor_linearized.min() >= 0
-    assert index_tensor_linearized.max() <= np.prod(sparse_shape)
+    assert index_tensor_linearized.max() <= torch.prod(sparse_shape)
 
     return (
         sparse_tensor_indices_linear,
@@ -314,7 +358,7 @@ def scatter_to_sparse_tensor(
     ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
 
     index_search = torch.searchsorted(
-        sparse_tensor_indices_linearized, index_tensor_linearized
+        sparse_tensor_indices_linearized, index_tensor_linearized, out_int32=True
     ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
 
     new_values = sparse_tensor_values.clone()
@@ -356,7 +400,7 @@ def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor) -> Tensor:
     matching_indices = batch_indices.unsqueeze(-1) == torch.arange(
         max_batch_index + 1, device=batch_indices.device, dtype=batch_indices.dtype
     )
-    out = matching_indices.to(torch.uint8).argmax(0).cpu()
+    out = matching_indices.to(torch.uint8).argmax(0)
     return out
 
 

@@ -28,10 +28,12 @@ def multi_scale_deformable_attention(
 
     sampling_locations = sampling_locations * 2 - 1  # rescale to (-1, 1)
 
-    batch_sizes = torch.diff(torch.cat([query_offsets, torch.tensor([n_queries])]))
+    batch_sizes = torch.diff(
+        torch.cat([query_offsets, query_offsets.new_tensor([n_queries])])
+    )
     xy_batch_indices = torch.cat(
         [
-            torch.full([size], i, device=sampling_locations.device, dtype=torch.long)
+            torch.full([size], i, device=sampling_locations.device, dtype=torch.int)
             for i, size in enumerate(batch_sizes)
         ]
     )
@@ -39,7 +41,7 @@ def multi_scale_deformable_attention(
         n_queries, n_levels, n_points, n_heads
     )
     xy_level_indices = (
-        torch.arange(n_levels, device=xy_batch_indices.device)
+        torch.arange(n_levels, device=xy_batch_indices.device, dtype=torch.int)
         .view(1, -1, 1, 1)
         .expand(n_queries, n_levels, n_points, n_heads)
     )

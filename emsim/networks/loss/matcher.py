@@ -42,7 +42,9 @@ class HungarianMatcher(nn.Module):
         n_queries = torch.cat(
             [
                 predicted_dict["query_batch_offsets"],
-                torch.tensor([predicted_dict["pred_logits"].shape[-2]]),
+                predicted_dict["query_batch_offsets"].new_tensor(
+                    [predicted_dict["pred_logits"].shape[-2]]
+                ),
             ]
         ).diff()
         n_electrons = target_dict["batch_size"]
@@ -229,8 +231,9 @@ def get_bce_cost(
     true_segmap_binarized = sparse_flatten_hw(
         torch.sparse_coo_tensor(
             segmap.indices(),
-            segmap.values().to(torch.bool).float(),
+            segmap.values().to(torch.bool).to(torch.get_default_dtype()),
             segmap.shape,
+            is_coalesced=segmap.is_coalesced()
         )
     )
 

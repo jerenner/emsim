@@ -45,6 +45,7 @@ def sparse_select(tensor: Tensor, axis: int, index: int):
     ).coalesce()
 
 
+@torch.jit.ignore
 def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
     if not tensor.requires_grad:
         return tensor.index_select(axis, index.long()).coalesce()
@@ -72,7 +73,7 @@ def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
 
 # https://github.com/pytorch/pytorch/issues/69078#issuecomment-1087217720
 # fix not always working so jit commented out
-# @torch.jit.script
+@torch.jit.script
 def _sparse_index_select_inner(
     tensor_indices: Tensor, tensor_values: Tensor, axis: int, index: Tensor
 ):
@@ -129,7 +130,7 @@ def sparse_squeeze_dense_dim(tensor: Tensor):
     ).coalesce()
 
 
-def sparse_resize(tensor: Tensor, new_shape: list[int]):
+def sparse_resize(tensor: Tensor, new_shape: list[int]) -> Tensor:
     assert tensor.is_sparse
     assert len(new_shape) == tensor.ndim
     assert all(new >= old for new, old in zip(new_shape, tensor.shape))
@@ -138,7 +139,7 @@ def sparse_resize(tensor: Tensor, new_shape: list[int]):
     ).coalesce()
 
 
-def sparse_flatten_hw(tensor: Tensor):
+def sparse_flatten_hw(tensor: Tensor) -> Tensor:
     assert tensor.is_sparse
     tensor = tensor.coalesce()
     indices = tensor.indices()
@@ -150,6 +151,54 @@ def sparse_flatten_hw(tensor: Tensor):
     new_shape = tensor.shape[:1] + (H * W,) + tensor.shape[3:]
     new_indices = torch.cat([indices[:1], ij, indices[3:]], 0).long()
     return torch.sparse_coo_tensor(new_indices, tensor.values(), new_shape).coalesce()
+
+
+def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
+    assert tensor.is_sparse
+    if start_axis < 0:
+        start_axis = tensor.ndim + start_axis
+    if end_axis < 0:
+        end_axis = tensor.ndim + end_axis
+    assert end_axis >= start_axis
+    assert start_axis > 0 and end_axis > 0
+    assert end_axis <= tensor.ndim
+    tensor = tensor.coalesce()
+    tensor_indices = tensor.indices()
+    indices_to_flatten = tensor_indices[start_axis : end_axis + 1]
+    dim_sizes = tensor.shape[start_axis : end_axis + 1]
+    dim_sizes_1 = torch.cat(
+        [
+            torch.tensor(dim_sizes, device=tensor.device, dtype=torch.int),
+            torch.tensor([1], device=tensor.device, dtype=torch.int),
+        ]
+    )
+    dim_linear_offsets = torch.cat(
+        [
+            torch.prod(dim_sizes_1[i + 1 :], dim=0, keepdim=True)
+            for i in torch.arange(
+                start=0,
+                end=end_axis - start_axis + 1,
+                dtype=torch.int32,
+                device=dim_sizes_1.device,
+            )
+        ],
+        0,
+    )
+
+    flattened_indices = (indices_to_flatten * dim_linear_offsets.unsqueeze(-1)).sum(
+        0, keepdim=True
+    )
+
+    new_shape = (
+        tensor.shape[:start_axis]
+        + (dim_sizes_1.prod().item(),)
+        + tensor.shape[end_axis + 1 :]
+    )
+
+    new_indices = torch.cat(
+        [tensor_indices[:start_axis], flattened_indices, tensor_indices[end_axis + 1 :]]
+    )
+    return torch.sparse_coo_tensor(new_indices, tensor.values(), new_shape)
 
 
 def unpack_sparse_tensors(batch: dict[str, Tensor]):

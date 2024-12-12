@@ -73,7 +73,7 @@ def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
 
 # https://github.com/pytorch/pytorch/issues/69078#issuecomment-1087217720
 # fix not always working so jit commented out
-@torch.jit.script
+# @torch.jit.script
 def _sparse_index_select_inner(
     tensor_indices: Tensor, tensor_values: Tensor, axis: int, index: Tensor
 ):

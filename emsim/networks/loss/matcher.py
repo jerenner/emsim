@@ -1,18 +1,14 @@
-import torch
-from torch import Tensor, nn
-import torch.nn.functional as F
-from scipy.optimize import linear_sum_assignment
 import logging
 
-# import sparse
-# import numpy as np
+import torch
+import torch.nn.functional as F
+from scipy.optimize import linear_sum_assignment
+from torch import Tensor, nn
 
 from emsim.utils.sparse_utils import (
-    # bhwn_to_nhw_iterator_over_batches_torch,
-    # torch_sparse_to_pydata_sparse,
     sparse_flatten_hw,
+    sparse_index_select,
 )
-
 
 _logger = logging.getLogger(__name__)
 
@@ -127,77 +123,6 @@ def get_class_cost(is_electron_logit: Tensor, batch_offsets: Tensor) -> list[Ten
     return batch_losses
 
 
-# @torch.jit.ignore
-# def _pydata_sparse_bce(
-#     pos: Tensor,
-#     neg: Tensor,
-#     targets: Tensor,
-#     n_queries: Tensor,
-#     n_electrons: Tensor,
-# ) -> list[Tensor]:
-#     pos_pydata = torch_sparse_to_pydata_sparse(pos)
-#     neg_pydata = torch_sparse_to_pydata_sparse(neg)
-#     target_pydata = torch_sparse_to_pydata_sparse(targets)
-
-#     pos_loss = sparse.einsum("bhwq,bhwe->bqe", pos_pydata, target_pydata)
-#     neg_1 = neg_pydata.sum([1, 2]).todense()[..., None]
-#     neg_2 = sparse.einsum("bhwq,bhwe->bqe", neg_pydata, target_pydata).todense()
-#     neg_loss = neg_1 - neg_2
-
-#     for pos_i, q, e in zip(pos_loss, n_queries, n_electrons):
-#         assert pos_i[q:].sum() == 0
-#         assert pos_i[:, e:].sum() == 0
-
-#     bce_loss = pos_loss.todense() + neg_loss
-#     num_nonzero_pixels = [im.sum(-1).nnz for im in target_pydata]
-#     loss_per_image = [
-#         torch.from_numpy(loss[:q, :e] / nnz)
-#         for loss, q, e, nnz in zip(bce_loss, n_queries, n_electrons, num_nonzero_pixels)
-#     ]
-#     return loss_per_image
-
-
-# @torch.jit.script
-# def get_bce_cost(
-#     mask_logits: Tensor, segmap: Tensor, n_queries: Tensor, n_electrons: Tensor
-# ) -> list[Tensor]:
-#     logits_indices = mask_logits.indices()
-#     logits_values = mask_logits.values()
-#     pos_values = F.binary_cross_entropy_with_logits(
-#         logits_values, torch.ones_like(logits_values), reduction="none"
-#     )
-#     nonzero_pos_indices = pos_values.nonzero().squeeze(1)
-#     pos_tensor = torch.sparse_coo_tensor(
-#         logits_indices[:, nonzero_pos_indices],
-#         pos_values[nonzero_pos_indices],
-#         mask_logits.shape,
-#     )
-
-#     neg_values = F.binary_cross_entropy_with_logits(
-#         logits_values, torch.zeros_like(logits_values), reduction="none"
-#     )
-#     nonzero_neg_indices = neg_values.nonzero().squeeze(1)
-#     neg_tensor = torch.sparse_coo_tensor(
-#         logits_indices[:, nonzero_neg_indices],
-#         neg_values[nonzero_neg_indices],
-#         mask_logits.shape,
-#     )
-
-#     true_segmap_binarized = torch.sparse_coo_tensor(
-#         segmap.indices(),
-#         segmap.values().to(torch.bool).float(),
-#         segmap.shape,
-#     )
-
-#     return _pydata_sparse_bce(
-#         pos_tensor.cpu(),
-#         neg_tensor.cpu(),
-#         true_segmap_binarized.cpu(),
-#         n_queries,
-#         n_electrons,
-#     )
-
-
 @torch.jit.script
 def get_bce_cost(
     mask_logits: Tensor, segmap: Tensor, n_queries: Tensor, n_electrons: Tensor
@@ -233,7 +158,7 @@ def get_bce_cost(
             segmap.indices(),
             segmap.values().to(torch.bool).to(segmap.dtype),
             segmap.shape,
-            is_coalesced=segmap.is_coalesced()
+            is_coalesced=segmap.is_coalesced(),
         )
     )
 
@@ -241,54 +166,26 @@ def get_bce_cost(
     for pos, neg, targ, q, e in zip(
         pos_tensor, neg_tensor, true_segmap_binarized, n_queries, n_electrons
     ):
-        pos_loss = torch.sparse.mm(pos.T, targ).to_dense()
-        neg_loss = (
-            torch.sparse.sum(neg, (0,)).to_dense().unsqueeze(-1)
-            - torch.sparse.mm(neg.T, targ).to_dense()
+        # pos_loss = torch.sparse.mm(pos.T, targ).to_dense()
+        # neg_loss = (
+        #     torch.sparse.sum(neg, (0,)).to_dense().unsqueeze(-1)
+        #     - torch.sparse.mm(neg.T, targ).to_dense()
+        # )
+        pixels_with_predictions = pos.sum(1).to_dense().nonzero().squeeze(1)
+        pos_select = sparse_index_select(pos, 0, pixels_with_predictions).to_dense()
+        neg_select = sparse_index_select(neg, 0, pixels_with_predictions).to_dense()
+        targ_select = sparse_index_select(targ, 0, pixels_with_predictions).to_dense()
+        pos_loss = torch.mm(pos_select.T, targ_select)
+        neg_loss = torch.sum(neg_select, (0,)).unsqueeze(-1) - torch.mm(
+            neg_select.T, targ_select
         )
+
         nnz = targ._nnz()
         loss = (pos_loss + neg_loss) / nnz
         out.append(loss[:q, :e])
 
     out = [o.cpu() for o in out]
     return out
-
-
-# @torch.jit.ignore
-# def _pydata_sparse_dice(predicted: Tensor, true: Tensor) -> Tensor:
-#     predicted = torch_sparse_to_pydata_sparse(predicted)
-#     true = torch_sparse_to_pydata_sparse(true)
-#     num = 2 * sparse.einsum("qhw,ehw->qe", predicted, true).todense()
-#     den = predicted.sum([1, 2])[..., None].todense() + true.sum([1, 2])[None].todense()
-#     return torch.as_tensor(1 - ((num + 1) / (den + 1)))
-
-
-# # @torch.jit.script
-# def get_dice_cost(portion_logits: Tensor, true_portions: Tensor) -> list[Tensor]:
-#     portions = torch.sparse.softmax(portion_logits, -1)
-#     portions_values = portions.values()
-#     nonzero_portions = portions_values.nonzero(as_tuple=True)
-#     portions = torch.sparse_coo_tensor(
-#         portion_logits.indices()[:, nonzero_portions[0]],
-#         portions_values[nonzero_portions],
-#         portion_logits.shape,
-#     ).coalesce()
-#     return [
-#         batch_dice_cost(portions.coalesce(), segmap.coalesce())
-#         for portions, segmap in zip(portions, true_portions)
-#     ]
-
-
-# # @torch.jit.script
-# def batch_dice_cost(portion_logits: Tensor, true_portions: Tensor) -> Tensor:
-#     portions = torch.sparse_coo_tensor(
-#         portion_logits.indices(),
-#         portion_logits.values().sigmoid(),
-#         portion_logits.shape,
-#     ).cpu()
-#     true_portions = true_portions.cpu()
-
-#     return _pydata_sparse_dice(portions, true_portions)
 
 
 @torch.jit.script
@@ -307,10 +204,18 @@ def get_dice_cost(
     for pred, true, q, e in zip(
         portions_flat, true_portions_flat, n_queries, n_electrons
     ):
-        num = 2 * torch.sparse.mm(pred.T, true).to_dense()
-        den = torch.sparse.sum(pred, (0,)).to_dense().unsqueeze(-1) + torch.sparse.sum(
+        # num = 2 * torch.sparse.mm(pred.T, true).to_dense()
+        # den = torch.sparse.sum(pred, (0,)).to_dense().unsqueeze(-1) + torch.sparse.sum(
+        #     true, (0,)
+        # ).to_dense().unsqueeze(0)
+        pixels_with_predictions = pred.sum(1).to_dense().nonzero().squeeze(1)
+        pred_select = sparse_index_select(pred, 0, pixels_with_predictions).to_dense()
+        true_select = sparse_index_select(true, 0, pixels_with_predictions).to_dense()
+        num = 2 * torch.mm(pred_select.T, true_select)
+        den = pred_select.sum(0).unsqueeze(-1) + torch.sparse.sum(
             true, (0,)
         ).to_dense().unsqueeze(0)
+
         loss = 1 - ((num + 1) / (den + 1))
         out.append(loss[:q, :e])
 

@@ -231,7 +231,7 @@ def get_bce_cost(
     true_segmap_binarized = sparse_flatten_hw(
         torch.sparse_coo_tensor(
             segmap.indices(),
-            segmap.values().to(torch.bool).to(torch.get_default_dtype()),
+            segmap.values().to(torch.bool).to(segmap.dtype),
             segmap.shape,
             is_coalesced=segmap.is_coalesced()
         )

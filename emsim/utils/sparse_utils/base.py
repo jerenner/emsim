@@ -82,8 +82,9 @@ def _sparse_index_select_inner(
     selected_items = index_masks.nonzero()[:, 1]
     # new_values = torch.cat([tensor_values[mask] for mask in index_masks], 0)
     new_values = tensor_values[selected_items]
+    selected_indices = tensor_indices[:, selected_items]
 
-    leading_indices = tensor_indices[:axis, selected_items]
+    leading_indices = selected_indices[:axis]
     axis_indices = torch.repeat_interleave(
         torch.arange(
             index_masks.shape[0],
@@ -92,27 +93,8 @@ def _sparse_index_select_inner(
         ),
         match_count,
     ).unsqueeze(0)
-    trailing_indices = tensor_indices[axis + 1 :, selected_items]
+    trailing_indices = selected_indices[axis + 1 :]
     new_indices = torch.cat([leading_indices, axis_indices, trailing_indices], 0)
-    # new_indices = torch.cat([
-    #     torch.cat(
-    #         [
-    #             tensor_indices[:axis, mask],
-    #             i.expand(1, count),
-    #             # tensor_indices.new_full([1, count.item()], i),
-    #             tensor_indices[axis + 1 :, mask],
-    #         ]
-    #     )
-    #     for i, mask, count in zip(
-    #         torch.arange(
-    #             index_masks.shape[0],
-    #             device=tensor_indices.device,
-    #             dtype=tensor_indices.dtype,
-    #         ),
-    #         index_masks,
-    #         match_count,
-    #     )
-    # ], -1)
 
     return new_indices, new_values
 
@@ -135,7 +117,7 @@ def sparse_resize(tensor: Tensor, new_shape: list[int]) -> Tensor:
     assert len(new_shape) == tensor.ndim
     assert all(new >= old for new, old in zip(new_shape, tensor.shape))
     return torch.sparse_coo_tensor(
-        tensor.indices(), tensor.values(), new_shape
+        tensor.indices(), tensor.values(), new_shape, is_coalesced=tensor.is_coalesced()
     ).coalesce()
 
 

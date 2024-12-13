@@ -41,7 +41,6 @@ class EMModel(nn.Module):
 
     def forward(self, batch: dict):
         image = batch["image_sparsified"]
-        _logger.debug("Begin backbone")
         features = self.backbone(image)
         features = self.channel_uniformizer(features)
 
@@ -55,7 +54,6 @@ class EMModel(nn.Module):
         else:
             denoising_queries = noised_positions = denoising_batch_offsets = None
 
-        _logger.debug("Begin transformer")
         (
             output_logits,
             output_positions,

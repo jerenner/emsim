@@ -449,12 +449,6 @@ class EMCriterion(nn.Module):
         assert sorted_predicted_logits.shape == sorted_true.shape
 
         predicted_segmentation: Tensor = torch.sparse.softmax(sorted_predicted_logits, -1)
-        # predicted_segmentation.register_hook(lambda x: print("predicted_segmentation"))
-
-        # unioned_predicted, unioned_true = union_sparse_indices(
-        #     predicted_segmentation, sorted_true
-        # )
-        # assert torch.equal(unioned_predicted.indices(), unioned_true.indices())
 
         losses = []
         num = 2 * predicted_segmentation * sorted_true
@@ -635,18 +629,6 @@ def get_query_class_preds_targets_weights(
     return pred_logits, labels, weights
 
 
-def get_segmentation_logits_targets(
-    predicted_dict: dict[str, Tensor],
-    target_dict: dict[str, Tensor],
-    matched_indices: Tensor,
-):
-    reordered_predicted, reordered_true = _sort_predicted_true_maps(
-        predicted_dict["pred_segmentation_logits"],
-        target_dict["segmentation_mask"],
-        matched_indices,
-    )
-
-
 def _sort_predicted_true_maps(
     predicted_segmentation_logits: Tensor,
     true_segmentation_map: Tensor,
@@ -683,12 +665,15 @@ def _sort_predicted_true_maps(
     return reordered_predicted, reordered_true
 
 
+@torch.jit.script
 def _sort_tensor(
-    batch_concatted_tensor: Tensor, batch_offsets: Tensor, matched_indices: Tensor
+    batch_concatted_tensor: Tensor, batch_offsets: Tensor, matched_indices: list[Tensor]
 ) -> Tensor:
-    split = split_batch_concatted_tensor(batch_concatted_tensor, batch_offsets)
-    reordered = [points[inds] for points, inds in zip(split, matched_indices)]
-    return torch.cat(reordered)
+    stacked_matched = torch.cat(
+        [matched + offset for matched, offset in zip(matched_indices, batch_offsets)]
+    )
+    out = batch_concatted_tensor[stacked_matched]
+    return out
 
 
 # def get_occupancy_loss(

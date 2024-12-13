@@ -45,7 +45,6 @@ def sparse_select(tensor: Tensor, axis: int, index: int):
     ).coalesce()
 
 
-@torch.jit.ignore
 def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
     if not tensor.requires_grad:
         return tensor.index_select(axis, index.long()).coalesce()
@@ -71,18 +70,20 @@ def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
     ).coalesce()
 
 
+# sometimes this error happens, link to potential workaround
 # https://github.com/pytorch/pytorch/issues/69078#issuecomment-1087217720
-# fix not always working so jit commented out
-# @torch.jit.script
+@torch.jit.script
 def _sparse_index_select_inner(
     tensor_indices: Tensor, tensor_values: Tensor, axis: int, index: Tensor
 ):
     index_masks = tensor_indices[axis] == index.unsqueeze(1)
     match_count = index_masks.sum(1)
+    # selected_items = torch.where(index_masks)[1]
     selected_items = index_masks.nonzero()[:, 1]
-    # new_values = torch.cat([tensor_values[mask] for mask in index_masks], 0)
     new_values = tensor_values[selected_items]
     selected_indices = tensor_indices[:, selected_items]
+    # new_values = tensor_values.expand_as(index_masks)[index_masks]
+    # selected_indices = tensor_indices.unsqueeze(1).expand(-1, index_masks.shape[0], -1)[:, index_masks]
 
     leading_indices = selected_indices[:axis]
     axis_indices = torch.repeat_interleave(
@@ -248,9 +249,9 @@ def gather_from_sparse_tensor(
         Tensor: Tensor of dimension ..., M; where the leading dimensions are
         the same as the batch dimensions from `index_tensor`
         Tensor: Boolean tensor of dimension ...; where each element is True if
-        the corresponding index is a specified (nonzero) element of the sparse
-        tensor and False if not
-    """
+        # the corresponding index is a specified (nonzero) element of the sparse
+    #     tensor and False if not
+    # """
     if index_tensor.is_nested:
         results = [
             gather_from_sparse_tensor(
@@ -417,8 +418,8 @@ def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor) -> Tensor:
     Args:
         indices_tensor (torch.Tensor): A tensor of shape (M x nnz), where M is
         the number of dimensions of the underlying sparse tensor and nnz is the
-        number of nonzero elements in the sparse tensor. Assumes the sparse
-        tensor has been coalesce()d.
+        # number of nonzero elements in the sparse tensor. Assumes the sparse
+        # tensor has been coalesce()d.
 
     Returns:
         torch.Tensor: A 1D tensor with elements corresponding the the first

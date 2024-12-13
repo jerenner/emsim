@@ -9,7 +9,7 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor):
     return torch.tensor_split(tensor, batch_offsets[1:].cpu())
 
 
-@torch.compiler.disable
+# @torch.compiler.disable
 def deconcat_add_batch_dim(tensor: Tensor, batch_offsets: Tensor, pad_value=0):
     assert batch_offsets.ndim == 1
     if batch_offsets[-1] != tensor.shape[0]:
@@ -39,7 +39,7 @@ def concatted_to_nested_tensor(tensor: Tensor, batch_offsets: Tensor):
     return torch.nested.as_nested_tensor(list(*split_tensor))
 
 
-@torch.compiler.disable
+# @torch.compiler.disable
 def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] = None):
     batch_size = tensor.shape[0]
     max_len = tensor.shape[1]

@@ -449,19 +449,13 @@ class EMCriterion(nn.Module):
         assert sorted_predicted_logits.shape == sorted_true.shape
 
         predicted_segmentation = torch.sparse.softmax(sorted_predicted_logits, -1)
-        # predicted_segmentation.register_hook(lambda x: print("predicted_segmentation"))
 
-        unioned_predicted, unioned_true = union_sparse_indices(
-            predicted_segmentation, sorted_true
-        )
-        assert torch.equal(unioned_predicted.indices(), unioned_true.indices())
-
-        num = 2 * unioned_predicted * unioned_true
-        den = unioned_predicted + unioned_true
         losses = []
-        for num_i, den_i in zip(num.unbind(), den.unbind()):
-            num_sum = num_i.coalesce().values().sum()
-            den_sum = den_i.coalesce().values().sum()
+        num = 2 * predicted_segmentation * sorted_true
+        den = predicted_segmentation + sorted_true
+        for num_i, den_i in zip(num, den):
+            num_sum = num_i.sum()
+            den_sum = den_i.sum()
             losses.append(1 - (num_sum + 1) / (den_sum + 1))
         loss = torch.stack(losses).mean()
         return loss

@@ -172,9 +172,9 @@ def get_bce_cost(
         #     - torch.sparse.mm(neg.T, targ).to_dense()
         # )
         pixels_with_predictions = pos.sum(1).to_dense().nonzero().squeeze(1)
-        pos_select = sparse_index_select(pos, 0, pixels_with_predictions).to_dense()
-        neg_select = sparse_index_select(neg, 0, pixels_with_predictions).to_dense()
-        targ_select = sparse_index_select(targ, 0, pixels_with_predictions).to_dense()
+        pos_select = pos.index_select(0, pixels_with_predictions).to_dense()
+        neg_select = neg.index_select(0, pixels_with_predictions).to_dense()
+        targ_select = targ.index_select(0, pixels_with_predictions).to_dense()
         pos_loss = torch.mm(pos_select.T, targ_select)
         neg_loss = torch.sum(neg_select, (0,)).unsqueeze(-1) - torch.mm(
             neg_select.T, targ_select
@@ -209,8 +209,8 @@ def get_dice_cost(
         #     true, (0,)
         # ).to_dense().unsqueeze(0)
         pixels_with_predictions = pred.sum(1).to_dense().nonzero().squeeze(1)
-        pred_select = sparse_index_select(pred, 0, pixels_with_predictions).to_dense()
-        true_select = sparse_index_select(true, 0, pixels_with_predictions).to_dense()
+        pred_select = pred.index_select(0, pixels_with_predictions).to_dense()
+        true_select = true.index_select(0, pixels_with_predictions).to_dense()
         num = 2 * torch.mm(pred_select.T, true_select)
         den = pred_select.sum(0).unsqueeze(-1) + torch.sparse.sum(
             true, (0,)

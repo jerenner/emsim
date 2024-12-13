@@ -28,6 +28,14 @@ transformer:
   decoder_detach_updated_positions: true
   decoder_look_forward_twice: true
 
+denoising:
+  use_denoising: false
+  max_denoising_group_size: 400
+  max_total_denoising_queries: 1200
+  position_noise_variance: 1.0
+  mask_main_queries_from_denoising: false
+  denoising_loss_weight: 1.0
+
 criterion:
   aux_loss:
     use_aux_loss: true
@@ -56,7 +64,7 @@ dataset:
   directory: "./data"
   # pixels_file: "pixelated_5um_tracks_thinned_4um_back_20k_300keV.txt"
   pixels_file: "pixelated_5um_tracks_thinned_4um_back_1M_300keV.txt"
-  num_workers: 6
+  num_workers: 8
   train_percentage: 0.95
   events_per_image_range: [100, 200]
   noise_std: 1.0

@@ -165,3 +165,4 @@ cython_debug/
 .conda
 slurm-*.out
 outputs
+catscan_outputs

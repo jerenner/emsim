@@ -2,41 +2,51 @@ name: emsim
 channels:
   - huggingface
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
-  - python==3.11
-  - pytorch-cuda=11.8
+  - python>=3.11 # highest supported python version for spconv
+  - pytorch-cuda=12.4  # required by spconv
+  # - cuda=12.1
   - pytorch::pytorch
+  - sparse=0.15 # conda wants to install 0.3 if you let it
+  # - thrust # for MinkowskiEngine
+  - lightning
+  - tensorboard
+  - tensorboardx
+  - torchmetrics
+  - pycocotools
+  - hydra-core
+  - torchvision
+  - transformers
+  - timm
+  # - torchquad
+  # - pandas
+  # - pillow
   - pip
   - h5py
   - cython
   - matplotlib
+  # - seaborn
   - numpy
-  - pandas
-  - pillow
-  - tensorboard
-  - tensorboardx
-  - lightning
-  - torchmetrics
-  - pycocotools
-  - hydra-core
   - yaml
+  - pynvml
   - scipy
-  - seaborn
-  - torchvision
-  - transformers
-  - huggingface_hub
-  - datasets
-  - timm
+  # - huggingface_hub
+  # - datasets
   - ipython
   - notebook
   - ipympl
-  - sparse
+  - termcolor
+  - portalocker
+  - sympy
   - fire
-  - torchquad
+  - ninja
+  - lark
+  - pytest
   - deprecation
   - pip:
     - stempy
-    - cumm-cu118
-    - spconv-cu118
+    # - cumm-cu120
+    # - spconv-cu120

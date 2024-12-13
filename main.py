@@ -277,6 +277,28 @@ def _elapsed_time_str(elapsed_time):
     return str(datetime.timedelta(seconds=int(elapsed_time)))
 
 
+class CudaUsageMonitor(nn.Module):
+    MB = 1024**2
+
+    def __init__(self, sample_window: int):
+        self.utilization = RunningMean(sample_window)
+        self.memory = RunningMean(sample_window)
+        self.max_memory = RunningMean(sample_window)
+
+    def update(self):
+        self.utilization.update(torch.cuda.utilization(device=self.utilization.device))
+        self.memory.update(torch.cuda.memory_allocated(device=self.memory.device))
+        self.max_memory.update(
+            torch.cuda.max_memory_allocated(device=self.max_memory.device)
+        )
+
+    def compute(self):
+        utilization = self.utilization.compute()
+        memory = self.memory.compute() // self.MB
+        max_memory = self.max_memory.compute() // self.max_memory
+        return utilization, memory, max_memory
+
+
 def __debug_find_unused_parameters(model):
     unused_parameters = []
     for name, param in model.named_parameters():
@@ -284,6 +306,26 @@ def __debug_find_unused_parameters(model):
             unused_parameters.append(name)
     if len(unused_parameters) > 0:
         _logger.debug(f"Unused parameters: {unused_parameters}")
+
+
+# Doesn't work because can't get each worker's dataset's state
+# def verify_data_integrity(dataloader: torch.utils.data.DataLoader, fabric: Fabric):
+#     if fabric.world_size <= 1:
+#         return
+#     dataset: GeantElectronDataset = dataloader.dataset
+#     electron_order = torch.tensor(dataset._shuffled_elec_indices, device=fabric.device)
+#     rank0_electron_order = fabric.broadcast(electron_order, 0)
+#     assert torch.equal(electron_order, rank0_electron_order)
+
+#     thisrank_indices = torch.cat([
+#         torch.tensor(chunk, device=fabric.device)
+#         for chunk in dataset._chunks_this_loader
+#     ])
+#     rank0_indices = fabric.broadcast(thisrank_indices, 0)
+#     if not fabric.is_global_zero:
+#         combined = torch.cat(rank0_indices, thisrank_indices)
+#         assert torch.unique(combined).shape[0] == combined.shape[0]
+#     fabric.barrier()
 
 
 if __name__ == "__main__":

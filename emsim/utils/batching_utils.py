@@ -10,21 +10,35 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor):
 
 
 # @torch.compiler.disable
-def deconcat_add_batch_dim(tensor: Tensor, batch_offsets: Tensor, pad_value=0):
+@torch.jit.script
+def deconcat_add_batch_dim(
+    tensor: Tensor, batch_offsets: Tensor, pad_value: float = 0.0
+):
+    assert tensor.ndim == 2
     assert batch_offsets.ndim == 1
     if batch_offsets[-1] != tensor.shape[0]:
         batch_offsets = torch.cat(
-            [batch_offsets, batch_offsets.new_tensor([len(tensor)])]
+            [
+                batch_offsets,
+                torch.tensor(
+                    [len(tensor)],
+                    dtype=batch_offsets.dtype,
+                    device=batch_offsets.device,
+                ),
+            ]
         )
-    batchsize = batch_offsets.shape[0] - 1
     seq_lens = batch_offsets[1:] - batch_offsets[:-1]
-    max_len = max(seq_lens)
+    batchsize = batch_offsets.shape[0] - 1
+    max_len = int(torch.max(seq_lens))
     feature_dim = tensor.shape[-1]
+    out_shape = torch.Size([batchsize, max_len, feature_dim])
 
-    out = tensor.new_full([batchsize, max_len, feature_dim], pad_value)
-    padding_mask = tensor.new_ones((batchsize, max_len), dtype=torch.bool)
+    out = tensor.new_full(out_shape, pad_value)
+    padding_mask = torch.ones(
+        torch.Size([batchsize, max_len]), device=tensor.device, dtype=torch.bool
+    )
     # for b, out_b, mask_b in zip(range(batchsize), out, padding_mask):
-    for b in range(batchsize):
+    for b in torch.arange(batchsize, device=tensor.device):
         start = batch_offsets[b]
         end = batch_offsets[b + 1]
         out[b, : end - start] = tensor[start:end]
@@ -40,17 +54,26 @@ def concatted_to_nested_tensor(tensor: Tensor, batch_offsets: Tensor):
 
 
 # @torch.compiler.disable
+@torch.jit.script
 def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] = None):
+    assert tensor.ndim == 3
     batch_size = tensor.shape[0]
     max_len = tensor.shape[1]
     if padding_mask is None:
-        padding_mask = tensor.new_zeros(batch_size, max_len, dtype=torch.bool)
+        padding_mask = torch.zeros(
+            batch_size, max_len, device=tensor.device, dtype=torch.bool
+        )
     assert padding_mask.ndim == 2
     nonpadded_batch_sizes = padding_mask.shape[-1] - padding_mask.sum(-1)
     batch_offsets = torch.cat(
         [nonpadded_batch_sizes.new_zeros([1]), nonpadded_batch_sizes.cumsum(-1)]
     )
-    out = tensor.new_zeros(torch.Size([nonpadded_batch_sizes.sum(), *tensor.shape[2:]]))
+    # out_shape_tensor = [
+    #     nonpadded_batch_sizes.sum(),
+    #     torch.tensor(tensor.shape[2], device=nonpadded_batch_sizes.device, dtype=nonpadded_batch_sizes.dtype),
+    # ]
+    out_shape_int = [int(nonpadded_batch_sizes.sum()), tensor.shape[2]]
+    out = torch.zeros(out_shape_int, dtype=tensor.dtype, device=tensor.device)
 
     assert tensor.shape[0] == len(batch_offsets[:-1])
 

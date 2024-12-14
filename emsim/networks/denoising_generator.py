@@ -14,16 +14,25 @@ class DenoisingGenerator(nn.Module):
     def __init__(
         self,
         d_model: int,
-        max_denoising_group_size: int = 400,
+        max_electrons_per_image: int = 400,
         max_total_denoising_queries: int = 1200,
         position_noise_variance: float = 1.0,
+        pos_neg_queries_share_embedding: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
-        self.max_denoising_group_size = max_denoising_group_size
+        self.max_denoising_group_size = max_electrons_per_image
         self.max_total_denoising_queries = max_total_denoising_queries
         self.position_noise_scale = position_noise_variance
-        self.dn_query_embedding = nn.Embedding(max_denoising_group_size, d_model)
+        self.dn_query_embedding = nn.Embedding(
+            (
+                max_electrons_per_image
+                if pos_neg_queries_share_embedding
+                else max_electrons_per_image * 2
+            ),
+            d_model,
+        )
+        self.pos_neg_queries_share_embedding = pos_neg_queries_share_embedding
 
     def forward(self, batch_dict: dict[str, Tensor]):
         true_positions = batch_dict["incidence_points_pixels_rc"]
@@ -51,13 +60,18 @@ class DenoisingGenerator(nn.Module):
         )
         for i in range(len(electrons_per_image)):
             n_electrons = electrons_per_image[i]
+            posneg_mult = 1 if self.pos_neg_queries_share_embedding else 2
+            assert n_electrons * posneg_mult <= self.dn_query_embedding.num_embeddings
             query_indices = torch.randperm(
-                n_electrons * 2, device=denoising_queries.device
+                n_electrons * posneg_mult, device=denoising_queries.device
             )
             dn_queries_this_image: Tensor = self.dn_query_embedding(query_indices)
-            dn_queries_this_image = dn_queries_this_image.view(
-                n_electrons, 1, 2, -1
-            ).expand(-1, n_denoising_groups, -1, -1)
+            dn_queries_this_image = dn_queries_this_image.reshape(
+                n_electrons, 1, posneg_mult, -1
+            )
+            dn_queries_this_image = dn_queries_this_image.expand(
+                -1, n_denoising_groups, 2, -1
+            )
 
             start = ext_batch_offsets[i]
             end = ext_batch_offsets[i + 1]

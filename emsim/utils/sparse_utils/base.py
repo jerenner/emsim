@@ -45,31 +45,6 @@ def sparse_select(tensor: Tensor, axis: int, index: int):
     ).coalesce()
 
 
-def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
-    if not tensor.requires_grad:
-        return tensor.index_select(axis, index.long()).coalesce()
-    assert tensor.is_sparse
-    tensor = tensor.coalesce()
-    assert index.ndim <= 1
-    if axis < 0:
-        axis = tensor.ndim + axis
-    assert axis >= 0
-    assert (
-        index.max() <= tensor.shape[axis]
-    ), "index tensor has entries out of bounds for axis"
-    tensor_indices = tensor.indices()
-    tensor_values = tensor.values()
-
-    new_indices, new_values = _sparse_index_select_inner(
-        tensor_indices, tensor_values, axis, index
-    )
-    return torch.sparse_coo_tensor(
-        new_indices,
-        new_values,
-        (*tensor.shape[:axis], len(index), *tensor.shape[axis + 1 :]),
-    ).coalesce()
-
-
 # sometimes this error happens, link to potential workaround
 # https://github.com/pytorch/pytorch/issues/69078#issuecomment-1087217720
 @torch.jit.script
@@ -100,6 +75,31 @@ def _sparse_index_select_inner(
     return new_indices, new_values
 
 
+@torch.jit.script
+def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
+    if not tensor.requires_grad:
+        return tensor.index_select(axis, index.long()).coalesce()
+    assert tensor.is_sparse
+    tensor = tensor.coalesce()
+    assert index.ndim <= 1
+    if axis < 0:
+        axis = tensor.ndim + axis
+    assert axis >= 0
+    assert (
+        index.max() <= tensor.shape[axis]
+    ), "index tensor has entries out of bounds for axis"
+    tensor_indices = tensor.indices()
+    tensor_values = tensor.values()
+
+    new_indices, new_values = _sparse_index_select_inner(
+        tensor_indices, tensor_values, axis, index
+    )
+    new_shape = list(tensor.shape)
+    new_shape[axis] = len(index)
+    assert len(new_shape) == tensor.ndim
+    return torch.sparse_coo_tensor(new_indices, new_values, new_shape).coalesce()
+
+
 def sparse_squeeze_dense_dim(tensor: Tensor):
     assert tensor.is_sparse
     assert tensor.dense_dim() > 0, "Tensor has no dense dim to squeeze"
@@ -122,6 +122,7 @@ def sparse_resize(tensor: Tensor, new_shape: list[int]) -> Tensor:
     ).coalesce()
 
 
+@torch.jit.script
 def sparse_flatten_hw(tensor: Tensor) -> Tensor:
     assert tensor.is_sparse
     tensor = tensor.coalesce()
@@ -136,16 +137,10 @@ def sparse_flatten_hw(tensor: Tensor) -> Tensor:
     return torch.sparse_coo_tensor(new_indices, tensor.values(), new_shape).coalesce()
 
 
-def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
-    assert tensor.is_sparse
-    if start_axis < 0:
-        start_axis = tensor.ndim + start_axis
-    if end_axis < 0:
-        end_axis = tensor.ndim + end_axis
-    assert end_axis >= start_axis
-    assert start_axis > 0 and end_axis > 0
-    assert end_axis <= tensor.ndim
-    tensor = tensor.coalesce()
+@torch.jit.script
+def __flattened_indices(
+    tensor: Tensor, start_axis: int, end_axis: int
+) -> tuple[Tensor, list[int], Tensor]:
     tensor_indices = tensor.indices()
     indices_to_flatten = tensor_indices[start_axis : end_axis + 1]
     dim_sizes = tensor.shape[start_axis : end_axis + 1]
@@ -172,16 +167,33 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
         0, keepdim=True
     )
 
-    new_shape = (
-        tensor.shape[:start_axis]
-        + (dim_sizes_1.prod().item(),)
-        + tensor.shape[end_axis + 1 :]
-    )
+    new_shape = list(tensor.shape)[:start_axis]
+    new_shape.append(dim_sizes_1.prod().item())
+    new_shape.extend(tensor.shape[end_axis + 1 :])
+    assert len(new_shape) == tensor.ndim - (end_axis - start_axis)
 
     new_indices = torch.cat(
         [tensor_indices[:start_axis], flattened_indices, tensor_indices[end_axis + 1 :]]
     )
-    return torch.sparse_coo_tensor(new_indices, tensor.values(), new_shape)
+    return new_indices, new_shape, dim_linear_offsets
+
+
+@torch.jit.script
+def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
+    assert tensor.is_sparse
+    if start_axis < 0:
+        start_axis = tensor.ndim + start_axis
+    if end_axis < 0:
+        end_axis = tensor.ndim + end_axis
+    assert end_axis > start_axis
+    assert start_axis >= 0
+    assert end_axis <= tensor.ndim
+    tensor = tensor.coalesce()
+
+    new_indices, new_shape, _ = __flattened_indices(tensor, start_axis, end_axis)
+    return torch.sparse_coo_tensor(
+        new_indices, tensor.values(), new_shape, is_coalesced=tensor.is_coalesced()
+    )
 
 
 def unpack_sparse_tensors(batch: dict[str, Tensor]):
@@ -249,9 +261,9 @@ def gather_from_sparse_tensor(
         Tensor: Tensor of dimension ..., M; where the leading dimensions are
         the same as the batch dimensions from `index_tensor`
         Tensor: Boolean tensor of dimension ...; where each element is True if
-        # the corresponding index is a specified (nonzero) element of the sparse
-    #     tensor and False if not
-    # """
+        the corresponding index is a specified (nonzero) element of the sparse
+        tensor and False if not
+    """
     if index_tensor.is_nested:
         results = [
             gather_from_sparse_tensor(
@@ -276,13 +288,16 @@ def gather_from_sparse_tensor(
     ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
 
     index_search = torch.searchsorted(
-        sparse_tensor_indices_linearized, index_tensor_linearized, out_int32=True
+        sparse_tensor_indices_linearized, index_tensor_linearized
     ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
-    selected = sparse_tensor_values[index_search]
-    if sparse_tensor.dense_dim() > 0:
-        selected = selected.view(
-            *index_tensor_shape[:-1], *selected.shape[-sparse_tensor.dense_dim() :]
-        )
+    selected = torch.gather(
+        sparse_tensor_values,
+        0,
+        index_search.unsqueeze(1).expand(-1, sparse_tensor_values.shape[-1]),
+    )
+    dense_dim = sparse_tensor.dense_dim()
+    if dense_dim > 0:
+        selected = selected.view(*index_tensor_shape[:-1], *selected.shape[-dense_dim:])
     else:
         selected = selected.view(*index_tensor_shape[:-1])
     is_specified_mask = is_specified_mask.view(
@@ -317,21 +332,36 @@ def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tens
                 f"`sparse_tensor.sparse_dim()`, got {index_tensor.shape[-1]=} "
                 f"and {sparse_tensor.sparse_dim()=}"
             )
-    sparse_shape = index_tensor.new_tensor(
-        sparse_tensor.shape[: sparse_tensor.sparse_dim()]
-    )
-    sparse_shape_1 = torch.cat([sparse_shape, sparse_shape.new_tensor([1])])
-    dim_linear_offsets = index_tensor.new_tensor(
-        [torch.prod(sparse_shape_1[i + 1 :]) for i in range(len(sparse_shape))]
-    )
-
-    sparse_tensor_indices_linear = (
-        sparse_tensor.indices() * dim_linear_offsets.unsqueeze(-1)
-    ).sum(0)
 
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
         assert index_tensor.shape[-1] == sparse_tensor.sparse_dim() - 1
         index_tensor = batch_dim_to_leading_index(index_tensor)
+
+    return __linearize_inner(sparse_tensor, index_tensor)
+
+
+@torch.jit.script
+def __linearize_inner(
+    sparse_tensor: Tensor, index_tensor: Tensor
+) -> tuple[Tensor, Tensor, Tensor, list[int], Tensor]:
+    sparse_shape = torch.tensor(
+        sparse_tensor.shape[: sparse_tensor.sparse_dim()],
+        device=index_tensor.device,
+        dtype=index_tensor.dtype,
+    )
+    # sparse_shape_1 = torch.cat([sparse_shape, sparse_shape.new_tensor([1])])
+    # dim_linear_offsets = index_tensor.new_tensor(
+    #     [torch.prod(sparse_shape_1[i + 1 :]) for i in range(len(sparse_shape))]
+    # )
+
+    # sparse_tensor_indices_linear = (
+    #     sparse_tensor.indices() * dim_linear_offsets.unsqueeze(-1)
+    # ).sum(0)
+
+    sparse_tensor_indices_linear, _, dim_linear_offsets = __flattened_indices(
+        sparse_tensor, 0, sparse_tensor.sparse_dim() - 1
+    )
+    sparse_tensor_indices_linear.squeeze_(0)
 
     index_tensor_shape = index_tensor.shape
     index_tensor_linearized = (index_tensor * dim_linear_offsets).sum(-1)

@@ -404,8 +404,10 @@ class EMCriterion(nn.Module):
         no_electron_weight: float,
         metrics: Optional[nn.Module] = None,
     ) -> Tensor:
-        pred_logits, labels, weights = get_query_class_preds_targets_weights(
-            predicted_dict, matched_indices, no_electron_weight
+        pred_logits = predicted_dict["pred_logits"]
+        query_batch_offsets = predicted_dict["query_batch_offsets"]
+        labels, weights = get_query_class_preds_targets_weights(
+            pred_logits, query_batch_offsets, matched_indices, no_electron_weight
         )
         loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float(), weights)
         if metrics:
@@ -604,13 +606,13 @@ class EMCriterion(nn.Module):
             metric_tracker.reset()
 
 
+@torch.jit.script
 def get_query_class_preds_targets_weights(
-    predicted_dict: dict[str, Tensor],
+    pred_logits: Tensor,
+    query_batch_offsets: Tensor,
     matched_indices: list[Tensor],
-    no_electron_weight: Optional[float] = 1.0,
-) -> tuple[Tensor, Tensor, Tensor]:
-    pred_logits = predicted_dict["pred_logits"]
-    query_batch_offsets = predicted_dict["query_batch_offsets"]
+    no_electron_weight: float = 1.0,
+) -> tuple[Tensor, Tensor]:
     labels = torch.zeros_like(pred_logits, dtype=torch.int)
     weights = torch.ones_like(pred_logits)
 
@@ -626,13 +628,24 @@ def get_query_class_preds_targets_weights(
     labels[true_entries] = 1
     if no_electron_weight != 1.0:
         weights[labels.logical_not()] = no_electron_weight
-    return pred_logits, labels, weights
+    return labels, weights
 
 
+@torch.jit.script
+def __restack_sparse_segmaps(segmaps: list[Tensor], max_elecs: int):
+    outs = []
+    for segmap in segmaps:
+        shape = list(segmap.shape)
+        shape[-1] = max_elecs
+        outs.append(sparse_resize(segmap, shape))
+    return torch.stack(outs, 0).coalesce()
+
+
+@torch.jit.script
 def _sort_predicted_true_maps(
     predicted_segmentation_logits: Tensor,
     true_segmentation_map: Tensor,
-    matched_indices: Tensor,
+    matched_indices: list[Tensor],
 ) -> tuple[Tensor, Tensor]:
     assert predicted_segmentation_logits.is_sparse
     assert true_segmentation_map.is_sparse
@@ -649,18 +662,8 @@ def _sort_predicted_true_maps(
         reordered_predicted.append(sparse_index_select(predicted_map, 2, indices[0]))
         reordered_true.append(sparse_index_select(true_map, 2, indices[1]))
 
-    def restack_sparse_segmaps(segmaps: list[Tensor]):
-        segmaps = [
-            sparse_resize(
-                segmap,
-                [*segmap.shape[:-1], max_elecs],
-            )
-            for segmap in segmaps
-        ]
-        return torch.stack(segmaps, 0).coalesce()
-
-    reordered_predicted = restack_sparse_segmaps(reordered_predicted).coalesce()
-    reordered_true = restack_sparse_segmaps(reordered_true).coalesce()
+    reordered_predicted = __restack_sparse_segmaps(reordered_predicted, max_elecs).coalesce()
+    reordered_true = __restack_sparse_segmaps(reordered_true, max_elecs).coalesce()
 
     return reordered_predicted, reordered_true
 

@@ -16,7 +16,6 @@ from ..positional_encoding import (
     SubpixelPositionalEncoding,
     FourierEncoding,
 )
-from ..ms_deform_attn import SparseMSDeformableAttention
 from .std_dev_head import StdDevHead
 from .blocks import SelfAttentionBlock, SparseDeformableAttentionBlock, FFNBlock
 from ..segmentation_map import PatchedSegmentationMapPredictor

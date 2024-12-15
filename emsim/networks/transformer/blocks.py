@@ -2,7 +2,7 @@ from torch import Tensor, nn
 import torch
 
 from emsim.networks.transformer.attn import SelfAttentionWithRoPE
-from emsim.networks.ms_deform_attn import SparseMSDeformableAttention
+from emsim.networks.sparse_ms_deform_attn import SparseMSDeformableAttention
 from emsim.utils.batching_utils import (
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,

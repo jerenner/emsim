@@ -34,7 +34,7 @@ class ElectronSalienceCriterion(nn.Module):
         self,
         predicted_foreground_masks: list[Tensor],
         peak_normalized_images: list[Tensor],
-    ):
+    ) -> Tensor:
         assert len(predicted_foreground_masks) == len(peak_normalized_images)
 
         predicted_pixels = []

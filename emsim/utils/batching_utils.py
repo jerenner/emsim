@@ -1,6 +1,5 @@
 from typing import Optional
 
-import numpy as np
 import torch
 from torch import Tensor
 
@@ -13,7 +12,7 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor):
 @torch.jit.script
 def deconcat_add_batch_dim(
     tensor: Tensor, batch_offsets: Tensor, pad_value: float = 0.0
-):
+) -> tuple[Tensor, Tensor]:
     assert tensor.ndim == 2
     assert batch_offsets.ndim == 1
     if batch_offsets[-1] != tensor.shape[0]:
@@ -55,7 +54,9 @@ def concatted_to_nested_tensor(tensor: Tensor, batch_offsets: Tensor):
 
 # @torch.compiler.disable
 @torch.jit.script
-def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] = None):
+def remove_batch_dim_and_concat(
+    tensor: Tensor, padding_mask: Optional[Tensor] = None
+) -> tuple[Tensor, Tensor]:
     assert tensor.ndim == 3
     batch_size = tensor.shape[0]
     max_len = tensor.shape[1]
@@ -68,12 +69,13 @@ def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] =
     batch_offsets = torch.cat(
         [nonpadded_batch_sizes.new_zeros([1]), nonpadded_batch_sizes.cumsum(-1)]
     )
-    # out_shape_tensor = [
+    # out_shape = [
     #     nonpadded_batch_sizes.sum(),
     #     torch.tensor(tensor.shape[2], device=nonpadded_batch_sizes.device, dtype=nonpadded_batch_sizes.dtype),
     # ]
-    out_shape_int = [int(nonpadded_batch_sizes.sum()), tensor.shape[2]]
-    out = torch.zeros(out_shape_int, dtype=tensor.dtype, device=tensor.device)
+    total_len = int(nonpadded_batch_sizes.sum())
+    out_shape = torch.Size([total_len, tensor.shape[2]])
+    out = torch.zeros(out_shape, dtype=tensor.dtype, device=tensor.device)
 
     assert tensor.shape[0] == len(batch_offsets[:-1])
 
@@ -86,12 +88,15 @@ def remove_batch_dim_and_concat(tensor: Tensor, padding_mask: Optional[Tensor] =
     return out, batch_offsets[:-1]
 
 
-def batch_dim_to_leading_index(tensor: Tensor):
+@torch.jit.script
+def batch_dim_to_leading_index(tensor: Tensor) -> Tensor:
     batch_size = tensor.shape[0]
     last_dim = tensor.shape[-1]
-    other_dims = tensor.shape[1:-1]
+    other_dims = torch._shape_as_tensor(tensor)[1:-1]
     batch_index = torch.repeat_interleave(
-        torch.arange(batch_size, device=tensor.device), np.prod(other_dims), 0
+        torch.arange(batch_size, device=tensor.device), torch.prod(other_dims), 0
     )
     flattened = torch.concat([batch_index.unsqueeze(-1), tensor.view(-1, last_dim)], -1)
-    return flattened.reshape(batch_size, *other_dims, last_dim + 1)
+    new_shape = tensor.shape
+    new_shape[-1] = last_dim + 1
+    return flattened.reshape(new_shape)

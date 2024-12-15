@@ -236,9 +236,10 @@ class EMModel(nn.Module):
         if cfg.denoising.use_denoising:
             denoising_generator = DenoisingGenerator(
                 d_model=cfg.transformer.d_model,
-                max_denoising_group_size=cfg.denoising.max_denoising_group_size,
+                max_electrons_per_image=cfg.denoising.max_electrons_per_image,
                 max_total_denoising_queries=cfg.denoising.max_total_denoising_queries,
                 position_noise_variance=cfg.denoising.position_noise_variance,
+                pos_neg_queries_share_embedding=cfg.denoising.pos_neg_queries_share_embedding,
             )
         else:
             denoising_generator = None

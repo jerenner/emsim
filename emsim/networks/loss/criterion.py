@@ -580,6 +580,8 @@ class EMCriterion(nn.Module):
         log_dict = {}
         log_dict.update(flatten_metrics(self.train_losses))
         log_dict.update(flatten_metrics(self.train_metrics))
+        if self.dn_metrics is not None:
+            log_dict.update(flatten_metrics(self.dn_metrics))
         if reset_metrics:
             self.reset_metrics()
 

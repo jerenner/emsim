@@ -108,11 +108,13 @@ class DenoisingGenerator(nn.Module):
         image_size_per_point = image_size_per_point.unsqueeze(1)
 
         # (electron x denoising group x 2)
-        pos_points_normalized_xy = pos_points.flip(-1) / image_size_per_point
-        neg_points_normalized_xy = neg_points.flip(-1) / image_size_per_point
+        pos_points_normalized_xy = pos_points.flip(-1).double() / image_size_per_point
+        neg_points_normalized_xy = neg_points.flip(-1).double() / image_size_per_point
 
         # (electron x denoising group x pos/neg x 2)
-        return torch.stack([pos_points_normalized_xy, neg_points_normalized_xy], 2)
+        positions = torch.stack([pos_points_normalized_xy, neg_points_normalized_xy], 2)
+        positions = positions.clamp(0.0, 1.0)
+        return positions
 
     @staticmethod
     def stack_main_and_denoising_queries(

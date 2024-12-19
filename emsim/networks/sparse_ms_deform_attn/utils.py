@@ -98,7 +98,7 @@ def multilevel_sparse_bilinear_grid_sample(
     xy_batch_index: Tensor,
     xy_level_index: Tensor,
     level_spatial_shapes: Tensor,
-    position_dtype: torch.dtype = torch.float32,
+    weight_dtype: torch.dtype = torch.float32,
 ) -> Tensor:
     """Bilinearly samples into a 2D sparse tensor. Similar to F.grid_sample
     except the sampled tensor is expected to be sparse and the interpolation
@@ -148,8 +148,8 @@ def multilevel_sparse_bilinear_grid_sample(
     height = spatial_shapes_expanded[..., 0].contiguous()
     width = spatial_shapes_expanded[..., 1].contiguous()
 
-    x = (((x + 1) * width - 1) / 2).to(position_dtype)
-    y = (((y + 1) * height - 1) / 2).to(position_dtype)
+    x = (((x + 1) * width - 1) / 2)
+    y = (((y + 1) * height - 1) / 2)
 
     # x = x.view(-1)
     # y = y.view(-1)
@@ -164,10 +164,10 @@ def multilevel_sparse_bilinear_grid_sample(
     y0 = y0.clamp_min(0).clamp_max(height.view_as(y) - 1)
     y1 = y1.clamp_min(0).clamp_max(height.view_as(y) - 1)
 
-    wa = ((x1 - x) * (y1 - y)).unsqueeze(-1)
-    wb = ((x1 - x) * (y - y0)).unsqueeze(-1)
-    wc = ((x - x0) * (y1 - y)).unsqueeze(-1)
-    wd = ((x - x0) * (y - y0)).unsqueeze(-1)
+    wa = ((x1 - x) * (y1 - y)).unsqueeze(-1).to(weight_dtype)
+    wb = ((x1 - x) * (y - y0)).unsqueeze(-1).to(weight_dtype)
+    wc = ((x - x0) * (y1 - y)).unsqueeze(-1).to(weight_dtype)
+    wd = ((x - x0) * (y - y0)).unsqueeze(-1).to(weight_dtype)
 
     x0_y0 = torch.stack([xy_batch_index, x0, y0, xy_level_index, head_indices], -1)
     x0_y1 = torch.stack([xy_batch_index, x0, y1, xy_level_index, head_indices], -1)

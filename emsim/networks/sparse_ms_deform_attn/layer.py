@@ -96,7 +96,7 @@ class SparseMSDeformableAttention(nn.Module):
         ).coalesce()
 
         sampling_offsets = self.sampling_offsets(
-            query.to(self.sampling_offsets.weight)
+            query.to(self.sampling_offsets.weight) # cast to double
         ).view(n_total_queries, self.num_levels, self.num_points, self.num_heads, 2)
         attention_weights = self.attention_weights(query).view(
             n_total_queries, self.num_levels * self.num_points, self.num_heads
@@ -137,7 +137,7 @@ def multi_scale_deformable_attention(
     sampling_locations: Tensor,
     query_offsets: Tensor,
     attention_weights: Tensor,
-    position_dtype: torch.dtype = torch.float32,
+    interp_weight_dtype: torch.dtype = torch.float32,
 ) -> Tensor:
     assert isinstance(stacked_value_tensors, Tensor)
     assert stacked_value_tensors.is_sparse
@@ -182,7 +182,7 @@ def multi_scale_deformable_attention(
         xy_batch_indices,
         xy_level_indices,
         value_spatial_shapes,
-        position_dtype,
+        interp_weight_dtype,
     )
     sampled_values = sampled_values.to(attention_weights)
 

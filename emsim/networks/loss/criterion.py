@@ -298,16 +298,11 @@ class EMCriterion(nn.Module):
                     (pred_positions - true_positions) * image_size_per_electron,
                     dim=-1,
                 )
-                metrics["localization_error"].update(localization_error)
                 centroid_error = torch.linalg.vector_norm(
                     (centroid_positions - true_positions) * image_size_per_electron,
                     dim=-1,
                 )
-                if "centroid_error" in metrics:
-                    metrics["centroid_error"].update(centroid_error)
-                metrics["localization_minus_centroid_error"].update(
-                    localization_error - centroid_error
-                )
+                self._update_metrics(metrics, localization_error, centroid_error)
 
         loss_dict = {
             "loss_class": class_loss,
@@ -319,6 +314,18 @@ class EMCriterion(nn.Module):
         }
 
         return loss_dict, {"matched_indices": matched_indices}
+
+    @staticmethod
+    @torch.compiler.disable
+    def _update_metrics(
+        metrics: nn.ModuleDict, localization_error: Tensor, centroid_error: Tensor
+    ):
+        metrics["localization_error"].update(localization_error)
+        if "centroid_error" in metrics:
+            metrics["centroid_error"].update(centroid_error)
+        metrics["localization_minus_centroid_error"].update(
+            localization_error - centroid_error
+        )
 
     def forward(
         self,
@@ -450,7 +457,9 @@ class EMCriterion(nn.Module):
     ) -> Tensor:
         assert sorted_predicted_logits.shape == sorted_true.shape
 
-        predicted_segmentation: Tensor = torch.sparse.softmax(sorted_predicted_logits, -1)
+        predicted_segmentation: Tensor = torch.sparse.softmax(
+            sorted_predicted_logits, -1
+        )
 
         losses = []
         num = 2 * predicted_segmentation * sorted_true
@@ -664,7 +673,9 @@ def _sort_predicted_true_maps(
         reordered_predicted.append(sparse_index_select(predicted_map, 2, indices[0]))
         reordered_true.append(sparse_index_select(true_map, 2, indices[1]))
 
-    reordered_predicted = __restack_sparse_segmaps(reordered_predicted, max_elecs).coalesce()
+    reordered_predicted = __restack_sparse_segmaps(
+        reordered_predicted, max_elecs
+    ).coalesce()
     reordered_true = __restack_sparse_segmaps(reordered_true, max_elecs).coalesce()
 
     return reordered_predicted, reordered_true

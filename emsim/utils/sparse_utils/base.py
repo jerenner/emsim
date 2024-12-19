@@ -242,83 +242,10 @@ def unpack_sparse_tensors(batch: dict[str, Tensor]):
     return batch
 
 
-def gather_from_sparse_tensor(
-    sparse_tensor: Tensor, index_tensor: Tensor, check_all_specified=False
-):
-    """Batch selection of elements from a torch sparse tensor. Should be
-    equivalent to sparse_tensor[index_tensor]. It works by flattening the sparse
-    tensor's sparse dims and the index tensor to 1D (and converting n-d indices
-    to raveled indices), then using searchsorted along the flattened sparse
-    tensor indices.
-
-    Args:
-        sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
-        S leading sparse dimensions and M is the dense dimension
-        index_tensor (Tensor): Long tensor of dimension ..., S; where ... are
-        leading batch dimensions.
-
-    Returns:
-        Tensor: Tensor of dimension ..., M; where the leading dimensions are
-        the same as the batch dimensions from `index_tensor`
-        Tensor: Boolean tensor of dimension ...; where each element is True if
-        the corresponding index is a specified (nonzero) element of the sparse
-        tensor and False if not
-    """
-    if index_tensor.is_nested:
-        results = [
-            gather_from_sparse_tensor(
-                sparse_tensor,
-                index_subtensor,
-                check_all_specified=check_all_specified,
-            )
-            for index_subtensor in index_tensor.unbind()
-        ]
-        selected, is_specified_mask = zip(*results)
-
-        selected = torch.nested.as_nested_tensor(selected)
-        is_specified_mask = torch.nested.as_nested_tensor(is_specified_mask)
-        return selected, is_specified_mask
-
-    (
-        sparse_tensor_indices_linearized,
-        sparse_tensor_values,
-        index_tensor_linearized,
-        index_tensor_shape,
-        is_specified_mask,
-    ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
-
-    index_search = torch.searchsorted(
-        sparse_tensor_indices_linearized, index_tensor_linearized
-    ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
-    selected = torch.gather(
-        sparse_tensor_values,
-        0,
-        index_search.unsqueeze(1).expand(-1, sparse_tensor_values.shape[-1]),
-    )
-    dense_dim = sparse_tensor.dense_dim()
-    if dense_dim > 0:
-        selected = selected.view(*index_tensor_shape[:-1], *selected.shape[-dense_dim:])
-    else:
-        selected = selected.view(*index_tensor_shape[:-1])
-    is_specified_mask = is_specified_mask.view(
-        *index_tensor_shape[:-1], *[1] * sparse_tensor.dense_dim()
-    )
-    if not is_specified_mask.all():
-        # selected = torch.masked_fill(selected, is_specified_mask.logical_not(), 0.0)
-        selected[(~is_specified_mask).expand_as(selected)] = 0.0
-    is_specified_mask = is_specified_mask.view(*index_tensor_shape[:-1])
-
-    if check_all_specified:
-        if not is_specified_mask.all():
-            raise ValueError(
-                "`check_all_specified` was set to True but not all gathered values "
-                "were specified"
-            )
-
-    return selected, is_specified_mask
-
-
-def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tensor):
+@torch.jit.script
+def linearize_sparse_and_index_tensors(
+    sparse_tensor: Tensor, index_tensor: Tensor
+) -> tuple[Tensor, Tensor, Tensor, list[int], Tensor]:
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
         if (
             sparse_tensor.sparse_dim() - 1 == index_tensor.shape[-1]
@@ -327,23 +254,18 @@ def linearize_sparse_and_index_tensors(sparse_tensor: Tensor, index_tensor: Tens
         ):
             sparse_tensor = sparse_tensor[..., 0].coalesce()
         else:
-            raise ValueError(
-                "Expected last dim of `index_tensor` to be the same as "
-                f"`sparse_tensor.sparse_dim()`, got {index_tensor.shape[-1]=} "
-                f"and {sparse_tensor.sparse_dim()=}"
-            )
+            error_str = "Expected last dim of `index_tensor` to be the same as "
+            error_str += "`sparse_tensor.sparse_dim()`, got "
+            error_str += str(index_tensor.shape[-1])
+            error_str += " and "
+            error_str += str(sparse_tensor.sparse_dim())
+            error_str += ", respectively."
+            raise ValueError(error_str)
 
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
         assert index_tensor.shape[-1] == sparse_tensor.sparse_dim() - 1
         index_tensor = batch_dim_to_leading_index(index_tensor)
 
-    return __linearize_inner(sparse_tensor, index_tensor)
-
-
-@torch.jit.script
-def __linearize_inner(
-    sparse_tensor: Tensor, index_tensor: Tensor
-) -> tuple[Tensor, Tensor, Tensor, list[int], Tensor]:
     sparse_shape = torch.tensor(
         sparse_tensor.shape[: sparse_tensor.sparse_dim()],
         device=index_tensor.device,
@@ -381,6 +303,86 @@ def __linearize_inner(
         index_tensor_shape,
         is_specified_mask,
     )
+
+
+@torch.jit.ignore
+def __gather_nested_index(
+    sparse_tensor: Tensor, index_tensor: Tensor, check_all_specified: bool = False
+) -> tuple[Tensor, Tensor]:
+    results = [
+        gather_from_sparse_tensor(
+            sparse_tensor,
+            index_subtensor,
+            check_all_specified=check_all_specified,
+        )
+        for index_subtensor in index_tensor.unbind()
+    ]
+    selected, is_specified_mask = zip(*results)
+
+    selected = torch.nested.as_nested_tensor(selected)
+    is_specified_mask = torch.nested.as_nested_tensor(is_specified_mask)
+    return selected, is_specified_mask
+
+
+@torch.jit.script
+def gather_from_sparse_tensor(
+    sparse_tensor: Tensor, index_tensor: Tensor, check_all_specified: bool = False
+) -> tuple[Tensor, Tensor]:
+    """Batch selection of elements from a torch sparse tensor. Should be
+    equivalent to sparse_tensor[index_tensor]. It works by flattening the sparse
+    tensor's sparse dims and the index tensor to 1D (and converting n-d indices
+    to raveled indices), then using searchsorted along the flattened sparse
+    tensor indices.
+
+    Args:
+        sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
+        S leading sparse dimensions and M is the dense dimension
+        index_tensor (Tensor): Long tensor of dimension ..., S; where ... are
+        leading batch dimensions.
+
+    Returns:
+        Tensor: Tensor of dimension ..., M; where the leading dimensions are
+        the same as the batch dimensions from `index_tensor`
+        Tensor: Boolean tensor of dimension ...; where each element is True if
+        the corresponding index is a specified (nonzero) element of the sparse
+        tensor and False if not
+    """
+    if index_tensor.is_nested:
+        return __gather_nested_index(sparse_tensor, index_tensor, check_all_specified)
+    (
+        sparse_tensor_indices_linearized,
+        sparse_tensor_values,
+        index_tensor_linearized,
+        index_tensor_shape,
+        is_specified_mask,
+    ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
+
+    index_search = torch.searchsorted(
+        sparse_tensor_indices_linearized, index_tensor_linearized
+    ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
+    selected = torch.gather(
+        sparse_tensor_values,
+        0,
+        index_search.unsqueeze(1).expand(-1, sparse_tensor_values.shape[-1]),
+    )
+    dense_dim = sparse_tensor.dense_dim()
+    out_shape = list(index_tensor_shape[:-1])
+    if dense_dim > 0:
+        out_shape.extend(selected.shape[-dense_dim:])
+    selected = selected.view(out_shape)
+    is_specified_mask = is_specified_mask.view(index_tensor_shape[:-1])
+    if not is_specified_mask.all():
+        if check_all_specified:
+            raise ValueError(
+                "`check_all_specified` was set to True but not all gathered values "
+                "were specified"
+            )
+        else:
+            # selected = torch.masked_fill(selected, is_specified_mask.logical_not(), 0.0)
+            selected[~is_specified_mask] = 0.0
+    # is_specified_mask = is_specified_mask.view(*index_tensor_shape[:-1])
+
+    return selected, is_specified_mask
 
 
 def scatter_to_sparse_tensor(
@@ -440,6 +442,7 @@ def scatter_to_sparse_tensor(
     return out
 
 
+@torch.jit.script
 def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor) -> Tensor:
     """Gets the batch offsets from an index tensor where the first element of the
     first dimension is the batch index, e.g. the indices() tensor of a sparse
@@ -466,6 +469,7 @@ def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor) -> Tensor:
     return out
 
 
+@torch.jit.script
 def union_sparse_indices(sparse_tensor_1: Tensor, sparse_tensor_2: Tensor):
     assert sparse_tensor_1.is_sparse
     assert sparse_tensor_2.is_sparse
@@ -475,10 +479,10 @@ def union_sparse_indices(sparse_tensor_1: Tensor, sparse_tensor_2: Tensor):
     M = sparse_tensor_1.sparse_dim()
     K = sparse_tensor_1.dense_dim()
 
-    if sparse_tensor_1.shape != sparse_tensor_2.shape:
-        max_shape = max([tensor.shape for tensor in (sparse_tensor_1, sparse_tensor_2)])
-        sparse_tensor_1 = sparse_tensor_1.sparse_resize_(max_shape, M, K)
-        sparse_tensor_2 = sparse_tensor_2.sparse_resize_(max_shape, M, K)
+    # if sparse_tensor_1.shape != sparse_tensor_2.shape:
+    #     max_shape = max([tensor.shape for tensor in (sparse_tensor_1, sparse_tensor_2)])
+    #     sparse_tensor_1 = sparse_tensor_1.sparse_resize_(max_shape, M, K)
+    #     sparse_tensor_2 = sparse_tensor_2.sparse_resize_(max_shape, M, K)
 
     sparse_tensor_1 = sparse_tensor_1.coalesce()
     sparse_tensor_2 = sparse_tensor_2.coalesce()
@@ -493,32 +497,20 @@ def union_sparse_indices(sparse_tensor_1: Tensor, sparse_tensor_2: Tensor):
     tensor_1_exclusives = uniques[:, counts == 1]
     tensor_2_exclusives = uniques[:, counts == 2]
 
+    zeros_2_shape = [tensor_1_exclusives.shape[-1]]
+    zeros_2_shape.extend(sparse_tensor_2.shape[M : M + K])
     tensor_2_unioned = torch.sparse_coo_tensor(
         torch.cat([indices_2, tensor_1_exclusives], -1),
-        torch.cat(
-            [
-                values_2,
-                values_2.new_zeros(
-                    (tensor_1_exclusives.shape[-1], *sparse_tensor_2.shape[M : M + K]),
-                ),
-            ],
-            0,
-        ),
+        torch.cat([values_2, values_2.new_zeros(zeros_2_shape)], 0),
         size=sparse_tensor_2.shape,
         device=sparse_tensor_2.device,
     ).coalesce()
 
+    zeros_1_shape = [tensor_2_exclusives.shape[-1]]
+    zeros_1_shape.extend(sparse_tensor_1.shape[M : M + K])
     tensor_1_unioned = torch.sparse_coo_tensor(
         torch.cat([indices_1, tensor_2_exclusives], -1),
-        torch.cat(
-            [
-                values_1,
-                values_1.new_zeros(
-                    (tensor_2_exclusives.shape[-1], *sparse_tensor_1.shape[M : M + K])
-                ),
-            ],
-            0,
-        ),
+        torch.cat([values_1, values_1.new_zeros(zeros_1_shape)], 0),
         size=sparse_tensor_1.shape,
         device=sparse_tensor_1.device,
     ).coalesce()

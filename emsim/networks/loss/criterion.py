@@ -5,13 +5,12 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.aggregation import MaxMetric, MinMetric
-from torchmetrics.detection import MeanAveragePrecision
-from torchmetrics.wrappers import Running, MultitaskWrapper
+from torchmetrics.wrappers import MultitaskWrapper
 from torchmetrics.classification import (
     BinaryAccuracy,
     BinaryPrecision,
     BinaryRecall,
-    MulticlassAccuracy,
+    BinaryAveragePrecision,
 )
 
 from .salience_criterion import ElectronSalienceCriterion

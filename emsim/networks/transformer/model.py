@@ -1,6 +1,5 @@
 from typing import Union, Optional
 
-import numpy as np
 import torch
 import torchvision
 from torch import Tensor, nn

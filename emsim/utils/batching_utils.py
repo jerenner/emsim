@@ -116,7 +116,7 @@ def unstack_batch(batch: dict[str, Tensor]) -> list[dict[str, Tensor]]:
     split.update(
         {
             k: [im.squeeze() for im in batch[k].split(1)]
-            for k in ("image", "noiseless_image")
+            for k in ("image", "noiseless_image", "image_size_pixels_rc")
         }
     )
     split["image_sparsified"] = batch["image_sparsified"].unbind()

@@ -1,29 +1,41 @@
+import time
+from itertools import chain
 from typing import Optional
 
 import torch
-from torch import nn, Tensor
 import torch.nn.functional as F
+from torch import Tensor, nn
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.aggregation import MaxMetric, MinMetric
-from torchmetrics.wrappers import MultitaskWrapper
 from torchmetrics.classification import (
     BinaryAccuracy,
+    BinaryAveragePrecision,
     BinaryPrecision,
     BinaryRecall,
-    BinaryAveragePrecision,
 )
+from torchmetrics.wrappers import MultitaskWrapper
 
-from .salience_criterion import ElectronSalienceCriterion
-from .matcher import HungarianMatcher
+from ...utils.batching_utils import (
+    split_batch_concatted_tensor,
+    unstack_batch,
+    unstack_model_output,
+)
 from ...utils.sparse_utils import (
     gather_from_sparse_tensor,
-    union_sparse_indices,
     minkowski_to_torch_sparse,
     sparse_squeeze_dense_dim,
-    sparse_index_select,
-    sparse_resize,
+    union_sparse_indices,
 )
-from ...utils.batching_utils import split_batch_concatted_tensor
+from .matcher import HungarianMatcher
+from .salience_criterion import ElectronSalienceCriterion
+from .utils import (
+    _flatten_metrics,
+    _sort_predicted_true_maps,
+    _sort_tensor,
+    find_matches,
+    prep_detection_inputs,
+    recursive_reset,
+)
 
 
 class EMCriterion(nn.Module):
@@ -52,6 +64,8 @@ class EMCriterion(nn.Module):
         detach_likelihood_mean: bool = False,
         use_denoising_loss: bool = False,
         denoising_loss_weight: float = 1.0,
+        detection_metric_distance_thresholds: list[float] = [0.5, 1.0, 5.0],
+        detection_metric_interval: int = 10,
     ):
         super().__init__()
         self.loss_coef_class = loss_coef_class
@@ -68,6 +82,9 @@ class EMCriterion(nn.Module):
         self.detach_likelihood_mean = detach_likelihood_mean
         self.use_denoising_loss = use_denoising_loss
         self.denoising_loss_weight = denoising_loss_weight
+        self.detection_metric_distance_thresholds = detection_metric_distance_thresholds
+        self.detection_metric_interval = detection_metric_interval
+        self.step_counter = 0
 
         self.salience_criterion = ElectronSalienceCriterion(
             salience_alpha, salience_gamma
@@ -131,7 +148,6 @@ class EMCriterion(nn.Module):
                     [MinMetric(), MeanMetric(), MaxMetric()],
                     prefix="localization_error/",
                 ),
-                # "mask_map": MeanAveragePrecision(iou_type="segm"),
                 "centroid_error": MetricCollection(
                     [MinMetric(), MeanMetric(), MaxMetric()], prefix="centroid_error/"
                 ),
@@ -141,6 +157,17 @@ class EMCriterion(nn.Module):
                 ),
             },
         )
+        detection_metrics = {}
+        for threshold in detection_metric_distance_thresholds:
+            detection_metrics[str(threshold).replace(".", ",")] = MetricCollection(
+                [BinaryPrecision(), BinaryRecall(), BinaryAveragePrecision()],
+                prefix=f"detection/{threshold}/".replace(".", ","),
+            )
+        self.train_metrics.add_module(
+            "detection", nn.ModuleDict(detection_metrics)
+        )
+        self.train_metrics["detection"].add_module("eval_time", MeanMetric())
+
         if use_denoising_loss:
             self.dn_metrics = nn.ModuleDict(
                 {
@@ -165,18 +192,15 @@ class EMCriterion(nn.Module):
         else:
             self.dn_metrics = None
 
-        self.eval_metrics = MultitaskWrapper(
-            {
-                "query_classification": MetricCollection(
-                    [BinaryAccuracy(), BinaryPrecision(), BinaryRecall()],
-                    prefix="query/",
-                ),
-                "classification_accuracy": BinaryAccuracy(),
-                "localization_error": MeanMetric(),
-                "dice": MeanMetric(),
-                "centroid_error": MeanMetric(),
-            },
-            prefix="eval/",
+        self.eval_metrics = nn.ModuleDict()
+        detection_metrics = {}
+        for threshold in detection_metric_distance_thresholds:
+            detection_metrics[str(threshold).replace(".", ",")] = MetricCollection(
+                [BinaryPrecision(), BinaryRecall(), BinaryAveragePrecision()],
+                prefix=f"eval/detection/{threshold}/".replace(".", ","),
+            )
+        self.eval_metrics.add_module(
+            "detection", nn.ModuleDict(detection_metrics)
         )
 
     def compute_losses(
@@ -301,7 +325,9 @@ class EMCriterion(nn.Module):
                     (centroid_positions - true_positions) * image_size_per_electron,
                     dim=-1,
                 )
-                self._update_metrics(metrics, localization_error, centroid_error)
+                self._update_distance_metrics(
+                    metrics, localization_error, centroid_error
+                )
 
         loss_dict = {
             "loss_class": class_loss,
@@ -316,7 +342,7 @@ class EMCriterion(nn.Module):
 
     @staticmethod
     @torch.compiler.disable
-    def _update_metrics(
+    def _update_distance_metrics(
         metrics: nn.ModuleDict, localization_error: Tensor, centroid_error: Tensor
     ):
         metrics["localization_error"].update(localization_error)
@@ -325,6 +351,29 @@ class EMCriterion(nn.Module):
         metrics["localization_minus_centroid_error"].update(
             localization_error - centroid_error
         )
+
+    @torch.no_grad()
+    def update_detection_metrics(
+        self,
+        metrics: nn.ModuleDict,
+        predicted_dict: dict[str, Tensor],
+        target_dict: dict[str, Tensor],
+    ):
+        start = time.time()
+        predicted_dict_list = unstack_model_output(
+            {k: v for k, v in predicted_dict.items() if isinstance(v, Tensor)}
+        )
+        target_dict_list = unstack_batch(target_dict)
+
+        for threshold in self.detection_metric_distance_thresholds:
+            key = str(threshold).replace(".", ",")
+            detection_inputs, _, _ = prep_detection_inputs(
+                predicted_dict_list, target_dict_list, threshold
+            )
+            for scores, labels in detection_inputs:
+                metrics[key].update(scores, labels)
+        if hasattr(metrics, "eval_time"):
+            metrics.eval_time.update(time.time() - start)
 
     def forward(
         self,
@@ -575,23 +624,15 @@ class EMCriterion(nn.Module):
         for k, v in self.train_losses.items():
             v.update(loss_dict[k])
 
-    def get_logs(self, reset_metrics: bool = True) -> None:
-        def flatten_metrics(metric_dict):
-            out = {}
-            for k, v in metric_dict.items():
-                if isinstance(v, MetricCollection):
-                    out.update(flatten_metrics(v))
-                else:
-                    out[k] = v.compute()
-            return out
-
+    def get_train_logs(self, reset_metrics: bool = True) -> dict:
         log_dict = {}
-        log_dict.update(flatten_metrics(self.train_losses))
-        log_dict.update(flatten_metrics(self.train_metrics))
+        log_dict.update(_flatten_metrics(self.train_losses))
+        log_dict.update(_flatten_metrics(self.train_metrics))
         if self.dn_metrics is not None:
-            log_dict.update(flatten_metrics(self.dn_metrics))
+            log_dict.update(_flatten_metrics(self.dn_metrics))
         if reset_metrics:
-            self.reset_metrics()
+            self.reset_train_metrics()
+        log_dict = {k.replace(",", "."): v for k, v in log_dict.items()}
 
         return log_dict
 
@@ -600,20 +641,34 @@ class EMCriterion(nn.Module):
         return " ".join([f"{k}: {v}" for k, v in log_dict.items()])
 
     @staticmethod
-    def tensorboardify_keys(log_dict: dict):
+    def format_log_keys(log_dict: dict):
         log_dict = {k.replace("loss_", "loss/"): v for k, v in log_dict.items()}
         return log_dict
 
-    def reset_metrics(self) -> None:
-        for loss_tracker in self.train_losses.values():
-            loss_tracker.reset()
-        for metric_tracker in self.train_metrics.values():
-            metric_tracker.reset()
+    def reset_train_metrics(self) -> None:
+        metrics = [self.train_losses.values(), self.train_metrics.values()]
         if self.dn_metrics is not None:
-            for metric_tracker in self.dn_metrics.values():
-                metric_tracker.reset()
-        for metric_tracker in self.eval_metrics.values():
-            metric_tracker.reset()
+            metrics.append(self.dn_metrics.values())
+        for metric in chain(*metrics):
+            recursive_reset(metric)
+
+    def eval_batch(
+        self, predicted_dict: dict[str, Tensor], target_dict: dict[str, Tensor]
+    ):
+        self.update_detection_metrics(
+            self.eval_metrics["detection"], predicted_dict, target_dict
+        )
+
+    def get_eval_logs(self, reset_metrics: bool = True) -> dict:
+        log_dict = _flatten_metrics(self.eval_metrics)
+        if reset_metrics:
+            self.reset_eval_metrics()
+        log_dict = {k.replace(",", "."): v for k, v in log_dict.items()}
+        return log_dict
+
+    def reset_eval_metrics(self):
+        for metric in self.eval_metrics.values():
+            recursive_reset(metric)
 
 
 @torch.jit.script
@@ -639,56 +694,6 @@ def get_query_class_preds_targets_weights(
     if no_electron_weight != 1.0:
         weights[labels.logical_not()] = no_electron_weight
     return labels, weights
-
-
-@torch.jit.script
-def __restack_sparse_segmaps(segmaps: list[Tensor], max_elecs: int):
-    outs = []
-    for segmap in segmaps:
-        shape = list(segmap.shape)
-        shape[-1] = max_elecs
-        outs.append(sparse_resize(segmap, shape))
-    return torch.stack(outs, 0).coalesce()
-
-
-@torch.jit.script
-def _sort_predicted_true_maps(
-    predicted_segmentation_logits: Tensor,
-    true_segmentation_map: Tensor,
-    matched_indices: list[Tensor],
-) -> tuple[Tensor, Tensor]:
-    assert predicted_segmentation_logits.is_sparse
-    assert true_segmentation_map.is_sparse
-
-    reordered_predicted = []
-    reordered_true = []
-    max_elecs = max([indices.shape[1] for indices in matched_indices])
-    for predicted_map, true_map, indices in zip(
-        predicted_segmentation_logits.unbind(0),
-        true_segmentation_map.unbind(0),
-        matched_indices,
-    ):
-
-        reordered_predicted.append(sparse_index_select(predicted_map, 2, indices[0]))
-        reordered_true.append(sparse_index_select(true_map, 2, indices[1]))
-
-    reordered_predicted = __restack_sparse_segmaps(
-        reordered_predicted, max_elecs
-    ).coalesce()
-    reordered_true = __restack_sparse_segmaps(reordered_true, max_elecs).coalesce()
-
-    return reordered_predicted, reordered_true
-
-
-@torch.jit.script
-def _sort_tensor(
-    batch_concatted_tensor: Tensor, batch_offsets: Tensor, matched_indices: list[Tensor]
-) -> Tensor:
-    stacked_matched = torch.cat(
-        [matched + offset for matched, offset in zip(matched_indices, batch_offsets)]
-    )
-    out = batch_concatted_tensor[stacked_matched]
-    return out
 
 
 # def get_occupancy_loss(

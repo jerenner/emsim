@@ -4,7 +4,6 @@ import hydra
 import yaml
 from hydra.utils import get_original_cwd, to_absolute_path
 from omegaconf import DictConfig, OmegaConf
-from tqdm.auto import trange
 import time
 import datetime
 import logging
@@ -24,14 +23,9 @@ from transformers import get_cosine_schedule_with_warmup
 
 from emsim.networks import (
     EMModel,
-    EMTransformer,
-    ElectronSalienceCriterion,
     EMCriterion,
 )
-from emsim.utils.misc_utils import _get_layer
-from emsim.utils.sparse_utils import unpack_sparse_tensors
 from emsim.geant.dataset import (
-    GeantElectronDataset,
     make_test_train_datasets,
     electron_collate_fn,
     worker_init_fn,
@@ -42,7 +36,7 @@ from emsim.preprocessing import NSigmaSparsifyTransform
 
 _logger = logging.getLogger(__name__)
 
-# torch._dynamo.config.capture_scalar_outputs = True
+torch._dynamo.config.capture_scalar_outputs = True
 torch.set_float32_matmul_precision("high")
 
 
@@ -179,19 +173,20 @@ def train(
     if fabric.is_global_zero:
         _logger.info("Begin training.")
     epoch = 0
+    criterion: EMCriterion = model.criterion
     training_start_time = time.time()
     for i in range(start_iter, cfg.num_steps):
         t0 = time.time()
         try:
             batch = next(iter_loader)
         except StopIteration:
-            eval(epoch, i, model, eval_dataloader, fabric)
+            eval(epoch, i, t0, model, eval_dataloader, fabric)
             model.train()
             epoch += 1
             iter_loader = iter(train_dataloader)
             batch = next(iter_loader)
 
-        loss_dict, _ = model(batch)
+        loss_dict, model_output = model(batch)
         total_loss = loss_dict["loss"]
         fabric.backward(total_loss)
         fabric.clip_gradients(model, optimizer, cfg.max_grad_norm)
@@ -206,8 +201,9 @@ def train(
         log_dict["lr"] = lr_scheduler.get_last_lr()[0]
 
         if i > 0 and i % cfg.print_interval == 0:
-            metric_log_dict = model.criterion.get_logs()
-            log_str = model.criterion.make_log_str(metric_log_dict)
+            criterion.update_detection_metrics(criterion.train_metrics["detection"], model_output, batch)
+            metric_log_dict = criterion.get_train_logs()
+            log_str = criterion.make_log_str(metric_log_dict)
             elapsed_time = time.time() - training_start_time
             elapsed_time_str = _elapsed_time_str(elapsed_time)
             iter_time = iter_timer.compute()
@@ -219,12 +215,12 @@ def train(
             metric_log_dict["iter_time"] = iter_time
             log_dict.update(metric_log_dict)
 
-        log_dict = model.criterion.tensorboardify_keys(log_dict)
+        log_dict = criterion.format_log_keys(log_dict)
         fabric.log_dict(log_dict, step=i)
 
         if i > 0 and i % cfg.eval_steps == 0:
             save(save_dir, f"step_{i}", model, optimizer, fabric, i)
-            eval(epoch, i, model, eval_dataloader, fabric)
+            eval(epoch, i, t0, model, eval_dataloader, fabric)
             model.train()
 
         iter_timer.update(time.time() - t0)
@@ -232,6 +228,7 @@ def train(
         if i > 0 and i % cfg.clear_cache_interval == 0:
             torch.cuda.empty_cache()
 
+    save(save_dir, "final", model, optimizer, fabric, i)
     if fabric.is_global_zero:
         elapsed_time_str = _elapsed_time_str(time.time() - training_start_time)
         _logger.info(f"Training complete in {elapsed_time_str}.")
@@ -241,19 +238,30 @@ def train(
 def eval(
     epoch: int,
     step: int,
+    start_time: float,
     model: nn.Module,
     eval_loader: torch.utils.data.DataLoader,
     fabric: Fabric,
 ):
-    return
-    logger = logging.getLogger(__name__)
+    start_eval = time.time()
     model.eval()
-    incidence_error = []
-    query_classification = []
-    dice_score = []
+    criterion: EMCriterion = model.criterion
     for batch in eval_loader:
-        batch = unpack_sparse_tensors(batch)
         output = model(batch)
+        criterion.eval_batch(output, batch)
+    metric_log_dict = criterion.get_eval_logs()
+    metric_log_dict = criterion.format_log_keys(metric_log_dict)
+    log_str = criterion.make_log_str(metric_log_dict)
+    elapsed_time = time.time() - start_time
+    elapsed_time_str = _elapsed_time_str(elapsed_time)
+    eval_time_str = _elapsed_time_str(time.time() - start_eval)
+    log_str = (
+        f"Evaluation: Iter {step} (Epoch {epoch}) -- ({elapsed_time_str}) -- " + log_str
+    )
+    log_str = log_str + f"Eval time: {eval_time_str}"
+    if fabric.is_global_zero:
+        _logger.info(log_str)
+    fabric.log_dict(metric_log_dict, step)
 
 
 def save(

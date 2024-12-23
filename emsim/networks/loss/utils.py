@@ -1,8 +1,13 @@
-import torch
-from torch import Tensor
+from typing import Union
 
+import torch
+from torch import Tensor, nn
+
+from torchmetrics.classification import BinaryAveragePrecision
+from torchmetrics import MetricCollection, Metric
 
 from emsim.utils.batching_utils import unstack_batch, unstack_model_output
+from emsim.utils.sparse_utils import sparse_index_select, sparse_resize
 
 
 def sort_detections_by_score(
@@ -80,23 +85,22 @@ def find_matches(
 
 
 @torch.jit.script
-def prep_ap_inputs(
-    predicted_dict: dict[str, Tensor],
-    target_dict: dict[str, Tensor],
-    distance_threshold: float,
+def prep_detection_inputs(
+    predicted_dict_list: list[dict[str, Tensor]],
+    target_dict_list: list[dict[str, Tensor]],
+    distance_threshold_pixels: float,
 ):
-    predicted_split = unstack_model_output(predicted_dict)
-    target_split = unstack_batch(target_dict)
-    ap_inputs: list[tuple[Tensor, Tensor]] = []
+    detection_inputs: list[tuple[Tensor, Tensor]] = []
     true_positives: list[Tensor] = []
     unmatched: list[Tensor] = []
-    for predicted, target in zip(predicted_split, target_split):
+    for predicted, target in zip(predicted_dict_list, target_dict_list):
+        image_size_pixels_xy = target["image_size_pixels_rc"].flip(-1)
         true_positives_i, tp_scores, unmatched_i, unmatched_scores, false_negatives = (
             find_matches(
-                predicted["pred_positions"],
+                predicted["pred_positions"] * image_size_pixels_xy,
                 predicted["pred_logits"].sigmoid(),
-                target["normalized_incidence_points_xy"],
-                distance_threshold,
+                target["normalized_incidence_points_xy"] * image_size_pixels_xy,
+                distance_threshold_pixels,
             )
         )
         scores = torch.cat(
@@ -113,8 +117,93 @@ def prep_ap_inputs(
                 torch.ones_like(false_negatives, dtype=torch.int),
             ]
         )
-        ap_inputs.append((scores, labels))
+        detection_inputs.append((scores, labels))
         true_positives.append(true_positives_i)
         unmatched.append(unmatched_i)
 
-    return ap_inputs, true_positives, unmatched
+    return detection_inputs, true_positives, unmatched
+
+
+class PixelAP(BinaryAveragePrecision):
+    def __init__(self, pixel_threshold: float):
+        super().__init__()
+        self.pixel_threshold = pixel_threshold
+
+    def update(
+        self,
+        predicted_dict_list: list[dict[str, Tensor]],
+        target_dict_list: list[dict[str, Tensor]],
+    ):
+        ap_inputs, _, _ = prep_detection_inputs(
+            predicted_dict_list, target_dict_list, self.pixel_threshold
+        )
+        for scores, labels in ap_inputs:
+            super().update(scores, labels)
+
+
+@torch.jit.script
+def _sort_tensor(
+    batch_concatted_tensor: Tensor, batch_offsets: Tensor, matched_indices: list[Tensor]
+) -> Tensor:
+    stacked_matched = torch.cat(
+        [matched + offset for matched, offset in zip(matched_indices, batch_offsets)]
+    )
+    out = batch_concatted_tensor[stacked_matched]
+    return out
+
+
+@torch.jit.script
+def _restack_sparse_segmaps(segmaps: list[Tensor], max_elecs: int):
+    outs = []
+    for segmap in segmaps:
+        shape = list(segmap.shape)
+        shape[-1] = max_elecs
+        outs.append(sparse_resize(segmap, shape))
+    return torch.stack(outs, 0).coalesce()
+
+
+@torch.jit.script
+def _sort_predicted_true_maps(
+    predicted_segmentation_logits: Tensor,
+    true_segmentation_map: Tensor,
+    matched_indices: list[Tensor],
+) -> tuple[Tensor, Tensor]:
+    assert predicted_segmentation_logits.is_sparse
+    assert true_segmentation_map.is_sparse
+
+    reordered_predicted = []
+    reordered_true = []
+    max_elecs = max([indices.shape[1] for indices in matched_indices])
+    for predicted_map, true_map, indices in zip(
+        predicted_segmentation_logits.unbind(0),
+        true_segmentation_map.unbind(0),
+        matched_indices,
+    ):
+
+        reordered_predicted.append(sparse_index_select(predicted_map, 2, indices[0]))
+        reordered_true.append(sparse_index_select(true_map, 2, indices[1]))
+
+    reordered_predicted = _restack_sparse_segmaps(
+        reordered_predicted, max_elecs
+    ).coalesce()
+    reordered_true = _restack_sparse_segmaps(reordered_true, max_elecs).coalesce()
+
+    return reordered_predicted, reordered_true
+
+
+def _flatten_metrics(metric_dict):
+    out = {}
+    for k, v in metric_dict.items():
+        if isinstance(v, (nn.ModuleDict, MetricCollection)):
+            out.update(_flatten_metrics(v))
+        else:
+            out[k] = v.compute()
+    return out
+
+
+def recursive_reset(metric_or_moduledict: Union[nn.ModuleDict, Metric, MetricCollection]):
+    if not hasattr(metric_or_moduledict, "reset"):
+        for metric in metric_or_moduledict.values():
+            recursive_reset(metric)
+    else:
+        metric_or_moduledict.reset()

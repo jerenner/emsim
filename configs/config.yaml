@@ -60,6 +60,7 @@ criterion:
   salience:
     alpha: 0.25
     gamma: 2.0
+  detection_metric_distance_thresholds: [0.5, 1.0, 5.0]
 
 dataset:
   directory: "./data"

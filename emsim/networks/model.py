@@ -229,6 +229,7 @@ class EMModel(nn.Module):
             detach_likelihood_mean=cfg.criterion.detach_likelihood_mean,
             use_denoising_loss=cfg.denoising.use_denoising,
             denoising_loss_weight=cfg.denoising.denoising_loss_weight,
+            detection_metric_distance_thresholds=cfg.criterion.detection_metric_distance_thresholds,
         )
         salience_criterion = ElectronSalienceCriterion(
             alpha=cfg.criterion.salience.alpha, gamma=cfg.criterion.salience.gamma

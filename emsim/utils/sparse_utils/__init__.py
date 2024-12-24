@@ -17,6 +17,8 @@ from .base import (
     nested_flattened_tensors_to_sparse_tensors,
     sparse_squeeze_dense_dim,
     sparse_resize,
+    sparse_tensor_to_batched,
+    batched_sparse_tensor_to_sparse,
 )
 
 __all__ = [
@@ -38,6 +40,8 @@ __all__ = [
     "nested_flattened_tensors_to_sparse_tensors",
     "sparse_squeeze_dense_dim",
     "sparse_resize",
+    "sparse_tensor_to_batched",
+    "batched_sparse_tensor_to_sparse",
 ]
 
 # try:

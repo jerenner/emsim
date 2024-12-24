@@ -5,7 +5,11 @@ import sparse
 import torch
 from torch import Tensor
 
-from ..batching_utils import batch_dim_to_leading_index
+from ..batching_utils import (
+    batch_dim_to_leading_index,
+    deconcat_add_batch_dim,
+    remove_batch_dim_and_concat,
+)
 
 
 def torch_sparse_to_pydata_sparse(tensor: Tensor):
@@ -518,6 +522,39 @@ def union_sparse_indices(sparse_tensor_1: Tensor, sparse_tensor_2: Tensor):
     assert torch.equal(tensor_1_unioned.indices(), tensor_2_unioned.indices())
 
     return tensor_1_unioned, tensor_2_unioned
+
+
+@torch.jit.script
+def sparse_tensor_to_batched(sparse_tensor: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    assert sparse_tensor.is_sparse
+    batch_offsets = batch_offsets_from_sparse_tensor_indices(sparse_tensor.indices())
+    batched_tensor, pad_mask = deconcat_add_batch_dim(
+        sparse_tensor.values(), batch_offsets
+    )
+    batched_indices, pad_mask_2 = deconcat_add_batch_dim(
+        sparse_tensor.indices().T, batch_offsets
+    )
+    assert torch.equal(pad_mask, pad_mask_2)
+    return batched_tensor, batched_indices, pad_mask
+
+
+@torch.jit.script
+def batched_sparse_tensor_to_sparse(
+    batched_values: Tensor,
+    batched_indices: Tensor,
+    pad_mask: Tensor,
+    sparse_shape: list[int],
+) -> Tensor:
+    stacked_values, batch_offsets = remove_batch_dim_and_concat(
+        batched_values, pad_mask
+    )
+    stacked_indices, batch_offsets_2 = remove_batch_dim_and_concat(
+        batched_indices, pad_mask
+    )
+    assert torch.equal(batch_offsets, batch_offsets_2)
+    return torch.sparse_coo_tensor(
+        stacked_indices.T, stacked_values, sparse_shape
+    ).coalesce()
 
 
 def __trim(subtensor: Tensor):

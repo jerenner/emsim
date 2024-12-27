@@ -46,7 +46,7 @@ def deconcat_add_batch_dim(
     return out, padding_mask
 
 
-def concatted_to_nested_tensor(tensor: Tensor, batch_offsets: Tensor):
+def concatted_to_nested_tensor(tensor: Tensor, batch_offsets: Tensor) -> Tensor:
     assert batch_offsets.ndim == 1
     split_tensor = split_batch_concatted_tensor(tensor, batch_offsets)
     return torch.nested.as_nested_tensor(list(*split_tensor))

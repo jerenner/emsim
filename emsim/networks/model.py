@@ -81,6 +81,7 @@ class EMModel(nn.Module):
             "pred_segmentation_logits": segmentation_logits[-1],
             # "pred_binary_mask": sparse_binary_segmentation_map(segmentation_logits),
             "query_batch_offsets": query_batch_offsets,
+            "output_queries": output_queries[-1],
         }
 
         # output["output_queries"] = output_queries[-1]
@@ -100,15 +101,15 @@ class EMModel(nn.Module):
                         "pred_std_dev_cholesky": cholesky,
                         "query_batch_offsets": query_batch_offsets,
                         "pred_segmentation_logits": seg_logits,
-                        # "output_queries": queries,
+                        "output_queries": queries,
                     }
-                    # for logits, positions, cholesky, seg_logits, queries in zip(
-                    for logits, positions, cholesky, seg_logits in zip(
+                    for logits, positions, cholesky, seg_logits, queries in zip(
+                    # for logits, positions, cholesky, seg_logits in zip(
                         output_logits[:-1],
                         output_positions[:-1],
                         std_dev_cholesky[:-1],
                         segmentation_logits[:-1],
-                        # output_queries[:-1],
+                        output_queries[:-1],
                     )
                 ]
             _logger.debug("Begin loss calculation")
@@ -203,7 +204,10 @@ class EMModel(nn.Module):
             level_filter_ratio=cfg.transformer.level_filter_ratio,
             layer_filter_ratio=cfg.transformer.layer_filter_ratio,
             encoder_max_tokens=cfg.transformer.max_tokens,
+            encoder_topk_sa=cfg.transformer.encoder_topk_sa,
+            encoder_use_ms_deform_attn=cfg.transformer.encoder_use_ms_deform_attn,
             n_query_embeddings=cfg.transformer.query_embeddings,
+            decoder_cross_attn_type=cfg.transformer.decoder_cross_attn_type,
             decoder_look_forward_twice=cfg.transformer.decoder_look_forward_twice,
             decoder_detach_updated_positions=cfg.transformer.decoder_detach_updated_positions,
             mask_main_queries_from_denoising=cfg.denoising.mask_main_queries_from_denoising,

@@ -39,24 +39,29 @@ class TransformerEncoderLayer(nn.Module):
         norm_first: bool = True,
         attn_proj_bias: bool = False,
         topk_sa: int = 1000,
+        use_msdeform_attn: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.dim_feedforward = dim_feedforward
         self.topk_sa = topk_sa
+        self.use_msdeform_attn = use_msdeform_attn
 
         self.self_attn = SelfAttentionBlock(
             d_model, n_heads, dropout, attn_proj_bias, norm_first
         )
-        self.msdeform_attn = SparseDeformableAttentionBlock(
-            d_model,
-            n_heads,
-            n_deformable_value_levels,
-            n_deformable_points,
-            dropout,
-            norm_first,
-        )
+        if use_msdeform_attn:
+            self.msdeform_attn = SparseDeformableAttentionBlock(
+                d_model,
+                n_heads,
+                n_deformable_value_levels,
+                n_deformable_points,
+                dropout,
+                norm_first,
+            )
+        else:
+            self.msdeform_attn = nn.Identity()
         self.ffn = FFNBlock(
             d_model, dim_feedforward, dropout, activation_fn, norm_first
         )
@@ -91,31 +96,39 @@ class TransformerEncoderLayer(nn.Module):
         indices = indices.unsqueeze(-1).expand(-1, -1, queries_batched.shape[-1])
         selected_queries = torch.gather(queries_batched, 1, indices)
         selected_pos_encoding = torch.gather(pos_encoding_batched, 1, indices)
+        # selected_queries = queries_batched
+        # selected_pos_encoding = pos_encoding_batched
+        # selected_pad_mask = pad_mask
 
         self_attn_out = self.self_attn(
             selected_queries, selected_pos_encoding, selected_pad_mask
         )
         queries_batched = queries_batched.scatter(1, indices, self_attn_out)
+        # queries_batched = self_attn_out
 
         queries_2, batch_offsets_2 = remove_batch_dim_and_concat(
             queries_batched, pad_mask
         )
         assert torch.equal(batch_offsets, batch_offsets_2)
 
-        queries_3 = self.msdeform_attn(
-            queries_2,
-            query_pos_encoding,
-            query_normalized_xy_positions,
-            batch_offsets,
-            stacked_feature_maps,
-            spatial_shapes,
-        )
+        if self.use_msdeform_attn:
+            queries_3 = self.msdeform_attn(
+                queries_2,
+                query_pos_encoding,
+                query_normalized_xy_positions,
+                batch_offsets,
+                stacked_feature_maps,
+                spatial_shapes,
+            )
+        else:
+            queries_3 = self.msdeform_attn(queries_2)
         queries_4 = self.ffn(queries_3)
         return queries_4
 
     def reset_parameters(self):
         self.self_attn.reset_parameters()
-        self.msdeform_attn.reset_parameters()
+        if hasattr(self.msdeform_attn, "reset_parameters"):
+            self.msdeform_attn.reset_parameters()
         self.ffn.reset_parameters()
 
 

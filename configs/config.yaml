@@ -25,6 +25,9 @@ transformer:
   layer_filter_ratio: [1.0, 0.8, 0.6, 0.6, 0.4, 0.2]
   max_tokens: 10000
   query_embeddings: 200
+  encoder_topk_sa: 100
+  encoder_use_ms_deform_attn: true
+  decoder_cross_attn_type: "ms_deform_attn"
   decoder_detach_updated_positions: true
   decoder_look_forward_twice: true
 

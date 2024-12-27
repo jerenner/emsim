@@ -10,6 +10,11 @@ from emsim.networks.transformer.blocks import FFNBlock
 from ...utils.misc_utils import inverse_sigmoid
 
 from ...utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
+from ...utils.sparse_utils import (
+    batch_offsets_from_sparse_tensor_indices,
+    sparse_tensor_to_batched,
+    multilevel_normalized_xy,
+)
 from ..positional_encoding import (
     PixelPositionalEncoding,
     RelativePositionalEncodingTableInterpolate2D,
@@ -17,7 +22,12 @@ from ..positional_encoding import (
     FourierEncoding,
 )
 from .std_dev_head import StdDevHead
-from .blocks import SelfAttentionBlock, SparseDeformableAttentionBlock, FFNBlock
+from .blocks import (
+    SelfAttentionBlock,
+    SparseDeformableAttentionBlock,
+    FFNBlock,
+    SparseTensorCrossAttentionBlock,
+)
 from ..segmentation_map import PatchedSegmentationMapPredictor
 
 
@@ -27,6 +37,7 @@ class TransformerDecoderLayer(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
+        cross_attn_type: str = "ms_deform_attn",
         n_deformable_value_levels: int = 4,
         n_deformable_points: int = 4,
         dropout: float = 0.1,
@@ -38,21 +49,28 @@ class TransformerDecoderLayer(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.dim_feedforward = dim_feedforward
+        self.cross_attn_type = cross_attn_type
 
         self.self_attn = SelfAttentionBlock(
             d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
         )
-        self.msdeform_attn = SparseDeformableAttentionBlock(
-            d_model,
-            n_heads,
-            n_deformable_value_levels,
-            n_deformable_points,
-            dropout,
-            norm_first,
-        )
+        if cross_attn_type == "ms_deform_attn":
+            self.cross_attn = SparseDeformableAttentionBlock(
+                d_model,
+                n_heads,
+                n_deformable_value_levels,
+                n_deformable_points,
+                dropout,
+                norm_first,
+            )
+        elif cross_attn_type == "multi_head_attn":
+            self.cross_attn = SparseTensorCrossAttentionBlock(
+                d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
+            )
         self.ffn = FFNBlock(
             d_model, dim_feedforward, dropout, activation_fn, norm_first
         )
+        self.pos_encoding = None
 
     def forward(
         self,
@@ -72,23 +90,40 @@ class TransformerDecoderLayer(nn.Module):
         assert torch.equal(pad_mask, pad_mask_2)
 
         x = self.self_attn(queries_batched, pos_encoding_batched, pad_mask, attn_mask)
-        x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
-        assert torch.equal(batch_offsets, batch_offsets_2)
 
-        x = self.msdeform_attn(
-            x,
-            query_pos_encoding,
-            query_normalized_xy_positions,
-            batch_offsets,
-            stacked_feature_maps,
-            spatial_shapes,
-        )
+        if self.cross_attn_type == "ms_deform_attn":
+            x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
+            assert torch.equal(batch_offsets, batch_offsets_2)
+            x = self.cross_attn(
+                x,
+                query_pos_encoding,
+                query_normalized_xy_positions,
+                batch_offsets,
+                stacked_feature_maps,
+                spatial_shapes,
+            )
+        elif self.cross_attn_type == "multi_head_attn":
+            # batched_values, value_indices, value_pad_mask = sparse_tensor_to_batched(
+            #     stacked_feature_maps
+            # )
+            # value_pos_normalized_xy = multilevel_normalized_xy(
+            #     stacked_feature_maps, spatial_shapes
+            # )
+            x = self.cross_attn(
+                query=x,
+                query_pos_encoding=query_pos_encoding.view_as(x),
+                query_normalized_xy_positions=query_normalized_xy_positions,
+                stacked_feature_maps=stacked_feature_maps,
+                spatial_shapes=spatial_shapes,
+            )
+            x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
+            assert torch.equal(batch_offsets, batch_offsets_2)
         x = self.ffn(x)
         return x
 
     def reset_parameters(self):
         self.self_attn.reset_parameters()
-        self.msdeform_attn.reset_parameters()
+        self.cross_attn.reset_parameters()
         self.ffn.reset_parameters()
 
 
@@ -229,7 +264,7 @@ class EMTransformerDecoder(nn.Module):
                 queries_normed,
                 query_batch_offsets,
                 new_reference_points,
-                )
+            )
 
             layer_output_logits.append(query_logits)
             layer_output_std.append(query_std)

@@ -12,7 +12,7 @@ from ..batching_utils import (
 )
 
 
-def torch_sparse_to_pydata_sparse(tensor: Tensor):
+def torch_sparse_to_pydata_sparse(tensor: Tensor) -> sparse.SparseArray:
     assert tensor.is_sparse
     tensor = tensor.detach().cpu().coalesce()
     assert tensor.is_coalesced
@@ -27,7 +27,7 @@ def torch_sparse_to_pydata_sparse(tensor: Tensor):
 
 def pydata_sparse_to_torch_sparse(
     sparse_array: sparse.SparseArray, device: Optional[torch.device] = None
-):
+) -> Tensor:
     return torch.sparse_coo_tensor(
         indices=sparse_array.coords,
         values=sparse_array.data,
@@ -36,7 +36,7 @@ def pydata_sparse_to_torch_sparse(
     ).coalesce()
 
 
-def sparse_select(tensor: Tensor, axis: int, index: int):
+def sparse_select(tensor: Tensor, axis: int, index: int) -> Tensor:
     assert tensor.is_sparse
     tensor = tensor.coalesce()
     index_mask = tensor.indices()[axis] == index
@@ -54,7 +54,7 @@ def sparse_select(tensor: Tensor, axis: int, index: int):
 @torch.jit.script
 def _sparse_index_select_inner(
     tensor_indices: Tensor, tensor_values: Tensor, axis: int, index: Tensor
-):
+) -> tuple[Tensor, Tensor]:
     index_masks = tensor_indices[axis] == index.unsqueeze(1)
     match_count = index_masks.sum(1)
     # selected_items = torch.where(index_masks)[1]
@@ -80,7 +80,7 @@ def _sparse_index_select_inner(
 
 
 @torch.jit.script
-def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
+def sparse_index_select(tensor: Tensor, axis: int, index: Tensor) -> Tensor:
     if not tensor.requires_grad:
         return tensor.index_select(axis, index.long()).coalesce()
     assert tensor.is_sparse
@@ -104,7 +104,7 @@ def sparse_index_select(tensor: Tensor, axis: int, index: Tensor):
     return torch.sparse_coo_tensor(new_indices, new_values, new_shape).coalesce()
 
 
-def sparse_squeeze_dense_dim(tensor: Tensor):
+def sparse_squeeze_dense_dim(tensor: Tensor) -> Tensor:
     assert tensor.is_sparse
     assert tensor.dense_dim() > 0, "Tensor has no dense dim to squeeze"
     assert tensor.shape[-1] == 1, f"Tensor dense dim is non-singleton: {tensor.shape=}"
@@ -200,7 +200,7 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
     )
 
 
-def unpack_sparse_tensors(batch: dict[str, Tensor]):
+def unpack_sparse_tensors(batch: dict[str, Tensor]) -> dict[str, Tensor]:
     """
     Takes in a batch dict and converts packed sparse tensors (with separate
     indices and values tensors, and shape tuple) into sparse torch.Tensors
@@ -391,7 +391,7 @@ def gather_from_sparse_tensor(
 
 def scatter_to_sparse_tensor(
     sparse_tensor: Tensor, index_tensor: Tensor, values: Tensor
-):
+) -> Tensor:
     """Batch updating of elements in a torch sparse tensor. Should be
     equivalent to sparse_tensor[index_tensor] = values. It works by flattening
     the sparse tensor's sparse dims and the index tensor to 1D (and converting
@@ -474,7 +474,9 @@ def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor) -> Tensor:
 
 
 @torch.jit.script
-def union_sparse_indices(sparse_tensor_1: Tensor, sparse_tensor_2: Tensor):
+def union_sparse_indices(
+    sparse_tensor_1: Tensor, sparse_tensor_2: Tensor
+) -> tuple[Tensor, Tensor]:
     assert sparse_tensor_1.is_sparse
     assert sparse_tensor_2.is_sparse
     assert sparse_tensor_1.sparse_dim() == sparse_tensor_2.sparse_dim()
@@ -557,7 +559,18 @@ def batched_sparse_tensor_to_sparse(
     ).coalesce()
 
 
-def __trim(subtensor: Tensor):
+@torch.jit.script
+def multilevel_normalized_xy(sparse_tensor: Tensor, spatial_shapes: Tensor) -> Tensor:
+    assert sparse_tensor.ndim == 5  # batch, i, j, level, feature
+    assert spatial_shapes.ndim == 2  # i, j
+    spatial_shapes_per_token = spatial_shapes[sparse_tensor.indices()[3]]
+    normalized_shapes = (
+        sparse_tensor.indices()[1:3].T / spatial_shapes_per_token
+    ).flip(-1)
+    return normalized_shapes
+
+
+def __trim(subtensor: Tensor) -> Tensor:
     subtensor = subtensor.coalesce()
     indices, values = subtensor.indices(), subtensor.values()
     shape = subtensor.shape
@@ -566,7 +579,7 @@ def __trim(subtensor: Tensor):
     return torch.sparse_coo_tensor(indices, values, new_shape).coalesce()
 
 
-def bhwn_to_nhw_iterator_over_batches_torch(tensor: Tensor):
+def bhwn_to_nhw_iterator_over_batches_torch(tensor: Tensor) -> list[Tensor]:
     assert tensor.is_sparse
     tensor = tensor.permute(0, 3, 1, 2).coalesce()
 

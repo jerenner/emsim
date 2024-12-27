@@ -19,6 +19,7 @@ from .base import (
     sparse_resize,
     sparse_tensor_to_batched,
     batched_sparse_tensor_to_sparse,
+    multilevel_normalized_xy,
 )
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "sparse_resize",
     "sparse_tensor_to_batched",
     "batched_sparse_tensor_to_sparse",
+    "multilevel_normalized_xy",
 ]
 
 # try:

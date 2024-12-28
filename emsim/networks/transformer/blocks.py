@@ -244,7 +244,6 @@ class SelfAttentionBlockWithRoPE(nn.Module):
         if not self.norm_first:
             x = self.norm(x)
 
-        x = remove_batch_dim_and_concat(x, pad_mask)
         return x
 
     def reset_parameters(self):

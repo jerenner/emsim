@@ -41,60 +41,6 @@ def init_2d_freqs(
     return freqs  # n_head, head_dim/2, 2
 
 
-def init_t_xy(end_x: int, end_y: int, device: Optional[torch.device] = None):
-    # t = torch.arange(end_x * end_y, dtype=torch.float, device=device)
-    # t_x = (t % end_x).float()
-    # t_y = torch.div(t, end_x, rounding_mode="floor").float()
-    # return t_x, t_y
-    t_x, t_y = torch.meshgrid(
-        torch.arange(end_x, dtype=torch.float, device=device),
-        torch.arange(end_y, dtype=torch.float, device=device),
-        indexing="xy",
-    )
-    return t_x.flatten(), t_y.flatten()
-
-
-def compute_mixed_cis(freqs: Tensor, t_x: Tensor, t_y: Tensor, num_heads: int):
-    N = t_x.shape[0]
-    # No float 16 for this range
-    with torch.amp.autocast("cuda", enabled=False):
-        freqs_x = (
-            (t_x.unsqueeze(-1) @ freqs[0].unsqueeze(-2))
-            .view(N, num_heads, -1)
-            .permute(1, 0, 2)
-        )
-        freqs_y = (
-            (t_y.unsqueeze(-1) @ freqs[1].unsqueeze(-2))
-            .view(N, num_heads, -1)
-            .permute(1, 0, 2)
-        )
-        freqs_cis = torch.polar(torch.ones_like(freqs_x), freqs_x + freqs_y)
-    return freqs_cis
-
-
-def reshape_for_broadcast(freqs_cis: Tensor, x: Tensor):
-    ndim = x.ndim
-    assert 0 <= 1 < ndim
-    if freqs_cis.shape == (x.shape[-2], x.shape[-1]):
-        shape = [d if i >= ndim - 2 else 1 for i, d in enumerate(x.shape)]
-    elif freqs_cis.shape == (x.shape[-3], x.shape[-2], x.shape[-1]):
-        shape = [d if i >= ndim - 3 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(shape)
-
-
-def apply_rotary_emb(xq: Tensor, xk: Tensor, freqs_cis: Tensor):
-    new_xq_shape = xq.shape[:-1]
-    new_xq_shape.extend([-1, 2])
-    xq_ = torch.view_as_complex(xq.float().reshape(new_xq_shape))
-    new_xk_shape = xk.shape[:-1]
-    new_xk_shape.extend([-1, 2])
-    xk_ = torch.view_as_complex(xk.float().reshape(new_xk_shape))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq).to(xq.device), xk_out.type_as(xk).to(xk.device)
-
-
 class RoPEEncoding2D(nn.Module):
     def __init__(
         self, d_model: int, n_heads: int, rope_theta: float = 10.0, dtype=torch.float

@@ -56,7 +56,7 @@ class RoPEEncoding2D(nn.Module):
         assert self.head_dim % self.pos_dim == 0
 
         freqs = init_2d_freqs(self.head_dim, n_heads, rope_theta, dtype=dtype)
-        assert freqs.shape == (n_heads, self.head_dim, 2)
+        assert freqs.shape == (n_heads, self.head_dim // 2, 2)
         self.freqs = nn.Parameter(freqs)
 
     @torch.amp.autocast("cuda", enabled=False)
@@ -66,7 +66,7 @@ class RoPEEncoding2D(nn.Module):
         query_pos: Tensor,
         key: Tensor,
         key_pos: Optional[Tensor] = None,
-    ):
+    ) -> tuple[Tensor, Tensor]:
         self.shape_check(query, query_pos)
         if query_pos.max() <= 1.0:
             warnings.warn(
@@ -101,6 +101,7 @@ class RoPEEncoding2D(nn.Module):
         key = torch.view_as_complex(self.split_head_by_dim(key))
         key_rotated = torch.view_as_real(key * key_rot_vec).flatten(-2)
 
+        #  out dim: batch x seq_len x n_heads x head_dim
         return query_rotated, key_rotated
 
     def shape_check(self, query_or_key: Tensor, query_or_key_pos: Tensor):

@@ -68,6 +68,8 @@ class SelfAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, query, query_pos_embedding, pad_mask=None, attn_mask=None):
+        if pad_mask is not None:
+            assert pad_mask.ndim == 2  # batch, seq_len
         residual = query
         query_with_pos_embed = query + query_pos_embedding
         if self.norm_first:
@@ -192,11 +194,17 @@ class SelfAttentionBlockWithRoPE(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model, bias=bias)
         self.out_proj_drop = nn.Dropout(dropout)
 
-    def forward(self, x: Tensor, positions: Tensor, batch_offsets: Tensor):
+    def forward(
+        self,
+        x: Tensor,
+        positions: Tensor,
+        batch_offsets: Tensor,
+        pad_mask: Optional[Tensor] = None,
+    ):
         residual = x
         if self.norm_first:
             x = self.norm(x)
-        q, k, v = self.qkv(x).chunk(3, -1)
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
 
         q, pad_mask = deconcat_add_batch_dim(q, batch_offsets)
         k, _ = deconcat_add_batch_dim(k, batch_offsets)
@@ -204,9 +212,28 @@ class SelfAttentionBlockWithRoPE(nn.Module):
         positions, _ = deconcat_add_batch_dim(positions, batch_offsets)
 
         q, k = self.pos_encoding(q, positions, k)
+        # (batch x seq_len x n_heads x head_dim) -> (batch x n_heads x seq_len x head_dim)
+        assert q.ndim == 4 and k.ndim == 4 and v.ndim == 4
+        bsz, seq_len, n_heads, head_dim = q.shape
+        q: Tensor = q.transpose(1, 2)
+        k: Tensor = k.transpose(1, 2)
+        v: Tensor = v.transpose(1, 2)
+
+        if pad_mask is not None:
+            assert pad_mask.ndim == 2  # batch, seq_len
+            #  F.scaled_dot_product_attention wants attn mask of dim
+            #  (N, num_heads, L, S)
+            attn_mask = pad_mask.view(bsz, 1, seq_len, 1)
+            attn_mask = attn_mask.expand(-1, n_heads, -1, head_dim)
+        else:
+            attn_mask = None
 
         x = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=pad_mask, dropout_p=self.attn_drop_rate
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.attn_drop_rate,
         )
         x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
         assert torch.equal(batch_offsets, batch_offsets_2)
@@ -217,6 +244,7 @@ class SelfAttentionBlockWithRoPE(nn.Module):
         if not self.norm_first:
             x = self.norm(x)
 
+        x = remove_batch_dim_and_concat(x, pad_mask)
         return x
 
     def reset_parameters(self):

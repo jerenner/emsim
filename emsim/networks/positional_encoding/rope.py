@@ -1,4 +1,5 @@
 from typing import Optional
+import warnings
 
 import torch
 from torch import Tensor, nn
@@ -63,18 +64,22 @@ class RoPEEncoding2D(nn.Module):
         self,
         query: Tensor,
         query_pos: Tensor,
-        key: Optional[Tensor],
-        key_pos: Optional[Tensor],
+        key: Tensor,
+        key_pos: Optional[Tensor] = None,
     ):
         self.shape_check(query, query_pos)
+        if query_pos.max() <= 1.0:
+            warnings.warn(
+                "Expected un-normalized (i.e., not inside [0,1]) coordinates"
+                "for position but found normalized coordinates. Did you accidentally"
+                "pass in normalized coordinates?"
+            )
         bsz = query.shape[0]
         target_len = query.shape[1]
-        if key is None:
-            assert key_pos is None
-        else:
+        if key_pos is not None:
             self.shape_check(key, key_pos)
             assert key.shape[0] == key_pos.shape[0] == bsz
-            source_len = key.shape[1]
+        source_len = key.shape[1]
 
         # query_rot_vec = torch.einsum("blt,nht->blnh", query_pos, self.freqs)
         query_rot_vec = torch.mm(query_pos.view(-1, 2), self.freqs.view(-1, 2).T).view(
@@ -85,17 +90,16 @@ class RoPEEncoding2D(nn.Module):
         query = torch.view_as_complex(self.split_head_by_dim(query))
         query_rotated = torch.view_as_real(query * query_rot_vec).flatten(-2)
 
-        if key is not None:
+        if key_pos is not None:
             # key_rot_vec = torch.einsum("blt,nht->blnh", key_pos, self.freqs)
             key_rot_vec = torch.mm(key_pos.view(-1, 2), self.freqs.view(-1, 2).T).view(
                 [bsz, source_len, self.n_heads, self.head_dim // 2]
             )
             key_rot_vec = torch.polar(torch.ones_like(key_rot_vec), key_rot_vec)
-
-            key = torch.view_as_complex(self.split_head_by_dim(key))
-            key_rotated = torch.view_as_real(key * key_rot_vec).flatten(-2)
         else:
-            key_rotated = query_rotated
+            key_rot_vec = query_rot_vec
+        key = torch.view_as_complex(self.split_head_by_dim(key))
+        key_rotated = torch.view_as_real(key * key_rot_vec).flatten(-2)
 
         return query_rotated, key_rotated
 

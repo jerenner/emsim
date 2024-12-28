@@ -2,8 +2,9 @@ from typing import Optional
 
 from torch import Tensor, nn
 import torch
+import torch.nn.functional as F
 
-from emsim.networks.transformer.attn import SelfAttentionWithRoPE
+from emsim.networks.positional_encoding.rope import RoPEEncoding2D
 from emsim.networks.sparse_ms_deform_attn import SparseMSDeformableAttention
 from emsim.utils.batching_utils import (
     deconcat_add_batch_dim,
@@ -184,32 +185,45 @@ class SelfAttentionBlockWithRoPE(nn.Module):
         self.n_heads = n_heads
         self.norm_first = norm_first
 
-        self.attn = SelfAttentionWithRoPE(d_model, n_heads, dropout, bias)
         self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=bias)
+        self.pos_encoding = RoPEEncoding2D(d_model, n_heads, dtype=torch.double)
+        self.attn_drop_rate = dropout
+        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
+        self.out_proj_drop = nn.Dropout(dropout)
 
     def forward(self, x: Tensor, positions: Tensor, batch_offsets: Tensor):
-        x, pad_mask = deconcat_add_batch_dim(x, batch_offsets)
+        residual = x
+        if self.norm_first:
+            x = self.norm(x)
+        q, k, v = self.qkv(x).chunk(3, -1)
+
+        q, pad_mask = deconcat_add_batch_dim(q, batch_offsets)
+        k, _ = deconcat_add_batch_dim(k, batch_offsets)
+        v, _ = deconcat_add_batch_dim(v, batch_offsets)
         positions, _ = deconcat_add_batch_dim(positions, batch_offsets)
 
-        if self.norm_first:
-            residual = x
-            x = self.norm(x)
-            x = self.attn(x, positions, pad_mask)
-            x = self.dropout(x)
-            x = x + residual
-        else:
-            x = x + self.dropout(self.attn(x, positions, pad_mask))
-            x = self.norm(x)
+        q, k = self.pos_encoding(q, positions, k)
 
+        x = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=pad_mask, dropout_p=self.attn_drop_rate
+        )
         x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
         assert torch.equal(batch_offsets, batch_offsets_2)
+
+        x = self.out_proj(x)
+        x = self.out_proj_drop(x)
+        x = x + residual
+        if not self.norm_first:
+            x = self.norm(x)
 
         return x
 
     def reset_parameters(self):
-        self.attn.reset_parameters()
         self.norm.reset_parameters()
+        self.qkv.reset_parameters()
+        self.pos_encoding.reset_parameters()
+        self.out_proj.reset_parameters()
 
 
 class SparseDeformableAttentionBlock(nn.Module):

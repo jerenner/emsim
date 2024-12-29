@@ -40,6 +40,7 @@ class TransformerEncoderLayer(nn.Module):
         attn_proj_bias: bool = False,
         topk_sa: int = 1000,
         use_msdeform_attn: bool = True,
+        use_rope: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
@@ -47,10 +48,16 @@ class TransformerEncoderLayer(nn.Module):
         self.dim_feedforward = dim_feedforward
         self.topk_sa = topk_sa
         self.use_msdeform_attn = use_msdeform_attn
+        self.use_rope = use_rope
 
-        self.self_attn = SelfAttentionBlock(
-            d_model, n_heads, dropout, attn_proj_bias, norm_first
-        )
+        if not use_rope:
+            self.self_attn = SelfAttentionBlock(
+                d_model, n_heads, dropout, attn_proj_bias, norm_first
+            )
+        else:
+            self.self_attn = SelfAttentionBlockWithRoPE(
+                d_model, n_heads, dropout, attn_proj_bias, norm_first
+            )
         if use_msdeform_attn:
             self.msdeform_attn = SparseDeformableAttentionBlock(
                 d_model,
@@ -80,36 +87,80 @@ class TransformerEncoderLayer(nn.Module):
     ):
         token_scores = token_electron_probs * token_predicted_salience.sigmoid()
         token_scores_batched, pad_mask = deconcat_add_batch_dim(
-            token_scores.unsqueeze(-1), batch_offsets
+            token_scores.unsqueeze(-1), batch_offsets, -torch.inf
         )
         token_scores_batched = token_scores_batched.squeeze(-1)
         queries_batched, pad_mask_2 = deconcat_add_batch_dim(queries, batch_offsets)
         pos_encoding_batched, pad_mask_3 = deconcat_add_batch_dim(
             query_pos_encoding, batch_offsets
         )
+        ij_indices_batched, pad_mask_4 = deconcat_add_batch_dim(
+            query_ij_indices, batch_offsets
+        )
         assert torch.equal(pad_mask, pad_mask_2)
         assert torch.equal(pad_mask, pad_mask_3)
+        assert torch.equal(pad_mask, pad_mask_4)
 
         k = min(self.topk_sa, token_scores_batched.shape[1])
         indices = torch.topk(token_scores_batched, k, dim=1)[1]
         selected_pad_mask = torch.gather(pad_mask, 1, indices)
-        indices = indices.unsqueeze(-1).expand(-1, -1, queries_batched.shape[-1])
-        selected_queries = torch.gather(queries_batched, 1, indices)
-        selected_pos_encoding = torch.gather(pos_encoding_batched, 1, indices)
+        selected_ij_indices = torch.gather(
+            ij_indices_batched,
+            1,
+            indices.unsqueeze(-1).expand(-1, -1, ij_indices_batched.shape[-1]),
+        )
+        indices_unsq = indices.unsqueeze(-1).expand(-1, -1, queries_batched.shape[-1])
+        selected_queries = torch.gather(queries_batched, 1, indices_unsq)
+        selected_pos_encoding = torch.gather(pos_encoding_batched, 1, indices_unsq)
         # selected_queries = queries_batched
         # selected_pos_encoding = pos_encoding_batched
         # selected_pad_mask = pad_mask
 
-        self_attn_out = self.self_attn(
-            selected_queries, selected_pos_encoding, selected_pad_mask
+        ### unbatched gather
+        indices_flat = torch.flatten(
+            indices + batch_offsets.unsqueeze(-1).expand_as(indices)
+        )[selected_pad_mask.flatten().logical_not()]
+        batch_offsets_flat = torch.arange(
+            0,
+            indices_flat.numel(),
+            indices.shape[-1],
+            device=indices_flat.device,
+            dtype=torch.int32,
+        ) - torch.cat([indices.new_zeros([1]), selected_pad_mask.sum(-1)[:-1]], 0)
+        # selected_queries_flat = queries[indices_flat]
+        selected_ij_indices_flat = torch.gather(
+            query_ij_indices,
+            0,
+            indices_flat.unsqueeze(-1).expand(-1, query_ij_indices.shape[-1]),
         )
-        queries_batched = queries_batched.scatter(1, indices, self_attn_out)
-        # queries_batched = self_attn_out
+        indices_flat_unsq = indices_flat.unsqueeze(-1).expand(-1, queries.shape[-1])
+        selected_queries_flat = torch.gather(queries, 0, indices_flat_unsq)
+        selected_pos_encoding_flat = torch.gather(
+            query_pos_encoding, 0, indices_flat_unsq
+        )
+        assert torch.equal(selected_queries_flat, selected_queries[~selected_pad_mask])
+        assert torch.equal(
+            selected_pos_encoding_flat, selected_pos_encoding[~selected_pad_mask]
+        )
+        ###
 
-        queries_2, batch_offsets_2 = remove_batch_dim_and_concat(
-            queries_batched, pad_mask
-        )
-        assert torch.equal(batch_offsets, batch_offsets_2)
+        if not self.use_rope:
+            self_attn_out = self.self_attn(
+                selected_queries_flat,
+                selected_pos_encoding_flat,
+                batch_offsets=batch_offsets_flat,
+            )
+        else:
+            self_attn_out = self.self_attn(
+                selected_queries_flat, selected_ij_indices_flat, batch_offsets
+            )
+        # queries_batched = queries_batched.scatter(1, indices_unsq, self_attn_out)
+        # queries_batched = self_attn_out
+        # queries_2, batch_offsets_2 = remove_batch_dim_and_concat(
+        #     queries_batched, pad_mask
+        # )
+        # assert torch.equal(batch_offsets, batch_offsets_2)
+        queries_2 = queries.scatter(0, indices_flat_unsq, self_attn_out)
 
         if self.use_msdeform_attn:
             queries_3 = self.msdeform_attn(
@@ -161,7 +212,7 @@ class EMTransformerEncoder(nn.Module):
         token_normalized_xy_positions: list[Tensor],
         token_layer_subset_indices: list[Tensor],
     ):
-        # stack the spconv tensors over the batch dimension for faster indexing
+        # stack the MinkowskiEngine tensors over the batch dimension for faster indexing
         stacked_feature_maps = self.stack_sparse_tensors(
             feature_maps, spatial_shapes[-1]
         )
@@ -214,6 +265,8 @@ class EMTransformerEncoder(nn.Module):
             #         )
             #     )
             # )
+            if layer_index == 4:
+                pass
             token_scores_for_layer = [
                 scores[indices]
                 for scores, indices in zip(token_salience_scores, indices_for_layer)

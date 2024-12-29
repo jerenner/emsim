@@ -67,7 +67,20 @@ class SelfAttentionBlock(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, query, query_pos_embedding, pad_mask=None, attn_mask=None):
+    def forward(
+        self,
+        query: Tensor,
+        query_pos_embedding: Tensor,
+        pad_mask: Optional[Tensor] = None,
+        attn_mask: Optional[Tensor] = None,
+        batch_offsets: Optional[Tensor] = None,
+    ):
+        if query.ndim == 2:
+            assert query_pos_embedding.ndim == 2
+            return self.forward_unbatched(
+                query, query_pos_embedding, batch_offsets, attn_mask
+            )
+
         if pad_mask is not None:
             assert pad_mask.ndim == 2  # batch, seq_len
         residual = query
@@ -95,6 +108,40 @@ class SelfAttentionBlock(nn.Module):
                     attn_mask=attn_mask,
                 )[0]
             )
+            query = self.norm(query)
+        return query
+
+    def forward_unbatched(
+        self,
+        query: Tensor,
+        query_pos_embedding: Tensor,
+        batch_offsets: Tensor,
+        attn_mask: Optional[Tensor] = None,
+    ):
+        assert batch_offsets is not None
+        residual = query
+        query_with_pos_embed = query + query_pos_embedding
+        if self.norm_first:
+            query_with_pos_embed = self.norm(query_with_pos_embed)
+        query, pad_mask = deconcat_add_batch_dim(query, batch_offsets)
+        query_with_pos_embed, pad_mask_2 = deconcat_add_batch_dim(
+            query_with_pos_embed, batch_offsets
+        )
+        assert torch.equal(pad_mask, pad_mask_2)
+        query = self.dropout(
+            self.attn(
+                query_with_pos_embed,
+                query_with_pos_embed,
+                query,
+                key_padding_mask=pad_mask,
+                need_weights=False,
+                attn_mask=attn_mask,
+            )[0]
+        )
+        query, batch_offsets_2 = remove_batch_dim_and_concat(query, pad_mask)
+        assert torch.equal(batch_offsets, batch_offsets_2)
+        query = query + residual
+        if not self.norm_first:
             query = self.norm(query)
         return query
 

@@ -83,17 +83,14 @@ class TransformerDecoderLayer(nn.Module):
         spatial_shapes: Tensor,
         attn_mask: Optional[Tensor] = None,
     ):
-        queries_batched, pad_mask = deconcat_add_batch_dim(queries, batch_offsets)
-        pos_encoding_batched, pad_mask_2 = deconcat_add_batch_dim(
-            query_pos_encoding, batch_offsets
+        x = self.self_attn(
+            queries,
+            query_pos_encoding,
+            attn_mask=attn_mask,
+            batch_offsets=batch_offsets,
         )
-        assert torch.equal(pad_mask, pad_mask_2)
-
-        x = self.self_attn(queries_batched, pos_encoding_batched, pad_mask, attn_mask)
 
         if self.cross_attn_type == "ms_deform_attn":
-            x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
-            assert torch.equal(batch_offsets, batch_offsets_2)
             x = self.cross_attn(
                 x,
                 query_pos_encoding,

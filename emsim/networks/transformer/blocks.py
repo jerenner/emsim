@@ -233,9 +233,11 @@ class SelfAttentionBlockWithRoPE(nn.Module):
             k,
             v,
             attn_mask=attn_mask,
-            dropout_p=self.attn_drop_rate,
-        ).transpose(1, 2)
+            dropout_p=self.attn_drop_rate if self.training else 0.0,
+        )
+        # (batch x n_heads x seq_len x head_dim) ->
         # (batch x seq_len x n_heads x head_dim)
+        x = x.transpose(1, 2)
 
         x = x.view(bsz, seq_len, self.d_model)
         x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)

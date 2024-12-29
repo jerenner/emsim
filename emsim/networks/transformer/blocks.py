@@ -67,20 +67,13 @@ class SelfAttentionBlock(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(
+    def forward_batched(
         self,
         query: Tensor,
         query_pos_embedding: Tensor,
         pad_mask: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
-        batch_offsets: Optional[Tensor] = None,
     ):
-        if query.ndim == 2:
-            assert query_pos_embedding.ndim == 2
-            return self.forward_unbatched(
-                query, query_pos_embedding, batch_offsets, attn_mask
-            )
-
         if pad_mask is not None:
             assert pad_mask.ndim == 2  # batch, seq_len
         residual = query
@@ -111,13 +104,20 @@ class SelfAttentionBlock(nn.Module):
             query = self.norm(query)
         return query
 
-    def forward_unbatched(
+    def forward(
         self,
         query: Tensor,
         query_pos_embedding: Tensor,
         batch_offsets: Tensor,
         attn_mask: Optional[Tensor] = None,
+        pad_mask: Optional[Tensor] = None,
     ):
+        if query.ndim == 3:
+            assert query_pos_embedding.ndim == 3
+            assert pad_mask is not None
+            return self.forward_batched(
+                query, query_pos_embedding, pad_mask=pad_mask, attn_mask=attn_mask
+            )
         assert batch_offsets is not None
         residual = query
         query_with_pos_embed = query + query_pos_embedding

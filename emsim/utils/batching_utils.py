@@ -16,6 +16,7 @@ def deconcat_add_batch_dim(
     assert tensor.ndim == 2
     assert batch_offsets.ndim == 1
     if batch_offsets[-1] != tensor.shape[0]:
+        assert batch_offsets[-1] < tensor.shape[0]
         batch_offsets = torch.cat(
             [
                 batch_offsets,

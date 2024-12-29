@@ -199,8 +199,8 @@ class SelfAttentionBlockWithRoPE(nn.Module):
         x: Tensor,
         positions: Tensor,
         batch_offsets: Tensor,
-        pad_mask: Optional[Tensor] = None,
     ):
+        assert x.ndim == 2  # (stacked sequences x d_model)
         residual = x
         if self.norm_first:
             x = self.norm(x)
@@ -217,10 +217,10 @@ class SelfAttentionBlockWithRoPE(nn.Module):
         bsz, seq_len, n_heads, head_dim = q.shape
         q: Tensor = q.transpose(1, 2)
         k: Tensor = k.transpose(1, 2)
-        v: Tensor = v.transpose(1, 2)
+        v: Tensor = v.view_as(k).transpose(1, 2)
 
         if pad_mask is not None:
-            assert pad_mask.ndim == 2  # batch, seq_len
+            assert pad_mask.shape == (bsz, seq_len)
             #  F.scaled_dot_product_attention wants attn mask of dim
             #  (N, num_heads, L, S)
             attn_mask = pad_mask.view(bsz, 1, seq_len, 1)
@@ -234,16 +234,20 @@ class SelfAttentionBlockWithRoPE(nn.Module):
             v,
             attn_mask=attn_mask,
             dropout_p=self.attn_drop_rate,
-        )
+        ).transpose(1, 2)
+        # (batch x seq_len x n_heads x head_dim)
+
+        x = x.view(bsz, seq_len, self.d_model)
         x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
         assert torch.equal(batch_offsets, batch_offsets_2)
 
         x = self.out_proj(x)
         x = self.out_proj_drop(x)
+
         x = x + residual
+
         if not self.norm_first:
             x = self.norm(x)
-
         return x
 
     def reset_parameters(self):

@@ -75,30 +75,36 @@ class RoPEEncoding2D(nn.Module):
                 "pass in normalized coordinates?"
             )
         bsz = query.shape[0]
-        target_len = query.shape[1]
+        tgt_len = query.shape[1]
         if key_pos is not None:
             self.shape_check(key, key_pos)
             assert key.shape[0] == key_pos.shape[0] == bsz
-        source_len = key.shape[1]
+        src_len = key.shape[1]
 
         # query_rot_vec = torch.einsum("blt,nht->blnh", query_pos, self.freqs)
-        query_rot_vec = torch.mm(query_pos.view(-1, 2), self.freqs.view(-1, 2).T).view(
-            [bsz, target_len, self.n_heads, self.head_dim // 2]
-        )
+        query_rot_vec = torch.mm(
+            query_pos.view(-1, self.pos_dim), self.freqs.view(-1, self.pos_dim).T
+        ).view([bsz, tgt_len, self.n_heads, self.head_dim // self.pos_dim])
         query_rot_vec = torch.polar(torch.ones_like(query_rot_vec), query_rot_vec)
 
-        query = torch.view_as_complex(self.split_head_by_dim(query))
+        query = query.view(
+            bsz, tgt_len, self.n_heads, self.head_dim // self.pos_dim, self.pos_dim
+        )
+        query = torch.view_as_complex(query)
         query_rotated = torch.view_as_real(query * query_rot_vec).flatten(-2)
 
         if key_pos is not None:
             # key_rot_vec = torch.einsum("blt,nht->blnh", key_pos, self.freqs)
-            key_rot_vec = torch.mm(key_pos.view(-1, 2), self.freqs.view(-1, 2).T).view(
-                [bsz, source_len, self.n_heads, self.head_dim // 2]
-            )
+            key_rot_vec = torch.mm(
+                key_pos.view(-1, self.pos_dim), self.freqs.view(-1, self.pos_dim).T
+            ).view([bsz, src_len, self.n_heads, self.head_dim // self.pos_dim])
             key_rot_vec = torch.polar(torch.ones_like(key_rot_vec), key_rot_vec)
         else:
             key_rot_vec = query_rot_vec
-        key = torch.view_as_complex(self.split_head_by_dim(key))
+        key = key.view(
+            bsz, src_len, self.n_heads, self.head_dim // self.pos_dim, self.pos_dim
+        )
+        key = torch.view_as_complex(key)
         key_rotated = torch.view_as_real(key * key_rot_vec).flatten(-2)
 
         #  out dim: batch x seq_len x n_heads x head_dim
@@ -111,12 +117,6 @@ class RoPEEncoding2D(nn.Module):
         assert query_or_key_pos.shape[2] == self.pos_dim
         assert query_or_key.shape[0] == query_or_key_pos.shape[0]
         assert query_or_key_pos.shape[1] == query_or_key_pos.shape[1]
-
-    def split_head_by_dim(self, tensor: Tensor):
-        assert tensor.shape[-1] % self.pos_dim == 0
-        out_shape = tensor.shape[:-1]
-        out_shape.extend([tensor.shape // self.pos_dim, self.pos_dim])
-        return tensor.view(out_shape)
 
     def reset_parameters(self):
         freqs = init_2d_freqs(self.head_dim, self.n_heads, self._base_theta)

@@ -19,17 +19,20 @@ transformer:
   n_deformable_points: 4
   dropout: 0.1
   activation_fn: "gelu"
-  encoder_layers: 6
-  decoder_layers: 6
   level_filter_ratio: [0.25, 0.5, 1.0, 1.0]
   layer_filter_ratio: [1.0, 0.8, 0.6, 0.6, 0.4, 0.2]
   max_tokens: 10000
   query_embeddings: 200
-  encoder_topk_sa: 100
-  encoder_use_ms_deform_attn: true
-  decoder_cross_attn_type: "ms_deform_attn"
-  decoder_detach_updated_positions: true
-  decoder_look_forward_twice: true
+  encoder:
+    layers: 6
+    topk_sa: 100
+    use_ms_deform_attn: true
+    use_rope: false
+  decoder:
+    layers: 6
+    cross_attn_type: "ms_deform_attn"
+    detach_updated_positions: true
+    look_forward_twice: true
 
 denoising:
   use_denoising: false

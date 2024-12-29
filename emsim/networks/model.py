@@ -104,7 +104,7 @@ class EMModel(nn.Module):
                         "output_queries": queries,
                     }
                     for logits, positions, cholesky, seg_logits, queries in zip(
-                    # for logits, positions, cholesky, seg_logits in zip(
+                        # for logits, positions, cholesky, seg_logits in zip(
                         output_logits[:-1],
                         output_positions[:-1],
                         std_dev_cholesky[:-1],
@@ -199,17 +199,17 @@ class EMModel(nn.Module):
             n_deformable_points=cfg.transformer.n_deformable_points,
             dropout=cfg.transformer.dropout,
             activation_fn=_get_layer(cfg.transformer.activation_fn),
-            n_encoder_layers=cfg.transformer.encoder_layers,
-            n_decoder_layers=cfg.transformer.decoder_layers,
+            n_encoder_layers=cfg.transformer.encoder.layers,
+            n_decoder_layers=cfg.transformer.decoder.layers,
             level_filter_ratio=cfg.transformer.level_filter_ratio,
             layer_filter_ratio=cfg.transformer.layer_filter_ratio,
             encoder_max_tokens=cfg.transformer.max_tokens,
-            encoder_topk_sa=cfg.transformer.encoder_topk_sa,
-            encoder_use_ms_deform_attn=cfg.transformer.encoder_use_ms_deform_attn,
+            encoder_topk_sa=cfg.transformer.encoder.topk_sa,
+            encoder_use_ms_deform_attn=cfg.transformer.encoder.use_ms_deform_attn,
             n_query_embeddings=cfg.transformer.query_embeddings,
-            decoder_cross_attn_type=cfg.transformer.decoder_cross_attn_type,
-            decoder_look_forward_twice=cfg.transformer.decoder_look_forward_twice,
-            decoder_detach_updated_positions=cfg.transformer.decoder_detach_updated_positions,
+            decoder_cross_attn_type=cfg.transformer.decoder.cross_attn_type,
+            decoder_look_forward_twice=cfg.transformer.decoder.look_forward_twice,
+            decoder_detach_updated_positions=cfg.transformer.decoder.detach_updated_positions,
             mask_main_queries_from_denoising=cfg.denoising.mask_main_queries_from_denoising,
         )
         criterion = EMCriterion(
@@ -229,7 +229,7 @@ class EMModel(nn.Module):
             use_aux_loss=cfg.criterion.aux_loss.use_aux_loss,
             aux_loss_use_final_matches=cfg.criterion.aux_loss.use_final_matches,
             aux_loss_weight=cfg.criterion.aux_loss.aux_loss_weight,
-            n_aux_losses=cfg.transformer.decoder_layers - 1,
+            n_aux_losses=cfg.transformer.decoder.layers - 1,
             detach_likelihood_mean=cfg.criterion.detach_likelihood_mean,
             use_denoising_loss=cfg.denoising.use_denoising,
             denoising_loss_weight=cfg.denoising.denoising_loss_weight,

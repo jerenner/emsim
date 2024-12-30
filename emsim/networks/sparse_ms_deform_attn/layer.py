@@ -96,7 +96,7 @@ class SparseMSDeformableAttention(nn.Module):
         ).coalesce()
 
         sampling_offsets = self.sampling_offsets(
-            query.to(self.sampling_offsets.weight) # cast to double
+            query.to(self.sampling_offsets.weight)  # cast to double
         ).view(n_total_queries, self.num_levels, self.num_points, self.num_heads, 2)
         attention_weights = self.attention_weights(query).view(
             n_total_queries, self.num_levels * self.num_points, self.num_heads
@@ -123,7 +123,7 @@ class SparseMSDeformableAttention(nn.Module):
             sampling_locations,
             batch_offsets,
             attention_weights,
-            torch.get_default_dtype()
+            torch.get_default_dtype(),
         )
 
         output = self.output_proj(output)

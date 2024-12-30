@@ -8,7 +8,7 @@ import MinkowskiEngine as ME
 
 from emsim.networks.transformer.blocks import (
     FFNBlock,
-    SelfAttentionBlockWithRoPE,
+    MultilevelSelfAttentionBlockWithRoPE,
     SparseDeformableAttentionBlock,
     SelfAttentionBlock,
 )
@@ -41,6 +41,7 @@ class TransformerEncoderLayer(nn.Module):
         topk_sa: int = 1000,
         use_msdeform_attn: bool = True,
         use_rope: bool = False,
+        rope_base_theta: float = 10.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -55,8 +56,14 @@ class TransformerEncoderLayer(nn.Module):
                 d_model, n_heads, dropout, attn_proj_bias, norm_first
             )
         else:
-            self.self_attn = SelfAttentionBlockWithRoPE(
-                d_model, n_heads, dropout, attn_proj_bias, norm_first
+            self.self_attn = MultilevelSelfAttentionBlockWithRoPE(
+                d_model,
+                n_heads,
+                n_deformable_value_levels,
+                dropout,
+                attn_proj_bias,
+                norm_first,
+                rope_theta=rope_base_theta,
             )
         if use_msdeform_attn:
             self.msdeform_attn = SparseDeformableAttentionBlock(
@@ -77,7 +84,7 @@ class TransformerEncoderLayer(nn.Module):
         self,
         queries: Tensor,
         query_pos_encoding: Tensor,
-        query_ij_indices: Tensor,
+        query_bijl_indices: Tensor,
         query_normalized_xy_positions: Tensor,
         batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
@@ -95,7 +102,7 @@ class TransformerEncoderLayer(nn.Module):
             query_pos_encoding, batch_offsets
         )
         ij_indices_batched, pad_mask_4 = deconcat_add_batch_dim(
-            query_ij_indices, batch_offsets
+            query_bijl_indices, batch_offsets
         )
         assert torch.equal(pad_mask, pad_mask_2)
         assert torch.equal(pad_mask, pad_mask_3)
@@ -128,10 +135,10 @@ class TransformerEncoderLayer(nn.Module):
             dtype=torch.int32,
         ) - torch.cat([indices.new_zeros([1]), selected_pad_mask.sum(-1)[:-1]], 0)
         # selected_queries_flat = queries[indices_flat]
-        selected_ij_indices_flat = torch.gather(
-            query_ij_indices,
+        selected_bijl_indices_flat = torch.gather(
+            query_bijl_indices,
             0,
-            indices_flat.unsqueeze(-1).expand(-1, query_ij_indices.shape[-1]),
+            indices_flat.unsqueeze(-1).expand(-1, query_bijl_indices.shape[-1]),
         )
         indices_flat_unsq = indices_flat.unsqueeze(-1).expand(-1, queries.shape[-1])
         selected_queries_flat = torch.gather(queries, 0, indices_flat_unsq)
@@ -152,7 +159,7 @@ class TransformerEncoderLayer(nn.Module):
             )
         else:
             self_attn_out = self.self_attn(
-                selected_queries_flat, selected_ij_indices_flat, batch_offsets
+                selected_queries_flat, selected_bijl_indices_flat, batch_offsets_flat
             )
         # queries_batched = queries_batched.scatter(1, indices_unsq, self_attn_out)
         # queries_batched = self_attn_out

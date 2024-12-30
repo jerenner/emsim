@@ -19,6 +19,7 @@ transformer:
   n_deformable_points: 4
   dropout: 0.1
   activation_fn: "gelu"
+  rope_base_theta: 10.0
   level_filter_ratio: [0.25, 0.5, 1.0, 1.0]
   layer_filter_ratio: [1.0, 0.8, 0.6, 0.6, 0.4, 0.2]
   max_tokens: 10000

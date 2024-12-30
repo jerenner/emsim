@@ -71,18 +71,6 @@ class RoPEEncoding2D(nn.Module):
         key: Tensor,
         key_pos: Optional[Tensor] = None,
     ) -> tuple[Tensor, Tensor]:
-        # if query.ndim == 2:
-        #     assert query_pos.ndim == 2
-        #     assert key.ndim == 2
-        #     if key_pos is not None:
-        #         assert key_pos.ndim == 2
-        #     unbatched = True
-        #     query = query.unsqueeze(0)
-        #     query_pos = query_pos.unsqueeze(0)
-        #     key = key.unsqueeze(0)
-        #     key_pos = key_pos.unsqueeze(0) if key_pos else key_pos
-        # else:
-        #     unbatched = False
         self.shape_check(query, query_pos)
         if query_pos.max() <= 1.0:
             warnings.warn(
@@ -90,51 +78,17 @@ class RoPEEncoding2D(nn.Module):
                 "for position but found normalized coordinates. Did you accidentally"
                 "pass in normalized coordinates?"
             )
-        # bsz = query.shape[0]
-        # tgt_len = query.shape[1]
-        query_leading_dims = query.shape[:-1]
         if key_pos is not None:
             self.shape_check(key, key_pos)
-        # src_len = key.shape[1]
-        key_leading_dims = key.shape[:-1]
-
-        # query_rot_vec = torch.einsum("blt,nht->blnh", query_pos, self.freqs)
         query_rot_vec = self._make_rot_vec(query_pos)
-
-        # query = query.view(
-        #     # bsz, tgt_len, self.n_heads, self.head_dim // self.pos_dim, self.pos_dim
-        #     query_leading_dims
-        #     + (self.n_heads, self.head_dim // self.pos_dim, self.pos_dim)
-        # )
-        # query = torch.view_as_complex(query)
-        # query_rotated = torch.view_as_real(query * query_rot_vec).flatten(-2)
         query_rotated = self._apply_rot_vec(query, query_rot_vec)
 
         if key_pos is not None:
-            # key_rot_vec = torch.einsum("blt,nht->blnh", key_pos, self.freqs)
-            # key_rot_vec = torch.mm(
-            #     key_pos.view(-1, self.pos_dim),
-            #     self.freqs.view(-1, self.pos_dim).T,
-            #     # ).view([bsz, src_len, self.n_heads, self.head_dim // 2])
-            # ).view(key_leading_dims + (self.n_heads, self.head_dim // 2))
-            # key_rot_vec = torch.polar(torch.ones_like(key_rot_vec), key_rot_vec)
             key_rot_vec = self._make_rot_vec(key_pos)
         else:
             key_rot_vec = query_rot_vec
-        # key = key.view(
-        #     # bsz, src_len, self.n_heads, self.head_dim // self.pos_dim, self.pos_dim
-        #     key_leading_dims
-        #     + (self.n_heads, self.head_dim // 2, 2)
-        # )
-        # key = torch.view_as_complex(key)
-        # key_rotated = torch.view_as_real(key * key_rot_vec).flatten(-2)
         key_rotated = self._apply_rot_vec(key, key_rot_vec)
 
-        #  out dim: batch x seq_len x n_heads x head_dim
-        # if unbatched:
-        #     # out dim: seq_len x n_heads x head_dim
-        #     query_rotated = query_rotated.squeeze(0)
-        #     key_rotated = key_rotated.squeeze(0)
         return query_rotated, key_rotated
 
     def _make_rot_vec(self, positions: Tensor) -> Tensor:

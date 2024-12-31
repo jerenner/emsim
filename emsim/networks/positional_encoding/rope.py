@@ -16,7 +16,7 @@ def init_2d_freqs(
     rotate: bool = True,
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
-):
+) -> Tensor:
     freqs_x = []
     freqs_y = []
     mag = 1 / (
@@ -42,9 +42,44 @@ def init_2d_freqs(
     return freqs  # n_head, head_dim/2, 2
 
 
-class RoPEEncoding2D(nn.Module):
+def init_nd_freqs(
+    position_dim: int,
+    head_dim: int,
+    num_heads: int,
+    theta: float = 10.0,
+    rotate: bool = True,
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[torch.device] = None,
+) -> Tensor:
+    freqs = [[] for _ in range(position_dim)]
+    mag = 1 / (
+        theta ** (torch.arange(0, head_dim, 4, dtype=dtype, device=device) / head_dim)
+    )
+    pi = torch.pi
+    for _ in range(num_heads):
+        angles = (
+            torch.rand(1, device=device) * 2 * pi
+            if rotate
+            else torch.zeros(1, device=device)
+        )
+        for i, dim_freqs in enumerate(freqs):
+            f = torch.cat(
+                [
+                    mag * torch.cos(angles + pi * 2 * i / (2 * position_dim)),
+                    mag * torch.cos(angles + pi * (2 * i + 1) / (2 * position_dim)),
+                ],
+                dim=-1,
+            )
+            dim_freqs.append(f)
+    freqs = [torch.stack(dim_freqs, dim=0) for dim_freqs in freqs]
+    freqs = torch.stack(freqs, dim=-1)
+    return freqs  # n_head, head_dim/2, pos_dim
+
+
+class RoPEEncodingND(nn.Module):
     def __init__(
         self,
+        position_dim: int,
         d_model: int,
         n_heads: int,
         rope_base_theta: float = 10.0,
@@ -52,15 +87,17 @@ class RoPEEncoding2D(nn.Module):
     ):
         super().__init__()
         assert d_model % n_heads == 0
+        self.head_dim = d_model // n_heads
+        assert self.head_dim % 2 == 0
+        self.pos_dim = position_dim
         self.d_model = d_model
         self.n_heads = n_heads
         self._base_theta = rope_base_theta
-        self.head_dim = d_model // n_heads
-        self.pos_dim = 2
-        assert self.head_dim % self.pos_dim == 0
 
-        freqs = init_2d_freqs(self.head_dim, n_heads, rope_base_theta, dtype=dtype)
-        assert freqs.shape == (n_heads, self.head_dim // 2, 2)
+        freqs = init_nd_freqs(
+            position_dim, self.head_dim, n_heads, rope_base_theta, dtype=dtype
+        )
+        assert freqs.shape == (n_heads, self.head_dim // 2, position_dim)
         self.freqs = nn.Parameter(freqs)
 
     @torch.amp.autocast("cuda", enabled=False)
@@ -72,7 +109,7 @@ class RoPEEncoding2D(nn.Module):
         key_pos: Optional[Tensor] = None,
     ) -> tuple[Tensor, Tensor]:
         self.shape_check(query, query_pos)
-        if query_pos.max() <= 1.0:
+        if query_pos.numel() > 0 and query_pos.max() <= 1.0:
             warnings.warn(
                 "Expected un-normalized (i.e., not inside [0,1]) coordinates"
                 "for position but found normalized coordinates. Did you accidentally"
@@ -100,7 +137,7 @@ class RoPEEncoding2D(nn.Module):
         ).view(leading_dims + (self.n_heads, self.head_dim // 2))
         return torch.polar(torch.ones_like(rot_vec), rot_vec)
 
-    def _apply_rot_vec(self, query_or_key: Tensor, rot_vec: Tensor):
+    def _apply_rot_vec(self, query_or_key: Tensor, rot_vec: Tensor) -> Tensor:
         leading_dims = query_or_key.shape[:-1]
         query_or_key = query_or_key.view(
             leading_dims + (self.n_heads, self.head_dim // 2, 2)
@@ -116,6 +153,8 @@ class RoPEEncoding2D(nn.Module):
         assert query_or_key.shape[:-1] == query_or_key_pos.shape[:-1]
 
     def reset_parameters(self):
-        freqs = init_2d_freqs(self.head_dim, self.n_heads, self._base_theta)
+        freqs = init_nd_freqs(
+            self.pos_dim, self.head_dim, self.n_heads, self._base_theta
+        )
         with torch.no_grad():
             self.freqs.copy_(freqs)

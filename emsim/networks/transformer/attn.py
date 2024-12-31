@@ -1,4 +1,4 @@
-from emsim.networks.positional_encoding import RoPEEncoding2D
+from emsim.networks.positional_encoding import RoPEEncodingND
 from emsim.utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
 
 
@@ -21,7 +21,7 @@ class SelfAttentionWithRoPE(nn.Module):
         self.dropout = dropout
 
         self.in_proj = nn.Linear(d_model, 3 * d_model, bias=bias)
-        self.pos_encoding = RoPEEncoding2D
+        self.pos_encoding = RoPEEncodingND
         (n_heads, d_model // n_heads)
         self.out_proj = nn.Linear(d_model, d_model, bias=bias)
 

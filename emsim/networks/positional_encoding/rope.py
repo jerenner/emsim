@@ -66,7 +66,7 @@ def init_nd_freqs(
             f = torch.cat(
                 [
                     mag * torch.cos(angles + pi * 2 * i / (2 * position_dim)),
-                    mag * torch.cos(angles + pi * (2 * i + 1) / (2 * position_dim)),
+                    mag * torch.cos(angles + pi * ((2 * i) + 1) / (2 * position_dim)),
                 ],
                 dim=-1,
             )

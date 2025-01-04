@@ -42,55 +42,6 @@ def sparse_split_heads(sparse_tensor: Tensor, n_heads: int) -> Tensor:
     return new_sparse_tensor
 
 
-def sparse_interp(sparse_tensor: Tensor, pixel_coordinates: Tensor):
-    """
-    Interpolates into a 2d sparse tensor. Similar to F.grid_sample except the
-    interpolant coordinates are in un-normalized i,j form
-    """
-    # translate pixel coordinates so we can floor to find the up-left pixel center
-    height, width = sparse_tensor.shape[-3], sparse_tensor.shape[-2]
-    shifted_pixel_coordinates = pixel_coordinates - 0.5
-    shifted_pixel_coordinates = shifted_pixel_coordinates.clamp_min(0.0)
-
-    pixel_indices_00 = shifted_pixel_coordinates.floor().int()
-    pixel_indices_01 = pixel_indices_00 + pixel_indices_00.new_tensor([0, 1])
-    pixel_indices_10 = pixel_indices_00 + pixel_indices_00.new_tensor([1, 0])
-    pixel_indices_11 = pixel_indices_00 + pixel_indices_00.new_tensor([1, 1])
-
-    max_index = torch.tensor([height - 1, width - 1], device=pixel_indices_00.device)
-    pixel_indices_01.clamp_max_(max_index)
-    pixel_indices_10.clamp_max_(max_index)
-    pixel_indices_11.clamp_max_(max_index)
-
-    values_00 = gather_from_sparse_tensor(sparse_tensor, pixel_indices_00)[0]
-    values_01 = gather_from_sparse_tensor(sparse_tensor, pixel_indices_01)[0]
-    values_10 = gather_from_sparse_tensor(sparse_tensor, pixel_indices_10)[0]
-    values_11 = gather_from_sparse_tensor(sparse_tensor, pixel_indices_11)[0]
-
-    # distance to the n+1,n+1 pixel center
-    down_weight, right_weight = shifted_pixel_coordinates.frac().split(1, -1)
-    up_weight, left_weight = 1 - down_weight, 1 - right_weight
-
-    weight_00 = up_weight * left_weight
-    weight_01 = up_weight * right_weight
-    weight_10 = down_weight * left_weight
-    weight_11 = down_weight * right_weight
-
-    if values_00.ndim < weight_00.ndim:
-        assert values_00.ndim == weight_00.ndim - 1
-        weight_00.squeeze_()
-        weight_01.squeeze_()
-        weight_10.squeeze_()
-        weight_11.squeeze_()
-
-    return (
-        weight_00 * values_00
-        + weight_01 * values_01
-        + weight_10 * values_10
-        + weight_11 * values_11
-    )
-
-
 @torch.jit.script
 def multilevel_sparse_bilinear_grid_sample(
     sparse_tensor: Tensor,

@@ -5,7 +5,6 @@ import copy
 from timm.models.layers import DropPath
 
 from typing import Optional
-from emsim.networks.transformer.blocks import FFNBlock
 
 from ...utils.misc_utils import inverse_sigmoid
 

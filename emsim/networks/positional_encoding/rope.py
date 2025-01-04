@@ -76,6 +76,41 @@ def init_nd_freqs(
     return freqs  # n_head, head_dim/2, pos_dim
 
 
+def init_nd_grouped_freqs(
+    position_dim: int,
+    head_dim: int,
+    num_heads: int,
+    num_groups: int,
+    theta: float = 10.0,
+    rotate: bool = True,
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[torch.device] = None,
+) -> Tensor:
+    freqs = [[] for _ in range(position_dim)]
+    mag = 1 / (
+        theta ** (torch.arange(0, head_dim, 4, dtype=dtype, device=device) / head_dim)
+    )
+    pi = torch.pi
+    for _ in range(num_heads):
+        angles = (
+            torch.rand(1, device=device) * 2 * pi
+            if rotate
+            else torch.zeros(1, device=device)
+        )
+        for i, dim_freqs in enumerate(freqs):
+            f = torch.cat(
+                [
+                    mag * torch.cos(angles + pi * 2 * i / (2 * position_dim)),
+                    mag * torch.cos(angles + pi * ((2 * i) + 1) / (2 * position_dim)),
+                ],
+                dim=-1,
+            )
+            dim_freqs.append(f)
+    freqs = [torch.stack(dim_freqs, dim=0) for dim_freqs in freqs]
+    freqs = torch.stack(freqs, dim=-1)
+    return freqs  # n_head, head_dim/2, pos_dim
+
+
 class RoPEEncodingND(nn.Module):
     def __init__(
         self,

@@ -1,28 +1,30 @@
 import copy
-from typing import Union, Optional
-import numpy as np
+from typing import Optional, Union
 
-from torch import Tensor, nn
-import torch
 import MinkowskiEngine as ME
+import numpy as np
+import torch
+from torch import Tensor, nn
 
+from emsim.networks.positional_encoding import (
+    FourierEncoding,
+    ij_indices_to_normalized_xy,
+)
 from emsim.networks.transformer.blocks import (
     FFNBlock,
     MultilevelSelfAttentionBlockWithRoPE,
-    SparseDeformableAttentionBlock,
     SelfAttentionBlock,
-)
-from emsim.networks.positional_encoding import FourierEncoding
-from emsim.networks.positional_encoding import ij_indices_to_normalized_xy
-from emsim.utils.sparse_utils import (
-    minkowski_to_torch_sparse,
-    gather_from_sparse_tensor,
-    scatter_to_sparse_tensor,
-    linearize_sparse_and_index_tensors,
+    SparseDeformableAttentionBlock,
 )
 from emsim.utils.batching_utils import (
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
+)
+from emsim.utils.sparse_utils import (
+    gather_from_sparse_tensor,
+    linearize_sparse_and_index_tensors,
+    minkowski_to_torch_sparse,
+    scatter_to_sparse_tensor,
 )
 
 

@@ -14,9 +14,9 @@ from scipy.stats import poisson
 import torch
 import torch.nn.functional as F
 
-device = 'mps'
+device = 'cuda'
 
-def gaussian_splash_pytorch(A, sigma, size=7, device='cpu'):
+def gaussian_splash_pytorch(A, sigma, size=3, device='cpu'):
     """Prepare the Gaussian splash as a PyTorch convolution kernel."""
     x = y = torch.arange(0, size, device=device) - (size // 2)
     X, Y = torch.meshgrid(x, y)
@@ -175,22 +175,18 @@ def update_counted_data_hdf5(file_path, nframes, batch_start_idx, frames_indices
             
 def compute_conditional_probabilities(lam_grid):
     """
-    Compute the array of conditional probabilities P(n >= 2) / P(n >= 1) for a grid of mean
-    (lambda) values.
+    Compute the array of conditional probabilities P(n >= 2) / P(n >= 1) for a grid of lambda values.
     
-    :param lam_grid: A numpy array of lambda values.
-    :return: A numpy array of conditional probabilities.
+    :param lam_grid: A 576x576 numpy array of lambda values.
+    :return: A 576x576 numpy array of conditional probabilities.
     """
-    # Compute P(n >= 1) and P(n >= 2) for each mean value in the grid
+    # Compute P(n >= 1) and P(n >= 2) for each lambda in the grid
     p_at_least_1 = 1 - poisson.cdf(0, lam_grid)  # P(n >= 1) = 1 - P(n < 1)
     p_at_least_2 = 1 - poisson.cdf(1, lam_grid)  # P(n >= 2) = 1 - P(n <= 1)
-
-    # Safeguard against invalid or NaN values
-    valid = np.isfinite(p_at_least_1) & (p_at_least_1 > 0)
-
+    
     # Conditional probability P(n >= 2) / P(n >= 1)
-    conditional_prob = np.zeros_like(lam_grid)
-    conditional_prob[valid] = p_at_least_2[valid] / p_at_least_1[valid]
+    # Safeguard division by zero by using np.where to only compute valid divisions
+    conditional_prob = np.where(p_at_least_1 > 0, p_at_least_2 / p_at_least_1, 0)
     
     return conditional_prob
 
@@ -225,7 +221,7 @@ def compute_prior(frames_file, nframes, baseline, gauss_A):
     return prior_frame
 
 def count_frames(frames_file, counted_file, frames_per_batch, 
-                 baseline, gauss_A, gauss_sigma, 
+                 th_single_elec, baseline, gauss_A, gauss_sigma, 
                  n_steps_max = 5000, loss_per_frame_stop = 1, min_loss_patience = 10, min_loss_improvement = 0.01, 
                  batch_start = 0, batch_end = -1, nframes_prior=0, record_loss_curves = True):
     """
@@ -254,8 +250,7 @@ def count_frames(frames_file, counted_file, frames_per_batch,
         data = f0['frames']
         nframes = data.shape[0]
         frame_shape = data.shape[1:]
-        scan_shape = f0['frames'].attrs['scan_dimensions']
-        #scan_shape = f0['stem']['images'].shape[1:]
+        scan_shape = f0['stem']['images'].shape[1:]
         print(f"Counting all {nframes} frames for scan of shape {scan_shape}")
 
     # Record all loss curves.
@@ -277,7 +272,7 @@ def count_frames(frames_file, counted_file, frames_per_batch,
 
             # Compute an initial counted frame
             frame_ct = np.rint(frame_bls / gauss_A, out=np.zeros(frame_bls.shape,dtype=np.int16), casting='unsafe')
-            frame_ct[frame_ct < 0] = 0
+            frame_ct[frame_ct < th_single_elec] = 0
 
         # -------------------------------------------------------------------------------
         # Count the frames.

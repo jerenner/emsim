@@ -146,9 +146,10 @@ class RoPEEncodingND(nn.Module):
         self.shape_check(query, query_pos)
         if query_pos.numel() > 0 and query_pos.max() <= 1.0:
             warnings.warn(
-                "Expected un-normalized (i.e., not inside [0,1]) coordinates"
-                "for position but found normalized coordinates. Did you accidentally"
-                "pass in normalized coordinates?"
+                "Expected un-normalized (i.e., not inside [0,1]) coordinates "
+                "for position but found normalized coordinates. Did you accidentally "
+                "pass in normalized coordinates?\n"
+                f"Coord range: [{query_pos.min(), query_pos.max()}]"
             )
         if key_pos is not None:
             self.shape_check(key, key_pos)

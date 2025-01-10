@@ -146,7 +146,7 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         x: Tensor,
         positions: Tensor,
         batch_offsets: Tensor,
-    ):
+    ) -> Tensor:
         assert x.ndim == 2  # (stacked sequences x d_model)
         residual = x
         if self.norm_first:
@@ -156,7 +156,8 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         q, pad_mask = deconcat_add_batch_dim(q, batch_offsets)
         k, _ = deconcat_add_batch_dim(k, batch_offsets)
         v, _ = deconcat_add_batch_dim(v, batch_offsets)
-        positions, _ = deconcat_add_batch_dim(positions, batch_offsets)
+        # pad value of 1.0 instead of 0.0 to suppress a false warning
+        positions, _ = deconcat_add_batch_dim(positions, batch_offsets, positions.new_ones([]))
 
         q, k = self.pos_encoding(q, positions, k)
         # (batch x seq_len x n_heads x head_dim) -> (batch x n_heads x seq_len x head_dim)
@@ -167,22 +168,27 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         v: Tensor = v.view(bsz, seq_len, n_heads, head_dim).transpose(1, 2)
 
         if pad_mask is not None and pad_mask.any():
+            # need to split up the batches since F.scaled_dot_product_attention
+            # doesn't actually handle attn_mask in a memory efficient manner
             assert pad_mask.shape == (bsz, seq_len)
-            #  F.scaled_dot_product_attention wants attn mask broadcastable to
-            #  (N, num_heads, L, S)
-            attn_mask = pad_mask.view(bsz, 1, seq_len, 1)
-            attn_mask = torch.where(attn_mask, -torch.inf, 0.0).contiguous()
-            # attn_mask = attn_mask.expand(-1, -1, -1, seq_len)
-        else:
-            attn_mask = None
 
-        x = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=self.attn_drop_rate if self.training else 0.0,
-        )
+            attn_mask = pad_mask.logical_not()
+            x = torch.zeros_like(q)
+            for i, (q_i, k_i, v_i, mask_i) in enumerate(zip(q, k, v, attn_mask)):
+                x[i, :, mask_i] = F.scaled_dot_product_attention(
+                    q_i[:, mask_i].unsqueeze(0),
+                    k_i[:, mask_i].unsqueeze(0),
+                    v_i[:, mask_i].unsqueeze(0),
+                    dropout_p=self.attn_drop_rate if self.training else 0.0,
+                ).squeeze(0)
+        else:
+            x = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                dropout_p=self.attn_drop_rate if self.training else 0.0,
+            )
+
         # (batch x n_heads x seq_len x head_dim) ->
         # (batch x seq_len x n_heads x head_dim)
         x = x.transpose(1, 2)
@@ -200,43 +206,24 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
             x = self.norm(x)
         return x
 
-    # for testing and debugging purposes
-    @staticmethod
+    # not used
     def scaled_dot_product_attention(
+        self,
         query,
         key,
         value,
         attn_mask=None,
         dropout_p=0.0,
-        is_causal=False,
-        scale=None,
-        enable_gqa=False,
     ) -> torch.Tensor:
-        L, S = query.size(-2), key.size(-2)
-        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-        attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-        if is_causal:
-            assert attn_mask is None
-            temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
-            attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-            attn_bias.to(query.dtype)
+        scale_factor = 1 / math.sqrt(query.size(-1))
 
+        query = query * scale_factor
+        attn_weight = torch.matmul(query, key.transpose(-1, -2))
+        # attn_weight = query @ key.transpose(-2, -1)
         if attn_mask is not None:
-            if attn_mask.dtype == torch.bool:
-                attn_bias.expand_as(attn_mask).clone().masked_fill_(
-                    attn_mask.logical_not(), float("-inf")
-                )
-            else:
-                attn_bias = attn_bias + attn_mask
-
-        if enable_gqa:
-            key = key.repeat_interleave(query.size(-3) // key.size(-3), -3)
-            value = value.repeat_interleave(query.size(-3) // value.size(-3), -3)
-
-        attn_weight = query @ key.transpose(-2, -1) * scale_factor
-        attn_weight += attn_bias
+            attn_weight = torch.masked_fill(attn_weight, attn_mask, -torch.inf)
         attn_weight = torch.softmax(attn_weight, dim=-1)
-        attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+        attn_weight = torch.dropout(attn_weight, dropout_p, train=self.training)
         return attn_weight @ value
 
     def reset_parameters(self):

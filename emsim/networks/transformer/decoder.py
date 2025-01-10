@@ -25,7 +25,7 @@ from .blocks import (
     SelfAttentionBlock,
     SparseDeformableAttentionBlock,
     FFNBlock,
-    SparseTensorCrossAttentionBlock,
+    MultilevelCrossAttentionBlockWithRoPE,
 )
 from ..segmentation_map import PatchedSegmentationMapPredictor
 
@@ -63,7 +63,7 @@ class TransformerDecoderLayer(nn.Module):
                 norm_first,
             )
         elif cross_attn_type == "multi_head_attn":
-            self.cross_attn = SparseTensorCrossAttentionBlock(
+            self.cross_attn = MultilevelCrossAttentionBlockWithRoPE(
                 d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
             )
         self.ffn = FFNBlock(

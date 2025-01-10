@@ -5,11 +5,12 @@ from torch import Tensor, nn
 from emsim.utils.sparse_utils import multilevel_normalized_xy, sparse_tensor_to_batched
 
 
-class SparseTensorCrossAttentionBlock(nn.Module):
+class MultilevelCrossAttentionBlockWithRoPE(nn.Module):
     def __init__(
         self,
         d_model: int,
         n_heads: int,
+        n_key_levels: int,
         dropout: float = 0.0,
         bias: bool = False,
         norm_first: bool = True,
@@ -28,15 +29,17 @@ class SparseTensorCrossAttentionBlock(nn.Module):
     def forward(
         self,
         query: Tensor,
-        query_pos_encoding: Tensor,
-        query_normalized_xy_positions: Tensor,
+        query_bijl_positions: Tensor,
+        query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         spatial_shapes: Tensor,
-        pad_mask: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
     ) -> Tensor:
+        assert query.ndim == 2 # (stacked sequences x d_model)
         residual = query
-        query_with_pos_embed = query + query_pos_encoding
+        if self.norm_first:
+            query = self.norm(query)
+
 
         value, value_indices, value_pad_mask = sparse_tensor_to_batched(
             stacked_feature_maps

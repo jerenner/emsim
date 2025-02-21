@@ -64,7 +64,12 @@ class TransformerDecoderLayer(nn.Module):
             )
         elif cross_attn_type == "multi_head_attn":
             self.cross_attn = MultilevelCrossAttentionBlockWithRoPE(
-                d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
+                d_model,
+                n_heads,
+                n_deformable_value_levels,
+                dropout,
+                attn_proj_bias,
+                norm_first=norm_first,
             )
         self.ffn = FFNBlock(
             d_model, dim_feedforward, dropout, activation_fn, norm_first
@@ -107,13 +112,11 @@ class TransformerDecoderLayer(nn.Module):
             # )
             x = self.cross_attn(
                 query=x,
-                query_pos_encoding=query_pos_encoding.view_as(x),
                 query_normalized_xy_positions=query_normalized_xy_positions,
+                query_batch_offsets=batch_offsets,
                 stacked_feature_maps=stacked_feature_maps,
-                spatial_shapes=spatial_shapes,
+                level_spatial_shapes=spatial_shapes,
             )
-            x, batch_offsets_2 = remove_batch_dim_and_concat(x, pad_mask)
-            assert torch.equal(batch_offsets, batch_offsets_2)
         x = self.ffn(x)
         return x
 

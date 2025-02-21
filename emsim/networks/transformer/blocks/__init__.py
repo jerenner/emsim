@@ -1,4 +1,4 @@
-from .rope import MultilevelRoPE
+from .rope import MultilevelIndependentRoPE
 from .ffn import FFNBlock
 from .cross_attn import MultilevelCrossAttentionBlockWithRoPE
 from .self_attn import SelfAttentionBlock, MultilevelSelfAttentionBlockWithRoPE

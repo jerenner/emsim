@@ -3,10 +3,14 @@ from typing import Optional
 import torch
 from torch import Tensor, nn
 
-from emsim.networks.positional_encoding.rope import RoPEEncodingND
+from emsim.networks.positional_encoding.rope import (
+    RoPEEncodingND,
+    RoPEEncodingNDGroupedFreqs,
+    prep_multilevel_positions,
+)
 
 
-class MultilevelRoPE(nn.Module):
+class MultilevelIndependentRoPE(nn.Module):
     def __init__(
         self,
         n_levels: int,

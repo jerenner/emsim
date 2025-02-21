@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Union
 import warnings
 
 import torch
@@ -46,62 +46,34 @@ def init_nd_freqs(
     position_dim: int,
     head_dim: int,
     num_heads: int,
-    theta: float = 10.0,
+    thetas: Union[Tensor, list[float], float] = 10.0,
     rotate: bool = True,
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
-) -> Tensor:
-    freqs = [[] for _ in range(position_dim)]
+):
+    thetas: Tensor = torch.as_tensor(thetas, dtype=dtype, device=device)
+    if thetas.numel() == 1:
+        thetas = thetas.expand(position_dim)
     mag = 1 / (
-        theta ** (torch.arange(0, head_dim, 4, dtype=dtype, device=device) / head_dim)
+        thetas.view(-1, 1)
+        ** (
+            torch.arange(0, head_dim, 4, dtype=dtype, device=device).view(1, -1)
+            / head_dim
+        )
     )
-    pi = torch.pi
+    freqs = [[] for _ in range(position_dim)]
     for _ in range(num_heads):
         angles = (
-            torch.rand(1, device=device) * 2 * pi
+            torch.rand(1, device=device) * 2 * torch.pi
             if rotate
             else torch.zeros(1, device=device)
         )
         for i, dim_freqs in enumerate(freqs):
             f = torch.cat(
                 [
-                    mag * torch.cos(angles + pi * 2 * i / (2 * position_dim)),
-                    mag * torch.cos(angles + pi * ((2 * i) + 1) / (2 * position_dim)),
-                ],
-                dim=-1,
-            )
-            dim_freqs.append(f)
-    freqs = [torch.stack(dim_freqs, dim=0) for dim_freqs in freqs]
-    freqs = torch.stack(freqs, dim=-1)
-    return freqs  # n_head, head_dim/2, pos_dim
-
-
-def init_nd_grouped_freqs(
-    position_dim: int,
-    head_dim: int,
-    num_heads: int,
-    num_groups: int,
-    theta: float = 10.0,
-    rotate: bool = True,
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[torch.device] = None,
-) -> Tensor:
-    freqs = [[] for _ in range(position_dim)]
-    mag = 1 / (
-        theta ** (torch.arange(0, head_dim, 4, dtype=dtype, device=device) / head_dim)
-    )
-    pi = torch.pi
-    for _ in range(num_heads):
-        angles = (
-            torch.rand(1, device=device) * 2 * pi
-            if rotate
-            else torch.zeros(1, device=device)
-        )
-        for i, dim_freqs in enumerate(freqs):
-            f = torch.cat(
-                [
-                    mag * torch.cos(angles + pi * 2 * i / (2 * position_dim)),
-                    mag * torch.cos(angles + pi * ((2 * i) + 1) / (2 * position_dim)),
+                    mag[i] * torch.cos(angles + torch.pi * 2 * i / (2 * position_dim)),
+                    mag[i]
+                    * torch.cos(angles + torch.pi * ((2 * i) + 1) / (2 * position_dim)),
                 ],
                 dim=-1,
             )
@@ -127,12 +99,19 @@ class RoPEEncodingND(nn.Module):
         self.pos_dim = position_dim
         self.d_model = d_model
         self.n_heads = n_heads
-        self._base_theta = rope_base_theta
+        self._base_theta = torch.as_tensor(rope_base_theta)
+        self.dtype = dtype
+        self._init_freq_param()
 
+    def _init_freq_param(self):
         freqs = init_nd_freqs(
-            position_dim, self.head_dim, n_heads, rope_base_theta, dtype=dtype
+            self.pos_dim,
+            self.head_dim,
+            self.n_heads,
+            self._base_theta,
+            dtype=self.dtype,
         )
-        assert freqs.shape == (n_heads, self.head_dim // 2, position_dim)
+        assert freqs.shape == (self.n_heads, self.head_dim // 2, self.pos_dim)
         self.freqs = nn.Parameter(freqs)
 
     @torch.amp.autocast("cuda", enabled=False)
@@ -171,7 +150,10 @@ class RoPEEncodingND(nn.Module):
             self.freqs.view(-1, self.pos_dim).T,
             # ).view([bsz, tgt_len, self.n_heads, self.head_dim // self.pos_dim])
         ).view(leading_dims + (self.n_heads, self.head_dim // 2))
-        return torch.polar(torch.ones_like(rot_vec), rot_vec)
+        out = torch.polar(torch.ones_like(rot_vec), rot_vec)
+        assert out.shape == leading_dims + (self.n_heads, self.head_dim // 2)
+        assert out.is_complex()
+        return out
 
     def _apply_rot_vec(self, query_or_key: Tensor, rot_vec: Tensor) -> Tensor:
         leading_dims = query_or_key.shape[:-1]
@@ -194,3 +176,99 @@ class RoPEEncodingND(nn.Module):
         )
         with torch.no_grad():
             self.freqs.copy_(freqs)
+
+
+class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
+    def __init__(
+        self,
+        position_dim: int,
+        d_model: int,
+        n_heads: int,
+        pos_dim_to_rope_dim: Union[Tensor, list[int]],
+        rope_base_theta: float = 10.0,
+        dtype=torch.float,
+    ):
+        self.pos_dim_to_rope_group = torch.as_tensor(pos_dim_to_rope_dim)
+        assert self.pos_dim_to_rope_group.ndim == 1
+        assert len(self.pos_dim_to_rope_group) == position_dim
+        self.n_freq_groups = len(self.pos_dim_to_rope_group.unique())
+        super().__init__(position_dim, d_model, n_heads, rope_base_theta, dtype)
+        assert self.head_dim % self.n_freq_groups == 0
+
+    def _init_freq_param(self):
+        freqs = init_nd_freqs(
+            self.pos_dim,
+            self.head_dim // self.n_freq_groups,
+            self.n_heads,
+            self._base_theta,
+            dtype=self.dtype,
+        )
+        assert freqs.shape == (
+            self.n_heads,
+            self.head_dim // 2 // self.n_freq_groups,
+            self.pos_dim,
+        )
+        self.freqs = nn.Parameter(freqs)
+
+    def _make_rot_vec(self, positions: Tensor):
+        leading_dims = positions.shape[:-1]
+        assert positions.shape[-1] == self.pos_dim
+        unique_indices, index_counts = torch.unique(
+            self.pos_dim_to_rope_group, return_counts=True
+        )
+        split_positions = [
+            positions[..., self.pos_dim_to_rope_group == i] for i in unique_indices
+        ]
+        split_freqs = [
+            self.freqs[..., self.pos_dim_to_rope_group == i] for i in unique_indices
+        ]
+        rot_subvecs = [
+            torch.mm(pos.view(-1, count).to(freq), freq.view(-1, count).T).view(
+                leading_dims + (self.n_heads, self.head_dim // 2 // self.n_freq_groups)
+            )
+            for pos, freq, count in zip(split_positions, split_freqs, index_counts)
+        ]
+        rot_subvecs = [
+            torch.polar(torch.ones_like(subvec), subvec) for subvec in rot_subvecs
+        ]
+        out = torch.cat(rot_subvecs, -1)
+        assert out.shape == leading_dims + (self.n_heads, self.head_dim // 2)
+        assert out.is_complex()
+        return out
+
+    def reset_parameters(self):
+        freqs = init_nd_freqs(
+            self.pos_dim, self.head_dim // self.n_freq_groups, self.n_heads, self._base_theta
+        )
+        with torch.no_grad():
+            self.freqs.copy_(freqs)
+
+
+def rescale_multilevel_positions_to_finest(
+    multilevel_positions: list[Tensor], spatial_shapes: Tensor
+) -> Tensor:
+    assert spatial_shapes.ndim == 2
+    max_spatial_shape = spatial_shapes.max(dim=0)[0]
+    rescaled_positions = [
+        pos / shape * max_spatial_shape
+        for pos, shape in zip(multilevel_positions, spatial_shapes)
+    ]
+    return rescaled_positions
+
+
+def prep_multilevel_positions(indices: Tensor, spatial_shapes: Tensor):
+    assert indices.ndim == 2
+    ij = indices[:, -3:-1] + 0.5
+    assert ij.shape[-1] == 2
+    level_indices = torch.unique(indices[..., -1])
+    level_to_position_indices = [indices[..., -1] == index for index in level_indices]
+    level_split_positions = [
+        ij[level_indices] for level_indices in level_to_position_indices
+    ]
+    rescaled_split_positions = rescale_multilevel_positions_to_finest(
+        level_split_positions, spatial_shapes
+    )
+    rescaled_positions = torch.cat(rescaled_split_positions, 0)
+    positions = indices.clone().to(rescaled_positions)
+    positions[:, 1:3] = rescaled_positions
+    return positions

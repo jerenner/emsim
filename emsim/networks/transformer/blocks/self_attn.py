@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from emsim.networks.transformer.blocks import MultilevelRoPE
+from emsim.networks.transformer.blocks import MultilevelIndependentRoPE
 from emsim.utils.batching_utils import (
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
@@ -134,7 +134,7 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=bias)
-        self.pos_encoding = MultilevelRoPE(
+        self.pos_encoding = MultilevelIndependentRoPE(
             n_levels, d_model, n_heads, rope_base_theta=rope_theta, dtype=rope_dtype
         )
         self.attn_drop_rate = dropout
@@ -163,9 +163,9 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         # (batch x seq_len x n_heads x head_dim) -> (batch x n_heads x seq_len x head_dim)
         assert q.ndim == 4 and k.ndim == 4 and v.ndim == 3
         bsz, seq_len, n_heads, head_dim = q.shape
-        q: Tensor = q.transpose(1, 2)
-        k: Tensor = k.transpose(1, 2)
-        v: Tensor = v.view(bsz, seq_len, n_heads, head_dim).transpose(1, 2)
+        q: Tensor = q.transpose(1, 2).contiguous()
+        k: Tensor = k.transpose(1, 2).contiguous()
+        v: Tensor = v.view(bsz, seq_len, n_heads, head_dim).transpose(1, 2).contiguous()
 
         if pad_mask is not None and pad_mask.any():
             # need to split up the batches since F.scaled_dot_product_attention

@@ -63,6 +63,7 @@ class MultilevelCrossAttentionBlockWithRoPE(nn.Module):
         query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
+        attn_mask: Optional[Tensor] = None,
     ) -> Tensor:
         assert query.ndim == 2  # (stacked sequences x d_model)
         assert query_normalized_xy_positions.shape == (query.shape[0], 2)
@@ -101,7 +102,7 @@ class MultilevelCrossAttentionBlockWithRoPE(nn.Module):
         k, key_pad_mask = deconcat_add_batch_dim(k, value_batch_offsets)
         v, value_pad_mask = deconcat_add_batch_dim(v, value_batch_offsets)
         assert torch.equal(key_pad_mask, value_pad_mask)
-        key_seq_len = k.shape[1]
+        src_seq_len = k.shape[1]
         # pad value of 1.0 instead of 0.0 to suppress a false warning
         query_prepped_positions, _ = deconcat_add_batch_dim(
             query_prepped_positions,
@@ -118,32 +119,53 @@ class MultilevelCrossAttentionBlockWithRoPE(nn.Module):
 
         # (batch x seq_len x n_heads x head_dim) -> (batch x n_heads x seq_len x head_dim)
         assert q.ndim == 4 and k.ndim == 4 and v.ndim == 3
-        bsz, seq_len, n_heads, head_dim = q.shape
-        q: Tensor = q.transpose(1, 2).contiguous()
-        k: Tensor = k.transpose(1, 2).contiguous()
+        bsz, tgt_seq_len, n_heads, head_dim = q.shape
+        q: Tensor = q.transpose(1, 2).to(v).contiguous()
+        k: Tensor = k.transpose(1, 2).to(v).contiguous()
         v: Tensor = (
-            v.view(bsz, key_seq_len, n_heads, head_dim).transpose(1, 2).contiguous()
+            v.view(bsz, src_seq_len, n_heads, head_dim).transpose(1, 2).contiguous()
         )
 
         if key_pad_mask.any():
-            attn_mask = (
-                key_pad_mask.logical_not().unsqueeze(1).expand(-1, seq_len, key_seq_len)
+            assert key_pad_mask.shape == (bsz, src_seq_len)
+            key_pad_mask = (
+                key_pad_mask.logical_not()
+                .view(bsz, 1, 1, src_seq_len)
+                .expand(-1, -1, tgt_seq_len, -1)
             )
         else:
-            attn_mask = None
+            key_pad_mask = None
+        if attn_mask is not None:
+            assert attn_mask.dtype == torch.bool
+            if attn_mask.ndim == 3:
+                assert attn_mask.shape[0] in (bsz, bsz * n_heads)
+                if attn_mask.shape[0] == bsz:
+                    attn_mask = attn_mask.view(bsz, 1, tgt_seq_len, src_seq_len)
+                else:
+                    attn_mask = attn_mask.view(bsz, n_heads, tgt_seq_len, src_seq_len)
+            else:
+                assert attn_mask.ndim == 4
+
+            # switch from true being should not be attended to, to true being
+            # should be attended to
+            attn_mask = attn_mask.logical_not()
+            if key_pad_mask is not None:
+                attn_mask = torch.logical_and(attn_mask, key_pad_mask)
+        else:
+            attn_mask = key_pad_mask
         x = F.scaled_dot_product_attention(
-            q.to(v),
-            k.to(v),
+            q,
+            k,
             v,
             attn_mask=attn_mask,
             dropout_p=self.attn_drop_rate if self.training else 0.0,
         )
 
-        # (batch x n_heads x seq_len x head_dim) ->
-        # (batch x seq_len x n_heads x head_dim)
+        # (batch x n_heads x tgt_seq_len x head_dim) ->
+        # (batch x tgt_seq_len x n_heads x head_dim)
         x = x.transpose(1, 2)
 
-        x = x.reshape(bsz, seq_len, self.d_model)
+        x = x.reshape(bsz, tgt_seq_len, self.d_model)
         x, batch_offsets_2 = remove_batch_dim_and_concat(x, query_pad_mask)
         assert torch.equal(query_batch_offsets, batch_offsets_2)
 

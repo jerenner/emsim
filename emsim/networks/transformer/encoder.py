@@ -10,6 +10,7 @@ from emsim.networks.positional_encoding import (
     FourierEncoding,
     ij_indices_to_normalized_xy,
 )
+from emsim.networks.positional_encoding.rope import prep_multilevel_positions
 from emsim.networks.transformer.blocks import (
     FFNBlock,
     MultilevelSelfAttentionBlockWithRoPE,
@@ -160,8 +161,14 @@ class TransformerEncoderLayer(nn.Module):
                 batch_offsets=batch_offsets_flat,
             )
         else:
+            positions = prep_multilevel_positions(
+                selected_bijl_indices_flat, spatial_shapes
+            )
             self_attn_out = self.self_attn(
-                selected_queries_flat, selected_bijl_indices_flat, batch_offsets_flat
+                selected_queries_flat,
+                positions[:, 1:3],
+                positions[:, -1],
+                batch_offsets_flat,
             )
         # queries_batched = queries_batched.scatter(1, indices_unsq, self_attn_out)
         # queries_batched = self_attn_out

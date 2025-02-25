@@ -6,6 +6,10 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from emsim.networks.transformer.blocks import MultilevelIndependentRoPE
+from emsim.networks.positional_encoding.rope import (
+    prep_multilevel_positions,
+    RoPEEncodingNDGroupedFreqs,
+)
 from emsim.utils.batching_utils import (
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
@@ -134,8 +138,14 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=bias)
-        self.pos_encoding = MultilevelIndependentRoPE(
-            n_levels, d_model, n_heads, rope_base_theta=rope_theta, dtype=rope_dtype
+        position_dim = 2
+        self.pos_encoding = RoPEEncodingNDGroupedFreqs(
+            position_dim + 1,
+            d_model,
+            n_heads,
+            [0] * position_dim + [1],
+            [rope_theta] * position_dim + [rope_theta / 100],
+            dtype=rope_dtype,
         )
         self.attn_drop_rate = dropout
         self.out_proj = nn.Linear(d_model, d_model, bias=bias)
@@ -145,49 +155,38 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         self,
         x: Tensor,
         positions: Tensor,
+        level_indices: Tensor,
         batch_offsets: Tensor,
+        attn_mask: Optional[Tensor] = None,
     ) -> Tensor:
         assert x.ndim == 2  # (stacked sequences x d_model)
+        assert positions.ndim == 2
+        assert x.shape[0] == positions.shape[0] == level_indices.shape[0]
         residual = x
         if self.norm_first:
             x = self.norm(x)
         q, k, v = self.qkv(x).chunk(3, dim=-1)
 
+        level_indices = level_indices.view(-1, 1).to(positions)
+        full_positions = torch.cat([positions, level_indices], -1)
+
         q, pad_mask = deconcat_add_batch_dim(q, batch_offsets)
         k, _ = deconcat_add_batch_dim(k, batch_offsets)
         v, _ = deconcat_add_batch_dim(v, batch_offsets)
         # pad value of 1.0 instead of 0.0 to suppress a false warning
-        positions, _ = deconcat_add_batch_dim(positions, batch_offsets, positions.new_ones([]))
+        full_positions, _ = deconcat_add_batch_dim(
+            full_positions, batch_offsets, full_positions.new_ones([])
+        )
 
-        q, k = self.pos_encoding(q, positions, k)
+        q, k = self.pos_encoding(q, full_positions, k)
         # (batch x seq_len x n_heads x head_dim) -> (batch x n_heads x seq_len x head_dim)
         assert q.ndim == 4 and k.ndim == 4 and v.ndim == 3
         bsz, seq_len, n_heads, head_dim = q.shape
-        q: Tensor = q.transpose(1, 2).contiguous()
-        k: Tensor = k.transpose(1, 2).contiguous()
+        q: Tensor = q.transpose(1, 2).to(v).contiguous()
+        k: Tensor = k.transpose(1, 2).to(v).contiguous()
         v: Tensor = v.view(bsz, seq_len, n_heads, head_dim).transpose(1, 2).contiguous()
 
-        if pad_mask is not None and pad_mask.any():
-            # need to split up the batches since F.scaled_dot_product_attention
-            # doesn't actually handle attn_mask in a memory efficient manner
-            assert pad_mask.shape == (bsz, seq_len)
-
-            attn_mask = pad_mask.logical_not()
-            x = torch.zeros_like(q)
-            for i, (q_i, k_i, v_i, mask_i) in enumerate(zip(q, k, v, attn_mask)):
-                x[i, :, mask_i] = F.scaled_dot_product_attention(
-                    q_i[:, mask_i].unsqueeze(0),
-                    k_i[:, mask_i].unsqueeze(0),
-                    v_i[:, mask_i].unsqueeze(0),
-                    dropout_p=self.attn_drop_rate if self.training else 0.0,
-                ).squeeze(0)
-        else:
-            x = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                dropout_p=self.attn_drop_rate if self.training else 0.0,
-            )
+        x = self._calc_attn(q, k, v, pad_mask, attn_mask)
 
         # (batch x n_heads x seq_len x head_dim) ->
         # (batch x seq_len x n_heads x head_dim)
@@ -204,6 +203,53 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
 
         if not self.norm_first:
             x = self.norm(x)
+        return x
+
+    def _calc_attn(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        pad_mask: Tensor,
+        attn_mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        bsz, n_heads, seq_len, _ = q.shape
+        if pad_mask.any():
+            assert pad_mask.shape == (bsz, seq_len)
+            pad_mask_not = pad_mask.logical_not()
+            if attn_mask is None:
+                # need to split up the batches to avoid needing attn_mask
+                # since F.scaled_dot_product_attention
+                # doesn't actually handle attn_mask in a memory efficient manner
+                x = torch.zeros_like(q)
+                for i, (q_i, k_i, v_i, mask_i) in enumerate(zip(q, k, v, pad_mask_not)):
+                    x[i, :, mask_i] = F.scaled_dot_product_attention(
+                        q_i[:, mask_i].unsqueeze(0),
+                        k_i[:, mask_i].unsqueeze(0),
+                        v_i[:, mask_i].unsqueeze(0),
+                        dropout_p=self.attn_drop_rate if self.training else 0.0,
+                    ).squeeze(0)
+                return x
+            else:
+                # need to combine the pad mask with the attn mask
+                pad_mask_not = pad_mask_not.view(bsz, 1, 1, seq_len)
+                assert attn_mask.dtype == torch.bool
+                assert attn_mask.ndim in (3, 4)
+                if attn_mask.ndim == 3:
+                    assert attn_mask.shape[0] in (bsz, bsz * n_heads)
+                    if attn_mask.shape[0] == bsz:
+                        attn_mask = attn_mask.view(bsz, 1, seq_len, seq_len)
+                    else:
+                        attn_mask = attn_mask.view(bsz, n_heads, seq_len, seq_len)
+                attn_mask = attn_mask.logical_not()
+                attn_mask = torch.logical_and(attn_mask, pad_mask_not)
+        x = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.attn_drop_rate if self.training else 0.0,
+        )
         return x
 
     # not used

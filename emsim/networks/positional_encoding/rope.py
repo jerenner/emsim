@@ -80,7 +80,7 @@ def init_nd_freqs(
             dim_freqs.append(f)
     freqs = [torch.stack(dim_freqs, dim=0) for dim_freqs in freqs]
     freqs = torch.stack(freqs, dim=-1)
-    return freqs  # n_head, head_dim/2, pos_dim
+    return freqs  # n_head, head_dim/(2 * n_groups), pos_dim
 
 
 class RoPEEncodingND(nn.Module):
@@ -238,7 +238,10 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
 
     def reset_parameters(self):
         freqs = init_nd_freqs(
-            self.pos_dim, self.head_dim // self.n_freq_groups, self.n_heads, self._base_theta
+            self.pos_dim,
+            self.head_dim // self.n_freq_groups,
+            self.n_heads,
+            self._base_theta,
         )
         with torch.no_grad():
             self.freqs.copy_(freqs)

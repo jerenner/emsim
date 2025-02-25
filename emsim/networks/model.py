@@ -212,6 +212,7 @@ class EMModel(nn.Module):
             decoder_cross_attn_type=cfg.transformer.decoder.cross_attn_type,
             decoder_look_forward_twice=cfg.transformer.decoder.look_forward_twice,
             decoder_detach_updated_positions=cfg.transformer.decoder.detach_updated_positions,
+            decoder_use_rope=cfg.transformer.decoder.use_rope,
             mask_main_queries_from_denoising=cfg.denoising.mask_main_queries_from_denoising,
         )
         criterion = EMCriterion(

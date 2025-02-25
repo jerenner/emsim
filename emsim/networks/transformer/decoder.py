@@ -26,6 +26,7 @@ from .blocks import (
     SparseDeformableAttentionBlock,
     FFNBlock,
     MultilevelCrossAttentionBlockWithRoPE,
+    MultilevelSelfAttentionBlockWithRoPE,
 )
 from ..segmentation_map import PatchedSegmentationMapPredictor
 
@@ -43,16 +44,30 @@ class TransformerDecoderLayer(nn.Module):
         activation_fn: str = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
+        self_attn_use_rope: bool = True,
+        rope_base_theta: float = 10.0,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.dim_feedforward = dim_feedforward
+        self.self_attn_rope = self_attn_use_rope
         self.cross_attn_type = cross_attn_type
 
-        self.self_attn = SelfAttentionBlock(
-            d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
-        )
+        if self_attn_use_rope:
+            self.self_attn = MultilevelSelfAttentionBlockWithRoPE(
+                d_model,
+                n_heads,
+                n_deformable_value_levels,
+                dropout,
+                attn_proj_bias,
+                norm_first,
+                rope_theta=rope_base_theta,
+            )
+        else:
+            self.self_attn = SelfAttentionBlock(
+                d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
+            )
         if cross_attn_type == "ms_deform_attn":
             self.cross_attn = SparseDeformableAttentionBlock(
                 d_model,
@@ -80,19 +95,33 @@ class TransformerDecoderLayer(nn.Module):
         self,
         queries: Tensor,
         query_pos_encoding: Tensor,
-        query_ij_indices: Tensor,
         query_normalized_xy_positions: Tensor,
         batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         spatial_shapes: Tensor,
         attn_mask: Optional[Tensor] = None,
     ):
-        x = self.self_attn(
-            queries,
-            query_pos_encoding,
-            attn_mask=attn_mask,
-            batch_offsets=batch_offsets,
-        )
+        if self.self_attn_rope:
+            max_spatial_shape, max_level_index = spatial_shapes.max(dim=0)
+            max_level_index = torch.unique(max_level_index)
+            assert len(max_level_index) == 1
+            query_positions_ij = (
+                query_normalized_xy_positions.flip(-1) * max_spatial_shape
+            )
+            x = self.self_attn(
+                queries,
+                query_positions_ij,
+                max_level_index.expand(query_positions_ij.shape[0]),
+                batch_offsets,
+                attn_mask=attn_mask,
+            )
+        else:
+            x = self.self_attn(
+                queries,
+                query_pos_encoding,
+                attn_mask=attn_mask,
+                batch_offsets=batch_offsets,
+            )
 
         if self.cross_attn_type == "ms_deform_attn":
             x = self.cross_attn(
@@ -147,9 +176,12 @@ class EMTransformerDecoder(nn.Module):
         self.d_model = decoder_layer.d_model
         self.look_forward_twice = look_forward_twice
         self.detach_updated_positions = detach_updated_positions
-        self.query_pos_encoding = FourierEncoding(
-            2, decoder_layer.d_model, dtype=torch.double
-        )
+        if hasattr(self.layers[0], "self_attn_rope") and self.layers[0].self_attn_rope:
+            self.query_pos_encoding = nn.Identity()
+        else:
+            self.query_pos_encoding = FourierEncoding(
+                2, decoder_layer.d_model, dtype=torch.double
+            )
 
         self.layers_share_heads = layers_share_heads
         if self.layers_share_heads:
@@ -235,7 +267,6 @@ class EMTransformerDecoder(nn.Module):
             queries = layer(
                 queries,
                 query_pos_encoding,
-                None,
                 query_reference_points.detach(),
                 query_batch_offsets,
                 stacked_feature_maps,

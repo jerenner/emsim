@@ -28,12 +28,13 @@ transformer:
     layers: 6
     topk_sa: 100
     use_ms_deform_attn: true
-    use_rope: false
+    use_rope: true
   decoder:
     layers: 6
     cross_attn_type: "ms_deform_attn"
     detach_updated_positions: true
     look_forward_twice: true
+    use_rope: true
 
 denoising:
   use_denoising: false

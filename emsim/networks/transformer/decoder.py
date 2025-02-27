@@ -53,6 +53,7 @@ class TransformerDecoderLayer(nn.Module):
         self.dim_feedforward = dim_feedforward
         self.self_attn_rope = self_attn_use_rope
         self.cross_attn_type = cross_attn_type
+        self.use_rope = self_attn_use_rope
 
         if self_attn_use_rope:
             self.self_attn = MultilevelSelfAttentionBlockWithRoPE(
@@ -169,14 +170,15 @@ class EMTransformerDecoder(nn.Module):
         detach_updated_positions: bool = True,
     ):
         super().__init__()
-        self.layers = nn.ModuleList(
+        self.layers: list[TransformerDecoderLayer] = nn.ModuleList(
             [copy.deepcopy(decoder_layer) for _ in range(num_layers)]
         )
         self.num_layers = num_layers
         self.d_model = decoder_layer.d_model
         self.look_forward_twice = look_forward_twice
         self.detach_updated_positions = detach_updated_positions
-        if hasattr(self.layers[0], "self_attn_rope") and self.layers[0].self_attn_rope:
+        self.use_rope = self.layers[0].use_rope
+        if self.use_rope:
             self.query_pos_encoding = nn.Identity()
         else:
             self.query_pos_encoding = FourierEncoding(
@@ -262,8 +264,11 @@ class EMTransformerDecoder(nn.Module):
         layer_output_std = []
         layer_output_segmentation = []
         for i, layer in enumerate(self.layers):
-            query_pos_encoding = self.query_pos_encoding(query_reference_points)
-            query_pos_encoding = query_pos_encoding.to(queries)
+            if not self.use_rope:
+                query_pos_encoding = self.query_pos_encoding(query_reference_points)
+                query_pos_encoding = query_pos_encoding.to(queries)
+            else:
+                query_pos_encoding = None
             queries = layer(
                 queries,
                 query_pos_encoding,

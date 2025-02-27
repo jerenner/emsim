@@ -101,14 +101,10 @@ class TransformerEncoderLayer(nn.Module):
         )
         token_scores_batched = token_scores_batched.squeeze(-1)
         queries_batched, pad_mask_2 = deconcat_add_batch_dim(queries, batch_offsets)
-        pos_encoding_batched, pad_mask_3 = deconcat_add_batch_dim(
-            query_pos_encoding, batch_offsets
-        )
         ij_indices_batched, pad_mask_4 = deconcat_add_batch_dim(
             query_bijl_indices, batch_offsets
         )
         assert torch.equal(pad_mask, pad_mask_2)
-        assert torch.equal(pad_mask, pad_mask_3)
         assert torch.equal(pad_mask, pad_mask_4)
 
         k = min(self.topk_sa, token_scores_batched.shape[1])
@@ -121,7 +117,6 @@ class TransformerEncoderLayer(nn.Module):
         )
         indices_unsq = indices.unsqueeze(-1).expand(-1, -1, queries_batched.shape[-1])
         selected_queries = torch.gather(queries_batched, 1, indices_unsq)
-        selected_pos_encoding = torch.gather(pos_encoding_batched, 1, indices_unsq)
         # selected_queries = queries_batched
         # selected_pos_encoding = pos_encoding_batched
         # selected_pad_mask = pad_mask
@@ -145,16 +140,21 @@ class TransformerEncoderLayer(nn.Module):
         )
         indices_flat_unsq = indices_flat.unsqueeze(-1).expand(-1, queries.shape[-1])
         selected_queries_flat = torch.gather(queries, 0, indices_flat_unsq)
-        selected_pos_encoding_flat = torch.gather(
-            query_pos_encoding, 0, indices_flat_unsq
-        )
         assert torch.equal(selected_queries_flat, selected_queries[~selected_pad_mask])
-        assert torch.equal(
-            selected_pos_encoding_flat, selected_pos_encoding[~selected_pad_mask]
-        )
         ###
 
         if not self.use_rope:
+            pos_encoding_batched, pad_mask_3 = deconcat_add_batch_dim(
+                query_pos_encoding, batch_offsets
+            )
+            selected_pos_encoding = torch.gather(pos_encoding_batched, 1, indices_unsq)
+            assert torch.equal(pad_mask, pad_mask_3)
+            selected_pos_encoding_flat = torch.gather(
+                query_pos_encoding, 0, indices_flat_unsq
+            )
+            assert torch.equal(
+                selected_pos_encoding_flat, selected_pos_encoding[~selected_pad_mask]
+            )
             self_attn_out = self.self_attn(
                 selected_queries_flat,
                 selected_pos_encoding_flat,
@@ -207,11 +207,12 @@ class EMTransformerEncoder(nn.Module):
         score_predictor: nn.Module = None,
     ):
         super().__init__()
-        self.layers = nn.ModuleList(
+        self.layers: list[TransformerEncoderLayer] = nn.ModuleList(
             [copy.deepcopy(encoder_layer) for _ in range(num_layers)]
         )
         self.num_layers = num_layers
         self.d_model = encoder_layer.d_model
+        self.use_rope = self.layers[0].use_rope
 
         self.reset_parameters()
 
@@ -232,8 +233,10 @@ class EMTransformerEncoder(nn.Module):
         stacked_feature_maps = self.stack_sparse_tensors(
             feature_maps, spatial_shapes[-1]
         )
-        stacked_pos_encodings = self.stack_sparse_tensors(
-            position_encoding, spatial_shapes[-1]
+        stacked_pos_encodings = (
+            self.stack_sparse_tensors(position_encoding, spatial_shapes[-1])
+            if not self.use_rope
+            else None
         )
         for layer_index, layer in enumerate(self.layers):
             indices_for_layer = [
@@ -270,9 +273,13 @@ class EMTransformerEncoder(nn.Module):
             #         )
             #     )
             # )
-            pos_encoding_for_layer = gather_from_sparse_tensor(
-                stacked_pos_encodings, stacked_ij_indices_for_layer, True
-            )[0]
+            pos_encoding_for_layer = (
+                gather_from_sparse_tensor(
+                    stacked_pos_encodings, stacked_ij_indices_for_layer, True
+                )[0]
+                if not self.use_rope
+                else None
+            )
             # pos_encoding_for_layer = torch.nested.as_nested_tensor(
             #     list(
             #         torch.tensor_split(

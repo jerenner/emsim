@@ -119,7 +119,7 @@ class RoPEEncodingND(nn.Module):
         self,
         query: Tensor,
         query_pos: Tensor,
-        key: Tensor,
+        key: Optional[Tensor] = None,
         key_pos: Optional[Tensor] = None,
     ) -> tuple[Tensor, Tensor]:
         self.shape_check(query, query_pos)
@@ -134,6 +134,9 @@ class RoPEEncodingND(nn.Module):
             self.shape_check(key, key_pos)
         query_rot_vec = self._make_rot_vec(query_pos)
         query_rotated = self._apply_rot_vec(query, query_rot_vec)
+
+        if key is None:
+            return query_rotated
 
         if key_pos is not None:
             key_rot_vec = self._make_rot_vec(key_pos)

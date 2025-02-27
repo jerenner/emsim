@@ -16,8 +16,13 @@ from ...utils.sparse_utils import (
     batch_offsets_from_sparse_tensor_indices,
     sparse_index_select,
     sparse_resize,
+    minkowski_to_torch_sparse,
 )
 from ..positional_encoding import FourierEncoding
+from ..positional_encoding.rope import (
+    RoPEEncodingNDGroupedFreqs,
+    prep_multilevel_positions,
+)
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
 from ..segmentation_map import SegmentationMapPredictor, PatchedSegmentationMapPredictor
@@ -66,7 +71,17 @@ class EMTransformer(nn.Module):
             self.salience_mask_predictor = MESparseMaskPredictor(d_model, d_model)
         else:
             raise ValueError(f"Unrecognized sparse_library: `{sparse_library=}`")
-        self.pos_embedding = FourierEncoding(3, d_model, dtype=torch.double)
+        self.use_rope = encoder_use_rope
+        if encoder_use_rope:
+            self.pos_embedding = RoPEEncodingNDGroupedFreqs(
+                dimension + 1,
+                d_model,
+                n_heads,
+                [0] * dimension + [1],
+                [encoder_use_rope] * dimension + [rope_base_theta / 100],
+            )
+        else:
+            self.pos_embedding = FourierEncoding(3, d_model, dtype=torch.double)
         self.n_levels = n_feature_levels
         self.classification_head = nn.Linear(d_model, 1)
 
@@ -180,21 +195,30 @@ class EMTransformer(nn.Module):
     ):
         assert len(encoded_features) == self.n_levels
 
-        pos_embed = self.get_position_encoding(encoded_features, image_size)
-        pos_embed = [p.to(encoded_features[0].features.dtype) for p in pos_embed]
-        pos_embed = [
-            ME.SparseTensor(
-                pos,
-                coordinate_map_key=feat.coordinate_map_key,
-                coordinate_manager=feat.coordinate_manager,
+        if self.use_rope:
+            pos_encoded_features = self.rope_encode_backbone_out(
+                encoded_features, image_size
             )
-            for pos, feat in zip(pos_embed, encoded_features)
-        ]
+            pos_embed = None
+        else:
 
-        feat_plus_pos_embed = [
-            feat + pos for feat, pos in zip(encoded_features, pos_embed)
-        ]
-        score_dict = self.level_wise_salience_filtering(feat_plus_pos_embed, image_size)
+            pos_embed = self.get_position_encoding(encoded_features, image_size)
+            pos_embed = [p.to(encoded_features[0].features.dtype) for p in pos_embed]
+            pos_embed = [
+                ME.SparseTensor(
+                    pos,
+                    coordinate_map_key=feat.coordinate_map_key,
+                    coordinate_manager=feat.coordinate_manager,
+                )
+                for pos, feat in zip(pos_embed, encoded_features)
+            ]
+
+            pos_encoded_features = [
+                feat + pos for feat, pos in zip(encoded_features, pos_embed)
+            ]
+        score_dict = self.level_wise_salience_filtering(
+            pos_encoded_features, image_size
+        )
 
         encoder_out = self.encoder(
             encoded_features,
@@ -388,6 +412,41 @@ class EMTransformer(nn.Module):
         embedding = self.pos_embedding(stacked_pos)
         embedding = torch.tensor_split(embedding, batch_offsets, 0)
         return embedding
+
+    def rope_encode_backbone_out(
+        self, backbone_features: list[ME.SparseTensor], image_size: Tensor
+    ):
+        coords: list[Tensor] = [feat.C.clone() for feat in backbone_features]
+        spatial_shapes = []
+        for feat, coord in zip(backbone_features, coords):
+            stride = coord.new_tensor(feat.tensor_stride)
+            coord[:, 1:] = coord[:, 1:] // stride
+            spatial_shapes.append(image_size // stride)
+
+        stacked_feats = torch.cat([feat.F for feat in backbone_features])
+        stacked_coords = torch.cat(
+            [
+                torch.cat([coord, coord.new_full([coord.shape[0], 1], i)], 1)
+                for i, coord in enumerate(coords)
+            ]
+        )
+        spatial_shapes = torch.stack(spatial_shapes)
+        prepped_coords = prep_multilevel_positions(stacked_coords, spatial_shapes)
+        pos_encoded_feats = self.pos_embedding(stacked_feats, prepped_coords[:, 1:])
+
+        batch_offsets = torch.cumsum(
+            torch.tensor([feat.F.shape[0] for feat in backbone_features]), 0
+        )[:-1]
+        pos_encoded_feats = torch.tensor_split(pos_encoded_feats, batch_offsets)
+        pos_encoded_feats = [
+            ME.SparseTensor(
+                pos_encoded.view_as(feat.F),
+                coordinate_map_key=feat.coordinate_map_key,
+                coordinate_manager=feat.coordinate_manager,
+            )
+            for pos_encoded, feat in zip(pos_encoded_feats, backbone_features)
+        ]
+        return pos_encoded_feats
 
     def level_wise_salience_filtering(
         self, features: list[ME.SparseTensor], full_spatial_shape: Tensor

@@ -101,3 +101,4 @@ ddp:
   nodes: 2
   devices: 2
   find_unused_parameters: false
+  detect_anomaly: false

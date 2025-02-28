@@ -166,6 +166,8 @@ def train(
     save_dir,
     start_iter: int = 0,
 ):
+    if cfg.ddp.detect_anomaly:
+        torch.autograd.set_detect_anomaly(True)
     ## main training loop
     iter_timer = RunningMean(cfg.print_interval).to(fabric.device)
     model.train()
@@ -190,8 +192,8 @@ def train(
         total_loss = loss_dict["loss"]
         fabric.backward(total_loss)
         fabric.clip_gradients(model, optimizer, cfg.max_grad_norm)
-        # if cfg.ddp.find_unused_parameters:
-        #     __debug_find_unused_parameters(model)
+        if cfg.ddp.find_unused_parameters:
+            __debug_find_unused_parameters(model)
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()

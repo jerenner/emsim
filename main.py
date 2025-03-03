@@ -73,6 +73,8 @@ def main(cfg: DictConfig):
     if fabric.is_global_zero:
         _logger.info("Setting up...")
         _logger.info(print(yaml.dump(OmegaConf.to_container(cfg, resolve=True))))
+        with open(os.path.join(output_dir, "config.yaml"), "w") as f:
+            OmegaConf.save(cfg, f, True)
     fabric.seed_everything(cfg.seed + fabric.global_rank)
     fabric.launch()
     model = EMModel.from_config(cfg)
@@ -190,6 +192,8 @@ def train(
 
         loss_dict, model_output = model(batch)
         total_loss = loss_dict["loss"]
+        if not torch.isfinite(total_loss):
+            raise ValueError(f"Got invalid loss: {total_loss}")
         fabric.backward(total_loss)
         fabric.clip_gradients(model, optimizer, cfg.max_grad_norm)
         if cfg.ddp.find_unused_parameters:

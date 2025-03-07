@@ -68,7 +68,7 @@ class EMModel(nn.Module):
             score_dict,
         ) = self.transformer(
             features,
-            batch["image_size_pixels_rc"][0],
+            batch["image_size_pixels_rc"],
             denoising_queries,
             noised_positions,
             denoising_batch_offsets,

@@ -189,7 +189,7 @@ class EMTransformer(nn.Module):
     def forward(
         self,
         encoded_features: list[ME.SparseTensor],
-        image_size: Optional[Union[Tensor, list[int]]],
+        image_size: Tensor,
         denoising_queries: Optional[Tensor] = None,
         denoising_reference_points: Optional[Tensor] = None,
         denoising_batch_offsets: Optional[Tensor] = None,
@@ -386,8 +386,10 @@ class EMTransformer(nn.Module):
         self,
         # encoded_features: Union[list[spconv.SparseConvTensor], list[ME.SparseTensor]],
         encoded_features: list[ME.SparseTensor],
-        full_spatial_shape: Optional[Tensor],
+        full_spatial_shape: Tensor,
     ):
+        if full_spatial_shape.ndim == 2:
+            full_spatial_shape = full_spatial_shape[0]
         if isinstance(encoded_features[0], ME.SparseTensor):
             ij_indices = [encoded.C[:, 1:] for encoded in encoded_features]
             normalized_xy = [
@@ -441,7 +443,7 @@ class EMTransformer(nn.Module):
                 for i, coord in enumerate(coords)
             ]
         )
-        spatial_shapes = torch.stack(spatial_shapes)
+        spatial_shapes = torch.stack(spatial_shapes, -2)  # dim: batch, level, 2
         prepped_coords = prep_multilevel_positions(stacked_coords, spatial_shapes)
         pos_encoded_feats = self.pos_embedding(stacked_feats, prepped_coords[:, 1:])
 
@@ -463,6 +465,11 @@ class EMTransformer(nn.Module):
         self, features: list[ME.SparseTensor], full_spatial_shape: Tensor
     ):
         batch_size = len(features[0].decomposition_permutations)
+        if full_spatial_shape.ndim == 2:
+            assert full_spatial_shape.shape[0] == batch_size
+            full_spatial_shape = torch.unique(full_spatial_shape, dim=0)
+            assert full_spatial_shape.shape[0] == 1
+            full_spatial_shape = full_spatial_shape[0]
 
         token_nums = torch.tensor(
             [

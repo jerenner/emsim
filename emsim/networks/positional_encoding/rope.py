@@ -250,31 +250,23 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
             self.freqs.copy_(freqs)
 
 
-def rescale_multilevel_positions_to_finest(
-    multilevel_positions: list[Tensor], spatial_shapes: Tensor
-) -> Tensor:
-    assert spatial_shapes.ndim == 2
-    max_spatial_shape = spatial_shapes.max(dim=0)[0]
-    rescaled_positions = [
-        pos / shape * max_spatial_shape
-        for pos, shape in zip(multilevel_positions, spatial_shapes)
-    ]
-    return rescaled_positions
-
-
 def prep_multilevel_positions(indices: Tensor, spatial_shapes: Tensor):
     assert indices.ndim == 2
-    ij = indices[:, -3:-1] + 0.5
-    assert ij.shape[-1] == 2
-    level_indices = torch.unique(indices[..., -1])
-    level_to_position_indices = [indices[..., -1] == index for index in level_indices]
-    level_split_positions = [
-        ij[level_indices] for level_indices in level_to_position_indices
-    ]
-    rescaled_split_positions = rescale_multilevel_positions_to_finest(
-        level_split_positions, spatial_shapes
-    )
-    rescaled_positions = torch.cat(rescaled_split_positions, 0)
+    ij = indices[:, 1:-1] + 0.5
+    batch_level = torch.stack([indices[:, 0], indices[:, -1]], -1)
+    assert ij.shape[-1] == spatial_shapes.shape[-1]
+    assert spatial_shapes.ndim in (2, 3)  # batch, level, 2 or level, 2
+
+    if spatial_shapes.ndim == 2:
+        spatial_shapes = spatial_shapes.unsqueeze(0).expand(
+            torch.unique(batch_level[:, 0]).shape[0], -1, -1
+        )
+
+    max_spatial_shape = spatial_shapes.max(-2)[0][batch_level[:, 0]]
+    spatial_shapes = spatial_shapes[batch_level.unbind(-1)]
+
+    rescaled_positions = ij * spatial_shapes / max_spatial_shape
+
     positions = indices.clone().to(rescaled_positions)
     positions[:, 1:3] = rescaled_positions
     return positions

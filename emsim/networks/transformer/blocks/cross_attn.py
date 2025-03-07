@@ -68,9 +68,9 @@ class MultilevelCrossAttentionBlockWithRoPE(nn.Module):
         assert query.ndim == 2  # (stacked sequences x d_model)
         assert query_normalized_xy_positions.shape == (query.shape[0], 2)
         value = stacked_feature_maps.values()
-        value_ijl_positions = stacked_feature_maps.indices().T[..., 1:]
+        value_bijl_positions = stacked_feature_maps.indices().T
         assert value.ndim == 2  # (stacked sequences x d_model)
-        assert value_ijl_positions.shape[-1] == 3  # (i, j, level)
+        assert value_bijl_positions.shape[-1] == 4  # (batch, i, j, level)
         value_batch_offsets = batch_offsets_from_sparse_tensor_indices(
             stacked_feature_maps.indices()
         )
@@ -95,8 +95,9 @@ class MultilevelCrossAttentionBlockWithRoPE(nn.Module):
             -1,
         )
         key_prepped_positions = prep_multilevel_positions(
-            value_ijl_positions, level_spatial_shapes
+            value_bijl_positions, level_spatial_shapes
         )
+        key_prepped_positions = key_prepped_positions[:, 1:]
 
         q, query_pad_mask = deconcat_add_batch_dim(q, query_batch_offsets)
         k, key_pad_mask = deconcat_add_batch_dim(k, value_batch_offsets)

@@ -63,6 +63,7 @@ class TransformerEncoderLayer(nn.Module):
                 d_model,
                 n_heads,
                 n_deformable_value_levels,
+                2,
                 dropout,
                 attn_proj_bias,
                 norm_first,

@@ -125,6 +125,7 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         d_model: int,
         n_heads: int,
         n_levels: int,
+        position_dim: int = 2,
         dropout: float = 0.0,
         bias: bool = False,
         norm_first: bool = True,
@@ -138,7 +139,6 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=bias)
-        position_dim = 2
         self.pos_encoding = RoPEEncodingNDGroupedFreqs(
             position_dim + 1,
             d_model,

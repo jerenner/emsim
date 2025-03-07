@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor, nn
+from torchvision.ops.boxes import generalized_box_iou
 
 from emsim.utils.sparse_utils import (
     sparse_flatten_hw,
@@ -22,6 +23,8 @@ class HungarianMatcher(nn.Module):
         cost_coef_dist: float = 1.0,
         cost_coef_nll: float = 1.0,
         cost_coef_likelihood: float = 1.0,
+        cost_coef_box_l1: float = 1.0,
+        cost_coef_box_giou: float = 1.0,
     ):
         super().__init__()
         self.cost_coef_class = cost_coef_class
@@ -30,6 +33,8 @@ class HungarianMatcher(nn.Module):
         self.cost_coef_dist = cost_coef_dist
         self.cost_coef_nll = cost_coef_nll
         self.cost_coef_likelihood = cost_coef_likelihood
+        self.cost_coef_box_l1 = cost_coef_box_l1
+        self.cost_coef_box_giou = cost_coef_box_giou
 
     @torch.no_grad()
     def forward(
@@ -51,6 +56,10 @@ class HungarianMatcher(nn.Module):
         incidence_points = target_dict["normalized_incidence_points_xy"].to(
             predicted_dict["pred_positions"].device
         )
+        if "pred_boxes" in predicted_dict:
+            bounding_boxes_abs_xy = target_dict["bounding_boxes_pixels_xyxy"].to(
+                predicted_dict["pred_boxes"].device
+            ) / image_sizes_xy.repeat_interleave(n_electrons, 0)
 
         class_cost = get_class_cost(
             predicted_dict["pred_logits"], predicted_dict["query_batch_offsets"]
@@ -83,6 +92,19 @@ class HungarianMatcher(nn.Module):
             target_dict["electron_batch_offsets"],
             image_sizes_xy,
         )
+        if "pred_boxes" in predicted_dict:
+            box_l1_cost = get_box_l1_cost(
+                predicted_dict["pred_boxes"],
+                predicted_dict["query_batch_offsets"],
+                bounding_boxes_abs_xy,
+                target_dict["electron_batch_offsets"],
+            )
+            box_giou_cost = get_box_giou_cost(
+                predicted_dict["pred_boxes"],
+                predicted_dict["query_batch_offsets"],
+                bounding_boxes_abs_xy,
+                target_dict["electron_batch_offsets"],
+            )
 
         total_costs = [
             self.cost_coef_class * _class
@@ -100,6 +122,15 @@ class HungarianMatcher(nn.Module):
                 likelihood_cost,
             )
         ]
+        if "pred_boxes" in predicted_dict:
+            total_costs = [
+                cost
+                + self.cost_coef_box_l1 * box_l1
+                + self.cost_coef_box_giou * box_giou
+                for cost, box_l1, box_giou in zip(
+                    total_costs, box_l1_cost, box_giou_cost
+                )
+            ]
 
         if any([c.shape[0] < c.shape[1] for c in total_costs]):
             _logger.warning(
@@ -302,7 +333,7 @@ def get_likelihood_distance_cost(
     image_size_per_image = image_sizes_xy.unbind(0)
 
     return [
-        batch_likelihood_distance_loss(pred, std, true, size).cpu()
+        batch_likelihood_distance_loss(pred, std, true, size)
         for pred, std, true, size in zip(
             predicted_pos_per_image,
             predicted_std_dev_per_image,
@@ -336,6 +367,39 @@ def get_huber_distance_cost(
         for predicted, true in zip(predicted_batches, true_batches)
     ]
 
+
+@torch.jit.script
+def get_box_l1_cost(
+    predicted_boxes_xyxy: Tensor,
+    predicted_batch_offsets: Tensor,
+    true_boxes_xyxy: Tensor,
+    true_batch_offsets: Tensor,
+) -> list[Tensor]:
+    predicted_batches = torch.tensor_split(
+        predicted_boxes_xyxy, predicted_batch_offsets[1:].cpu(), 0
+    )
+    true_batches = torch.tensor_split(true_boxes_xyxy, true_batch_offsets[1:].cpu(), 0)
+
+    return [
+        torch.cdist(predicted, true, p=1.0)
+        for predicted, true in zip(predicted_batches, true_batches)
+    ]
+
+
+@torch.jit.script
+def get_box_giou_cost(
+    predicted_boxes_xyxy: Tensor,
+    predicted_batch_offsets: Tensor,
+    true_boxes_xyxy: Tensor,
+    true_batch_offsets: Tensor,
+) -> list[Tensor]:
+    predicted_batches = torch.tensor_split(
+        predicted_boxes_xyxy, predicted_batch_offsets[1:].cpu(), 0
+    )
+    true_batches = torch.tensor_split(true_boxes_xyxy, true_batch_offsets[1:].cpu(), 0)
+
+    return [
+        -generalized_box_iou(predicted, true)
         for predicted, true in zip(predicted_batches, true_batches)
     ]
 

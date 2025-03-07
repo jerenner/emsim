@@ -4,7 +4,7 @@ from torch import Tensor, nn
 import copy
 from timm.models.layers import DropPath
 
-from typing import Optional
+from typing import Optional, Union
 
 from ...utils.misc_utils import inverse_sigmoid
 
@@ -40,6 +40,7 @@ class TransformerDecoderLayer(nn.Module):
         cross_attn_type: str = "ms_deform_attn",
         n_deformable_value_levels: int = 4,
         n_deformable_points: int = 4,
+        predict_box: bool = False,
         dropout: float = 0.1,
         activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
@@ -54,12 +55,14 @@ class TransformerDecoderLayer(nn.Module):
         self.self_attn_rope = self_attn_use_rope
         self.cross_attn_type = cross_attn_type
         self.use_rope = self_attn_use_rope
+        self.predict_box = predict_box
 
         if self_attn_use_rope:
             self.self_attn = MultilevelSelfAttentionBlockWithRoPE(
                 d_model,
                 n_heads,
                 n_deformable_value_levels,
+                6 if predict_box else 2,
                 dropout,
                 attn_proj_bias,
                 norm_first,
@@ -106,9 +109,23 @@ class TransformerDecoderLayer(nn.Module):
             max_spatial_shape, max_level_index = spatial_shapes.max(dim=0)
             max_level_index = torch.unique(max_level_index)
             assert len(max_level_index) == 1
-            query_positions_ij = (
-                query_normalized_xy_positions.flip(-1) * max_spatial_shape
-            )
+            if self.predict_box:
+                raise NotImplementedError("Box prediction not finished yet")
+                spatial_scaler = max_spatial_shape.repeat(3)
+                query_positions_ij = (
+                    torch.cat(
+                        [
+                            query_normalized_xy_positions[..., :2].flip(-1),
+                            query_normalized_xy_positions[..., 2:],
+                        ],
+                        -1,
+                    )
+                    * spatial_scaler
+                )
+            else:
+                query_positions_ij = (
+                    query_normalized_xy_positions.flip(-1) * max_spatial_shape
+                )
             x = self.self_attn(
                 queries,
                 query_positions_ij,
@@ -161,6 +178,7 @@ class EMTransformerDecoder(nn.Module):
         self,
         decoder_layer: nn.Module,
         num_layers: int = 6,
+        predict_box: bool = False,
         layers_share_heads: bool = True,
         class_head: Optional[nn.Module] = None,
         position_offset_head: Optional[nn.Module] = None,
@@ -175,12 +193,14 @@ class EMTransformerDecoder(nn.Module):
         )
         self.num_layers = num_layers
         self.d_model = decoder_layer.d_model
+        self.predict_box = predict_box
         self.look_forward_twice = look_forward_twice
         self.detach_updated_positions = detach_updated_positions
         self.use_rope = self.layers[0].use_rope
         if self.use_rope:
             self.query_pos_encoding = nn.Identity()
         else:
+            assert not predict_box, "Box prediction only implemented for RoPE"
             self.query_pos_encoding = FourierEncoding(
                 2, decoder_layer.d_model, dtype=torch.double
             )
@@ -287,7 +307,7 @@ class EMTransformerDecoder(nn.Module):
             segmentation_head = self._get_segmentation_head(i)
 
             query_logits = class_head(queries_normed)
-            query_delta_pos = delta_pos_head(queries_normed.double())
+            query_delta_pos = delta_pos_head(queries_normed.to(delta_pos_head.dtype))
             query_std = std_head(queries_normed)
 
             new_reference_points = torch.sigmoid(

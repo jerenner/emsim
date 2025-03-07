@@ -10,6 +10,7 @@ from emsim.networks.positional_encoding import (
     normalized_xy_of_stacked_feature_maps,
 )
 from emsim.networks.transformer.std_dev_head import StdDevHead
+from emsim.networks.transformer.position_head import PositionOffsetHead
 from ...utils.batching_utils import split_batch_concatted_tensor
 from ...utils.misc_utils import inverse_sigmoid
 from ...utils.sparse_utils import (
@@ -45,6 +46,7 @@ class EMTransformer(nn.Module):
         attn_proj_bias: bool = False,
         n_encoder_layers: int = 6,
         n_decoder_layers: int = 6,
+        predict_box: bool = False,
         level_filter_ratio: tuple = (0.25, 0.5, 1.0, 1.0),
         layer_filter_ratio: tuple = (1.0, 0.8, 0.6, 0.6, 0.4, 0.2),
         rope_base_theta: float = 10.0,
@@ -107,13 +109,10 @@ class EMTransformer(nn.Module):
             score_predictor=self.classification_head,
         )
         self.encoder_output_norm = nn.LayerNorm(d_model)
-        self.query_pos_offset_head = nn.Sequential(
-            nn.Linear(d_model, d_model, dtype=torch.double),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model, dtype=torch.double),
-            nn.ReLU(),
-            nn.Linear(d_model, 2, dtype=torch.double),
+        self.query_pos_offset_head = PositionOffsetHead(
+            d_model, d_model, 2, predict_box
         )
+        self.predict_box = predict_box
         self.segmentation_head = PatchedSegmentationMapPredictor(d_model)
         self.std_head = StdDevHead(d_model)
 
@@ -152,6 +151,7 @@ class EMTransformer(nn.Module):
                 cross_attn_type=decoder_cross_attn_type,
                 n_deformable_value_levels=n_feature_levels,
                 n_deformable_points=n_deformable_points,
+                predict_box=predict_box,
                 dropout=dropout,
                 activation_fn=activation_fn,
                 norm_first=norm_first,
@@ -160,6 +160,7 @@ class EMTransformer(nn.Module):
                 rope_base_theta=rope_base_theta,
             ),
             num_layers=n_decoder_layers,
+            predict_box=predict_box,
             class_head=self.classification_head,
             position_offset_head=self.query_pos_offset_head,
             std_head=self.std_head,
@@ -291,17 +292,27 @@ class EMTransformer(nn.Module):
             ]
         ).diff()
         nms_topk_position_offsets = self.query_pos_offset_head(
-            nms_encoder_out_normalized.double()
+            nms_encoder_out_normalized.to(self.query_pos_offset_head.dtype)
         )
         # nms_topk_masks = self.segmentation_head(
         #     encoder_out, nms_encoder_out_normalized, nms_topk_query_batch_offsets
         # )
 
-        nms_proposal_xy = normalized_xy_of_stacked_feature_maps(
+        nms_proposal_normalized_xy = normalized_xy_of_stacked_feature_maps(
             nms_encoder_out, score_dict["spatial_shapes"]
         )
+        nms_proposal_xy = inverse_sigmoid(nms_proposal_normalized_xy)
+        if self.predict_box:
+            # add 1-pixel-sized proposal boxes
+            nms_proposal_xy = torch.cat(
+                [
+                    nms_proposal_xy,
+                    nms_proposal_xy.new_ones(nms_proposal_xy.shape[:-1] + (4,)),
+                ],
+                -1,
+            )
         nms_encoder_out_positions = torch.sigmoid(
-            inverse_sigmoid(nms_proposal_xy) + nms_topk_position_offsets
+            nms_proposal_xy + nms_topk_position_offsets
         )
         #####
         reference_points = nms_encoder_out_positions.detach()  # \in [0, 1]

@@ -106,7 +106,7 @@ class HungarianMatcher(nn.Module):
                 f"Got fewer queries than electrons: {[c.shape for c in total_costs]}"
             )
 
-        indices = [linear_sum_assignment(cost) for cost in total_costs]
+        indices = [linear_sum_assignment(cost.cpu()) for cost in total_costs]
 
         return [
             torch.stack([torch.as_tensor(i), torch.as_tensor(j)]) for i, j in indices
@@ -119,7 +119,6 @@ def get_class_cost(is_electron_logit: Tensor, batch_offsets: Tensor) -> list[Ten
         is_electron_logit, torch.ones_like(is_electron_logit), reduction="none"
     )
     batch_losses = torch.tensor_split(loss, batch_offsets[1:].cpu(), 0)
-    batch_losses = [loss.cpu() for loss in batch_losses]
     return batch_losses
 
 
@@ -184,7 +183,6 @@ def get_bce_cost(
         loss = (pos_loss + neg_loss) / nnz
         out.append(loss[:q, :e])
 
-    out = [o.cpu() for o in out]
     return out
 
 
@@ -219,7 +217,6 @@ def get_dice_cost(
         loss = 1 - ((num + 1) / (den + 1))
         out.append(loss[:q, :e])
 
-    out = [o.cpu() for o in out]
     return out
 
 
@@ -259,7 +256,7 @@ def get_nll_distance_cost(
     image_size_per_image = image_sizes_xy.unbind(0)
 
     return [
-        batch_nll_distance_loss(pred, std, true, size).cpu()
+        batch_nll_distance_loss(pred, std, true, size)
         for pred, std, true, size in zip(
             predicted_pos_per_image,
             predicted_std_dev_per_image,
@@ -335,7 +332,10 @@ def get_huber_distance_cost(
     true_batches = torch.tensor_split(true_positions, true_batch_offsets[1:].cpu(), 0)
 
     return [
-        batch_huber_loss(predicted, true).cpu()
+        batch_huber_loss(predicted, true)
+        for predicted, true in zip(predicted_batches, true_batches)
+    ]
+
         for predicted, true in zip(predicted_batches, true_batches)
     ]
 

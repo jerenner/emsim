@@ -38,7 +38,7 @@ class TransformerEncoderLayer(nn.Module):
         n_deformable_value_levels: int = 4,
         n_deformable_points: int = 4,
         dropout: float = 0.1,
-        activation_fn="gelu",
+        activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
         topk_sa: int = 1000,
@@ -288,8 +288,6 @@ class EMTransformerEncoder(nn.Module):
             #         )
             #     )
             # )
-            if layer_index == 4:
-                pass
             token_scores_for_layer = [
                 scores[indices]
                 for scores, indices in zip(token_salience_scores, indices_for_layer)

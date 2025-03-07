@@ -1,4 +1,8 @@
+from typing import Union
+
 from torch import Tensor, nn
+
+from emsim.utils.misc_utils import _get_layer
 
 
 class FFNBlock(nn.Module):
@@ -7,11 +11,13 @@ class FFNBlock(nn.Module):
         d_model: int,
         hidden_dim: int,
         dropout: float = 0.0,
-        activation_fn: nn.Module = nn.GELU,
+        activation_fn: Union[str, nn.Module] = nn.GELU,
         norm_first: bool = True,
     ):
         super().__init__()
         self.norm_first = norm_first
+        if isinstance(activation_fn, str):
+            activation_fn = _get_layer(activation_fn)
 
         self.mlp = nn.Sequential(
             nn.Linear(d_model, hidden_dim),

@@ -41,7 +41,7 @@ class TransformerDecoderLayer(nn.Module):
         n_deformable_value_levels: int = 4,
         n_deformable_points: int = 4,
         dropout: float = 0.1,
-        activation_fn: str = "gelu",
+        activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
         self_attn_use_rope: bool = True,

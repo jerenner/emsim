@@ -40,7 +40,7 @@ class EMTransformer(nn.Module):
         n_deformable_points: int,
         backbone_indice_keys: Optional[list[str]] = None,
         dropout: float = 0.1,
-        activation_fn="gelu",
+        activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
         n_encoder_layers: int = 6,

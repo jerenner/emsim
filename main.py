@@ -193,7 +193,7 @@ def train(
         loss_dict, model_output = model(batch)
         total_loss = loss_dict["loss"]
         if not torch.isfinite(total_loss):
-            raise ValueError(f"Got invalid loss: {total_loss}")
+            raise ValueError(f"Got invalid loss: {total_loss} on step {i}")
         fabric.backward(total_loss)
         fabric.clip_gradients(model, optimizer, cfg.max_grad_norm)
         if cfg.ddp.find_unused_parameters:

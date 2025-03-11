@@ -17,3 +17,7 @@ class ValueEncoder(nn.Module):
     def forward(self, inputs: list[ME.SparseTensor]):
         assert len(inputs) == len(self.layers)
         return [layer(x) for layer, x in zip(self.layers, inputs)]
+
+    def reset_parameters(self):
+        for layer in self.layers:
+            layer.reset_parameters()

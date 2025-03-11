@@ -39,6 +39,8 @@ class EMModel(nn.Module):
 
         self.aux_loss = getattr(self.criterion, "aux_loss", False)
 
+        self.reset_parameters()
+
     def forward(self, batch: dict):
         image = batch["image_sparsified"]
         features = self.backbone(image)
@@ -176,6 +178,11 @@ class EMModel(nn.Module):
             ]
 
         return denoising_output
+
+    def reset_parameters(self):
+        self.backbone.reset_parameters()
+        self.channel_uniformizer.reset_parameters()
+        self.transformer.reset_parameters()
 
     @classmethod
     def from_config(cls, cfg: DictConfig):

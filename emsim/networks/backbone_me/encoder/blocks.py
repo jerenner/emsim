@@ -86,6 +86,20 @@ class MinkowskiSparseBottleneckV2(nn.Module):
         out = x + shortcut
         return out
 
+    def reset_parameters(self):
+        if hasattr(self.downsample_shortcut, "reset_parameters"):
+            self.downsample_shortcut.reset_parameters()
+        for layer in self.preact:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+        self.conv1.reset_parameters()
+        for layer in self.norm_act_conv_2:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+        for layer in self.norm_act_conv_3:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+
 
 class MinkowskiSparseResnetV2Stage(nn.Module):
     def __init__(
@@ -138,6 +152,10 @@ class MinkowskiSparseResnetV2Stage(nn.Module):
         x = self.blocks(x)
         return x
 
+    def reset_parameters(self):
+        for block in self.blocks:
+            block.reset_parameters()
+
 
 @torch.compiler.disable
 class MinkowskiStem(nn.Module):
@@ -160,3 +178,6 @@ class MinkowskiStem(nn.Module):
 
     def forward(self, x):
         return self.conv(x)
+
+    def reset_parameters(self):
+        self.conv.reset_parameters()

@@ -82,3 +82,8 @@ class MinkowskiSparseResnetV2(nn.Module):
             x = stage(x)
             out.append(x)
         return out
+
+    def reset_parameters(self):
+        self.stem.reset_parameters()
+        for stage in self.stages:
+            stage.reset_parameters()

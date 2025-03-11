@@ -80,3 +80,7 @@ class MinkowskiSparseUnetDecoder(nn.Module):
             x = stage(x, skip)
             outputs.append(x)
         return outputs
+
+    def reset_parameters(self):
+        for stage in self.stages:
+            stage.reset_parameters()

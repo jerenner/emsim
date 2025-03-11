@@ -170,6 +170,8 @@ class EMTransformer(nn.Module):
         )
         self.mask_main_queries_from_denoising = mask_main_queries_from_denoising
 
+        self.reset_parameters()
+
     def reset_parameters(self):
         self.salience_mask_predictor.reset_parameters()
         self.pos_embedding.reset_parameters()
@@ -177,9 +179,7 @@ class EMTransformer(nn.Module):
         nn.init.uniform_(self.alpha, -0.3, 0.3)
         self.encoder.reset_parameters()
         self.encoder_output_norm.reset_parameters()
-        for layer in self.query_pos_offset_head:
-            if hasattr(layer, "reset_parameters"):
-                layer.reset_parameters()
+        self.query_pos_offset_head.reset_parameters()
         for layer in self.salience_unpoolers:
             layer.reset_parameters()
         self.object_query_embedding.reset_parameters()

@@ -68,6 +68,10 @@ class MinkowskiSparseResnetUnet(ME.MinkowskiNetwork):
         x = self.decoder(x)
         return x
 
+    def reset_parameters(self):
+        self.encoder.reset_parameters()
+        self.decoder.reset_parameters()
+
     @property
     def feature_info(self):
         return self.decoder.feature_info

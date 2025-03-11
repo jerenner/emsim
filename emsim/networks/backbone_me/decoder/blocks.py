@@ -129,6 +129,22 @@ class MinkowskiInverseSparseBottleneckV2(nn.Module):
         out = x + shortcut
         return out
 
+    def reset_parameters(self):
+        if hasattr(self.upsample, "reset_parameters"):
+            self.upsample.reset_parameters()
+        if hasattr(self.shortcut, "reset_parameters"):
+            self.shortcut.reset_parameters()
+        for layer in self.preact:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+        self.conv1.reset_parameters()
+        for layer in self.norm_act_conv_2:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+        for layer in self.norm_act_conv_3:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
+
 
 class MinkowskiSparseInverseResnetV2Stage(nn.Module):
     def __init__(
@@ -178,3 +194,7 @@ class MinkowskiSparseInverseResnetV2Stage(nn.Module):
         for block in remainder:
             x = block(x)
         return x
+
+    def reset_parameters(self):
+        for block in self.blocks:
+            block.reset_parameters()

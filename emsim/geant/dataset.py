@@ -12,7 +12,12 @@ import torch.nn.functional as F
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 
-from emsim.dataclasses import BoundingBox, IonizationElectronPixel, PixelSet
+from emsim.dataclasses import (
+    BoundingBox,
+    IonizationElectronPixel,
+    PixelSet,
+    IncidencePoint,
+)
 from emsim.geant.dataclasses import GeantElectron, Trajectory, GeantGridsize
 from emsim.geant.io import (
     read_files,
@@ -74,6 +79,7 @@ def make_test_train_datasets(
     noise_std: float = 1.0,
     shuffle: bool = True,
     shared_shuffle_seed: Optional[int] = None,
+    new_grid_size: Optional[Union[np.ndarray, int, list[int]]] = None,
 ):
     with h5py.File(electron_hdf_file, "r") as file:
         num_electrons = len(file["id"])
@@ -94,6 +100,7 @@ def make_test_train_datasets(
             noise_std=noise_std,
             shuffle=shuffle,
             shared_shuffle_seed=shared_shuffle_seed,
+            new_grid_size=new_grid_size,
         )
     else:
         train_dataset = None
@@ -136,12 +143,12 @@ class GeantElectronDataset(IterableDataset):
         noise_std: float = 1.0,
         shuffle: bool = True,
         shared_shuffle_seed: Optional[int] = None,
+        new_grid_size: Optional[Union[np.ndarray, list[int], int]] = None,
     ):
         self.hybrid_sparse_tensors = hybrid_sparse_tensors
         self.electron_hdf_file = electron_hdf_file
         self._electron_indices = electron_indices
-        self.grid = read_electrons_from_hdf(electron_hdf_file, np.array([0]))[0].grid
-        self.pixel_to_mm = np.array(self.grid.pixel_size_um) / 1000
+        self.new_grid_size = new_grid_size
 
         assert len(events_per_image_range) == 2
         self.events_per_image_range = events_per_image_range
@@ -198,6 +205,9 @@ class GeantElectronDataset(IterableDataset):
             elecs: list[GeantElectron] = read_electrons_from_hdf(
                 self.electron_hdf_file, chunk
             )
+            if self.new_grid_size is not None:
+                elecs = [regrid_electron(elec, self.new_grid_size) for elec in elecs]
+
             batch = {}
             batch["electron_ids"] = np.array([elec.id for elec in elecs], dtype=int)
             batch["batch_size"] = len(elecs)
@@ -232,14 +242,16 @@ class GeantElectronDataset(IterableDataset):
 
             # image size info
             batch["image_size_pixels_rc"] = np.array(
-                [self.grid.ymax_pixel, self.grid.xmax_pixel]
+                [elecs[0].grid.ymax_pixel, elecs[0].grid.xmax_pixel]
             )
-            batch["image_size_um_xy"] = np.array([self.grid.xmax_um, self.grid.ymax_um])
+            batch["image_size_um_xy"] = np.array(
+                [elecs[0].grid.xmax_um, elecs[0].grid.ymax_um]
+            )
 
             # bounding boxes
             boxes = [elec.pixels.get_bounding_box() for elec in elecs]
             boxes_normalized = normalize_boxes(
-                boxes, self.grid.xmax_pixel, self.grid.ymax_pixel
+                boxes, elecs[0].grid.xmax_pixel, elecs[0].grid.ymax_pixel
             )
             boxes_array = [box.asarray() for box in boxes]
             batch["bounding_boxes_pixels_xyxy"] = np.array(
@@ -252,13 +264,14 @@ class GeantElectronDataset(IterableDataset):
                 [box.center_format() for box in boxes], dtype=np.float32
             )
 
+            # scaler
+            pixel_to_mm = np.array(elecs[0].grid.pixel_size_um) / 1000
+
             # patches centered on high-energy pixels
             patches, patch_coords = get_pixel_patches(
                 batch["image"], elecs, self.pixel_patch_size
             )
-            patch_coords_mm = patch_coords * np.concatenate(
-                [self.pixel_to_mm, self.pixel_to_mm]
-            )
+            patch_coords_mm = patch_coords * np.concatenate([pixel_to_mm, pixel_to_mm])
             batch["pixel_patches"] = patches.astype(np.float32)
             batch["patch_coords_xyxy"] = patch_coords.astype(int)
 
@@ -271,10 +284,10 @@ class GeantElectronDataset(IterableDataset):
             )
             incidence_points_pixels_rc = np.fliplr(
                 incidence_points_xy
-            ) / self.pixel_to_mm.astype(np.float32)
+            ) / pixel_to_mm.astype(np.float32)
             local_incidence_points_mm = incidence_points_xy - patch_coords_mm[:, :2]
             local_incidence_points_pixels = (
-                local_incidence_points_mm / self.pixel_to_mm.astype(np.float32)
+                local_incidence_points_mm / pixel_to_mm.astype(np.float32)
             )
             batch["incidence_points_xy"] = incidence_points_xy.astype(np.float32)
             batch["normalized_incidence_points_xy"] = normalized_incidence_points_xy
@@ -641,3 +654,65 @@ def _sparse_pad(items: list[sparse.SparseArray]):
             for item in items
         ]
     return items
+
+
+def shift_pixel(pixel: IonizationElectronPixel, pixel_shift: np.ndarray):
+    xy = np.array([pixel.x, pixel.y])
+    new_xy = xy - pixel_shift
+    return IonizationElectronPixel(new_xy[0], new_xy[1], pixel.ionization_electrons)
+
+
+def regrid_electron(
+    electron: GeantElectron,
+    new_grid_size: Union[np.ndarray, int, list[int]],
+    border_pixels: Union[np.ndarray, int, list[int]] = 10,
+) -> GeantElectron:
+    assert (
+        electron.grid.xmin_pixel == 0 and electron.grid.ymin_pixel == 0
+    ), "Grids with origin not (0, 0) not supported"
+    old_grid_size = np.array([electron.grid.xmax_pixel, electron.grid.ymax_pixel])
+    new_grid_size = np.broadcast_to(new_grid_size, [2])
+    border_pixels = np.broadcast_to(border_pixels, [2])
+    new_grid = GeantGridsize(
+        new_grid_size[0],
+        new_grid_size[1],
+        electron.grid.xmax_um * (new_grid_size[0] / old_grid_size[0]),
+        electron.grid.ymax_um * (new_grid_size[1] / old_grid_size[1]),
+    )
+    assert electron.grid.pixel_size_um == new_grid.pixel_size_um
+    incidence_mm = np.array([electron.incidence.x, electron.incidence.y])
+    incidence_pixel_xy = incidence_mm / electron.grid.pixel_size_um * 1000
+    rescaled_incidence_pixel_xy = incidence_pixel_xy * (new_grid_size / old_grid_size)
+    pixel_shift = (incidence_pixel_xy - rescaled_incidence_pixel_xy).round()
+
+    min_pixel_xy = np.array([electron.pixels.xmin(), electron.pixels.ymin()])
+    new_min_pixel_xy = min_pixel_xy - pixel_shift
+    max_pixel_xy = np.array([electron.pixels.xmax(), electron.pixels.ymax()])
+    new_max_pixel_xy = max_pixel_xy - pixel_shift
+
+    pad_neg = np.minimum(0, new_min_pixel_xy - border_pixels)
+    pad_pos = np.minimum(0, (new_grid_size - border_pixels - 1) - new_max_pixel_xy)
+
+    adj_pixel_shift = pixel_shift + pad_neg - pad_pos
+
+    assert all(adj_pixel_shift == np.floor(adj_pixel_shift))  # check is integer pixels
+    new_pixelset = PixelSet(
+        [shift_pixel(pixel, adj_pixel_shift) for pixel in electron.pixels]
+    )
+    assert new_pixelset.xmin() >= border_pixels[0]
+    assert new_pixelset.xmax() < new_grid_size[0] - border_pixels[0]
+    assert new_pixelset.ymin() >= border_pixels[1]
+    assert new_pixelset.ymax() < new_grid_size[1] - border_pixels[1]
+
+    new_incidence_pixel_xy = incidence_pixel_xy - pixel_shift
+    new_incidence_mm = new_incidence_pixel_xy * electron.grid.pixel_size_um / 1000
+    new_incidence_mm = np.round(new_incidence_mm, 5)
+
+    new_incidence_pt = IncidencePoint(
+        electron.incidence.id,
+        new_incidence_mm[0],
+        new_incidence_mm[1],
+        electron.incidence.z,
+        electron.incidence.e0,
+    )
+    return GeantElectron(electron.id, new_incidence_pt, new_pixelset, new_grid)

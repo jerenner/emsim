@@ -108,6 +108,7 @@ def main(cfg: DictConfig):
             max_pixels_to_keep=cfg.dataset.max_pixels_to_keep,
         ),
         shared_shuffle_seed=cfg.seed,
+        new_grid_size=cfg.dataset.new_grid_size,
     )
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,

@@ -58,7 +58,7 @@ class ElectronSalienceCriterion(nn.Module):
         predicted_pixels = torch.cat(predicted_pixels)
         true_pixels = torch.cat(true_pixels)
 
-        num_pos = (true_pixels > 0.5).sum().clamp_min_(1)
+        num_pos = (true_pixels > 0.5).sum().clamp_min(1)
         loss = sigmoid_focal_loss(
             predicted_pixels, true_pixels, alpha=self.alpha, gamma=self.gamma
         )

@@ -27,7 +27,6 @@ class MESparseMaskPredictor(nn.Module):
             ),
             MinkowskiGELU(),
             ME.MinkowskiConvolution(hidden_dim // 4, 1, 1, dimension=dimension),
-            ME.MinkowskiSigmoid(),
         )
 
     def forward(self, x: ME.SparseTensor):

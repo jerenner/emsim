@@ -188,41 +188,41 @@ class EMTransformer(nn.Module):
 
     def forward(
         self,
-        encoded_features: list[ME.SparseTensor],
+        backbone_features: list[ME.SparseTensor],
         image_size: Tensor,
         denoising_queries: Optional[Tensor] = None,
         denoising_reference_points: Optional[Tensor] = None,
         denoising_batch_offsets: Optional[Tensor] = None,
     ):
-        assert len(encoded_features) == self.n_levels
+        assert len(backbone_features) == self.n_levels
 
         if self.use_rope:
-            pos_encoded_features = self.rope_encode_backbone_out(
-                encoded_features, image_size
+            backbone_features_pos_encoded = self.rope_encode_backbone_out(
+                backbone_features, image_size
             )
             pos_embed = None
         else:
 
-            pos_embed = self.get_position_encoding(encoded_features, image_size)
-            pos_embed = [p.to(encoded_features[0].features.dtype) for p in pos_embed]
+            pos_embed = self.get_position_encoding(backbone_features, image_size)
+            pos_embed = [p.to(backbone_features[0].features.dtype) for p in pos_embed]
             pos_embed = [
                 ME.SparseTensor(
                     pos,
                     coordinate_map_key=feat.coordinate_map_key,
                     coordinate_manager=feat.coordinate_manager,
                 )
-                for pos, feat in zip(pos_embed, encoded_features)
+                for pos, feat in zip(pos_embed, backbone_features)
             ]
 
-            pos_encoded_features = [
-                feat + pos for feat, pos in zip(encoded_features, pos_embed)
+            backbone_features_pos_encoded = [
+                feat + pos for feat, pos in zip(backbone_features, pos_embed)
             ]
         score_dict = self.level_wise_salience_filtering(
-            pos_encoded_features, image_size
+            backbone_features_pos_encoded, image_size
         )
 
         encoder_out = self.encoder(
-            encoded_features,
+            backbone_features,
             pos_embed,
             score_dict["spatial_shapes"],
             score_dict["selected_token_scores"],
@@ -380,6 +380,8 @@ class EMTransformer(nn.Module):
             nms_encoder_out_positions,
             encoder_out,
             score_dict,
+            backbone_features,  # backbone out
+            backbone_features_pos_encoded,  # salience filtering in
         )
 
     def get_position_encoding(

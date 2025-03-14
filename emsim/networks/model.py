@@ -26,6 +26,7 @@ class EMModel(nn.Module):
         transformer: nn.Module,
         criterion: nn.Module,
         denoising_generator: Optional[nn.Module] = None,
+        include_aux_outputs: bool = False,
     ):
         super().__init__()
 
@@ -36,6 +37,7 @@ class EMModel(nn.Module):
         self.denoising_generator = denoising_generator
 
         self.aux_loss = getattr(self.criterion, "aux_loss", False)
+        self.include_aux_outputs = include_aux_outputs
 
         self.reset_parameters()
 
@@ -66,6 +68,8 @@ class EMModel(nn.Module):
             encoder_positions,
             encoder_out,
             score_dict,
+            backbone_features,
+            backbone_features_pos_encoded,
         ) = self.transformer(
             features,
             batch["image_size_pixels_rc"],
@@ -91,27 +95,29 @@ class EMModel(nn.Module):
         }
         output["encoder_out"] = encoder_out
         output["score_dict"] = score_dict
+        output["backbone_features"] = backbone_features
+        output["backbone_features_pos_encoded"] = backbone_features_pos_encoded
 
+        if (self.training and self.aux_loss) or self.include_aux_outputs:
+            output["aux_outputs"] = [
+                {
+                    "pred_logits": logits,
+                    "pred_positions": positions,
+                    "pred_std_dev_cholesky": cholesky,
+                    "query_batch_offsets": query_batch_offsets,
+                    "pred_segmentation_logits": seg_logits,
+                    "output_queries": queries,
+                }
+                for logits, positions, cholesky, seg_logits, queries in zip(
+                    # for logits, positions, cholesky, seg_logits in zip(
+                    output_logits[:-1],
+                    output_positions[:-1],
+                    std_dev_cholesky[:-1],
+                    segmentation_logits[:-1],
+                    output_queries[:-1],
+                )
+            ]
         if self.training:
-            if self.aux_loss:
-                output["aux_outputs"] = [
-                    {
-                        "pred_logits": logits,
-                        "pred_positions": positions,
-                        "pred_std_dev_cholesky": cholesky,
-                        "query_batch_offsets": query_batch_offsets,
-                        "pred_segmentation_logits": seg_logits,
-                        "output_queries": queries,
-                    }
-                    for logits, positions, cholesky, seg_logits, queries in zip(
-                        # for logits, positions, cholesky, seg_logits in zip(
-                        output_logits[:-1],
-                        output_positions[:-1],
-                        std_dev_cholesky[:-1],
-                        segmentation_logits[:-1],
-                        output_queries[:-1],
-                    )
-                ]
             _logger.debug("Begin loss calculation")
             if denoising_out is not None:
                 denoising_output = self.prep_denoising_dict(denoising_out)
@@ -266,4 +272,5 @@ class EMModel(nn.Module):
             transformer=transformer,
             criterion=criterion,
             denoising_generator=denoising_generator,
+            include_aux_outputs=cfg.include_aux_outputs,
         )

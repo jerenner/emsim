@@ -25,7 +25,6 @@ class EMModel(nn.Module):
         channel_uniformizer: nn.Module,
         transformer: nn.Module,
         criterion: nn.Module,
-        salience_criterion: nn.Module,
         denoising_generator: Optional[nn.Module] = None,
     ):
         super().__init__()
@@ -34,7 +33,6 @@ class EMModel(nn.Module):
         self.channel_uniformizer = channel_uniformizer
         self.transformer = transformer
         self.criterion = criterion
-        self.salience_criterion = salience_criterion
         self.denoising_generator = denoising_generator
 
         self.aux_loss = getattr(self.criterion, "aux_loss", False)
@@ -233,6 +231,8 @@ class EMModel(nn.Module):
             loss_coef_box_l1=cfg.criterion.loss_coef_box_l1,
             loss_coef_box_giou=cfg.criterion.loss_coef_box_giou,
             no_electron_weight=cfg.criterion.no_electron_weight,
+            salience_alpha=cfg.criterion.salience.alpha,
+            salience_gamma=cfg.criterion.salience.gamma,
             matcher_cost_coef_class=cfg.criterion.matcher.cost_coef_class,
             matcher_cost_coef_mask=cfg.criterion.matcher.cost_coef_mask,
             matcher_cost_coef_dice=cfg.criterion.matcher.cost_coef_dice,
@@ -250,9 +250,6 @@ class EMModel(nn.Module):
             denoising_loss_weight=cfg.denoising.denoising_loss_weight,
             detection_metric_distance_thresholds=cfg.criterion.detection_metric_distance_thresholds,
         )
-        salience_criterion = ElectronSalienceCriterion(
-            alpha=cfg.criterion.salience.alpha, gamma=cfg.criterion.salience.gamma
-        )
         if cfg.denoising.use_denoising:
             denoising_generator = DenoisingGenerator(
                 d_model=cfg.transformer.d_model,
@@ -268,6 +265,5 @@ class EMModel(nn.Module):
             channel_uniformizer=channel_uniformizer,
             transformer=transformer,
             criterion=criterion,
-            salience_criterion=salience_criterion,
             denoising_generator=denoising_generator,
         )

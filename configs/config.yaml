@@ -36,6 +36,7 @@ transformer:
     look_forward_twice: true
     use_rope: true
 
+include_aux_outputs: false
 predict_box: false
 
 denoising:

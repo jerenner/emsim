@@ -495,8 +495,9 @@ class EMTransformer(nn.Module):
                 alpha = self.alpha[level_index - 1]
                 upsampled_score = upsampler(score)
                 upsampled_score = upsampled_score * alpha
-                map_times_upsampled = feature_map * upsampled_score
-                feature_map = feature_map + map_times_upsampled
+                # map_times_upsampled = feature_map * upsampled_score
+                # feature_map = feature_map + map_times_upsampled
+                feature_map = alpha * upsampled_score + (1 - alpha) * feature_map
 
             score: ME.SparseTensor = self.salience_mask_predictor(feature_map)
 

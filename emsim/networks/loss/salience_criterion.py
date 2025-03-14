@@ -1,12 +1,16 @@
 # Based on https://github.com/xiuqhou/Salience-DETR/blob/main/models/detectors/salience_detr.py
-
+from typing import Union
 import torch
 from torch import nn, Tensor
 
 from torchvision.ops import sigmoid_focal_loss
+import MinkowskiEngine as ME
 
-from emsim.utils.batching_utils import split_batch_concatted_tensor
-from emsim.utils.sparse_utils import gather_from_sparse_tensor, union_sparse_indices
+from emsim.utils.sparse_utils import (
+    union_sparse_indices,
+    sparse_squeeze_dense_dim,
+    minkowski_to_torch_sparse,
+)
 
 
 def pixel_coord_grid(height: int, width: int, stride: Tensor, device: torch.device):
@@ -60,3 +64,29 @@ class ElectronSalienceCriterion(nn.Module):
         )
         loss = loss.sum() / num_pos
         return loss
+
+    @staticmethod
+    def prep_inputs(
+        score_dict: dict[str, Union[Tensor, ME.SparseTensor]],
+        target_dict: dict[str, Tensor],
+    ):
+        predicted_foreground_masks = [
+            sparse_squeeze_dense_dim(
+                minkowski_to_torch_sparse(
+                    mask,
+                    full_scale_spatial_shape=target_dict["image_size_pixels_rc"].max(0)[
+                        0
+                    ],
+                )
+            )
+            for mask in score_dict["score_feature_maps"]
+        ]
+
+        downsample_scales = [1, 2, 4, 8, 16, 32, 64]
+        downsample_scales = downsample_scales[: len(predicted_foreground_masks)]
+        downsample_scales.reverse()
+        peak_normalized_images = [
+            target_dict[f"peak_normalized_noiseless_image_1/{ds}"]
+            for ds in downsample_scales
+        ]
+        return predicted_foreground_masks, peak_normalized_images

@@ -628,25 +628,11 @@ class EMCriterion(nn.Module):
         predicted_dict: dict[str, Tensor],
         target_dict: dict[str, Tensor],
     ):
-        predicted_foreground_masks = [
-            sparse_squeeze_dense_dim(
-                minkowski_to_torch_sparse(
-                    mask,
-                    full_scale_spatial_shape=target_dict["image_size_pixels_rc"].max(0)[
-                        0
-                    ],
-                )
+        predicted_foreground_masks, peak_normalized_images = (
+            self.salience_criterion.prep_inputs(
+                predicted_dict["score_dict"], target_dict
             )
-            for mask in predicted_dict["score_dict"]["score_feature_maps"]
-        ]
-
-        downsample_scales = [1, 2, 4, 8, 16, 32, 64]
-        downsample_scales = downsample_scales[: len(predicted_foreground_masks)]
-        downsample_scales.reverse()
-        peak_normalized_images = [
-            target_dict[f"peak_normalized_noiseless_image_1/{ds}"]
-            for ds in downsample_scales
-        ]
+        )
 
         return self.salience_criterion(
             predicted_foreground_masks, peak_normalized_images

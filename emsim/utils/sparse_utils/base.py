@@ -114,6 +114,7 @@ def sparse_squeeze_dense_dim(tensor: Tensor) -> Tensor:
         tensor.values().squeeze(-1),
         tensor.shape[:-1],
         requires_grad=tensor.requires_grad,
+        is_coalesced=tensor.is_coalesced(),
     ).coalesce()
 
 

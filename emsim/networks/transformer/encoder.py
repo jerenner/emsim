@@ -226,7 +226,7 @@ class EMTransformerEncoder(nn.Module):
         position_encoding: list[ME.SparseTensor],
         spatial_shapes: Tensor,
         token_salience_scores: list[Tensor],  # foreground scores
-        token_ij_level_indices: list[Tensor],
+        token_bijl_indices: list[Tensor],
         token_normalized_xy_positions: list[Tensor],
         token_layer_subset_indices: list[Tensor],
     ):
@@ -246,7 +246,7 @@ class EMTransformerEncoder(nn.Module):
             ij_indices_for_layer = [
                 ij_indices[indices]
                 for ij_indices, indices in zip(
-                    token_ij_level_indices,
+                    token_bijl_indices,
                     indices_for_layer,
                 )
             ]

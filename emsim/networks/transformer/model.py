@@ -226,7 +226,7 @@ class EMTransformer(nn.Module):
             pos_embed,
             score_dict["spatial_shapes"],
             score_dict["selected_token_scores"],
-            score_dict["selected_token_ij_level_indices"],
+            score_dict["selected_token_bijl_indices"],
             score_dict["selected_normalized_xy_positions"],
             score_dict["per_layer_subset_indices"],
         )
@@ -378,8 +378,14 @@ class EMTransformer(nn.Module):
             denoising_out,
             nms_topk_logits,
             nms_encoder_out_positions,
-            encoder_out,
+            nms_topk_position_offsets,
+            nms_proposal_normalized_xy,
             score_dict,
+            encoder_out,
+            encoder_out_logits,
+            topk_scores,
+            topk_indices,
+            topk_bijl_indices,
             backbone_features,  # backbone out
             backbone_features_pos_encoded,  # salience filtering in
         )
@@ -610,10 +616,10 @@ class EMTransformer(nn.Module):
             #     selected_normalized_xy
             # ),
             "selected_normalized_xy_positions": selected_normalized_xy,
-            # "selected_token_ij_level_indices": torch.nested.as_nested_tensor(
+            # "selected_token_bijl_indices": torch.nested.as_nested_tensor(
             #     selected_ij_indices
             # ),
-            "selected_token_ij_level_indices": selected_bijl_indices,
+            "selected_token_bijl_indices": selected_bijl_indices,
             # "selected_token_level_indices": torch.nested.as_nested_tensor(
             #     selected_level_indices
             # ),

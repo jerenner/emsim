@@ -61,7 +61,7 @@ class DenoisingGenerator(nn.Module):
         for i in range(len(electrons_per_image)):
             n_electrons = electrons_per_image[i]
             posneg_mult = 1 if self.pos_neg_queries_share_embedding else 2
-            assert n_electrons * posneg_mult <= self.dn_query_embedding.num_embeddings
+            assert n_electrons * posneg_mult <= self.dn_query_embedding.num_embeddings, "Not enough denoising embeddings"
             query_indices = torch.randperm(
                 n_electrons * posneg_mult, device=denoising_queries.device
             )

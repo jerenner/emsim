@@ -38,8 +38,8 @@ def inverse_sigmoid(x, eps: float = 1e-6):
     return torch.log(x1 / x2)
 
 
-def _get_layer(layer: Union[str, nn.Module]):
-    if isinstance(layer, nn.Module):
+def _get_layer(layer: Union[str, type]):
+    if isinstance(layer, type):
         return layer
     if layer.lower() == "relu":
         return nn.ReLU

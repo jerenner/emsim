@@ -55,21 +55,23 @@ def main(cfg: DictConfig):
             ),
         )
         tb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
-    fabric = Fabric(
-        strategy=DDPStrategy(find_unused_parameters=cfg.ddp.find_unused_parameters),
-        # strategy="ddp_find_unused_parameters_true",
-        accelerator="gpu",
-        num_nodes=cfg.ddp.nodes,
-        devices=cfg.ddp.devices,
-        loggers=(
-            [
-                tb_logger,
-                # CSVLogger(output_dir + "/csv_logs"),
-            ]
-            if cfg.log_tensorboard
-            else None
-        ),
-    )
+    if cfg.cpu_only:
+        fabric = Fabric(accelerator="cpu")
+    else:
+        fabric = Fabric(
+            strategy=DDPStrategy(find_unused_parameters=cfg.ddp.find_unused_parameters),
+            accelerator="gpu",
+            num_nodes=cfg.ddp.nodes,
+            devices=cfg.ddp.devices,
+            loggers=(
+                [
+                    tb_logger,
+                    # CSVLogger(output_dir + "/csv_logs"),
+                ]
+                if cfg.log_tensorboard
+                else None
+            ),
+        )
     if fabric.is_global_zero:
         _logger.info("Setting up...")
         _logger.info(print(yaml.dump(OmegaConf.to_container(cfg, resolve=True))))

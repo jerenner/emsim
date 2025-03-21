@@ -105,6 +105,7 @@ clear_cache_interval: 1000
 log_level: "INFO"
 compile: false
 
+cpu_only: false
 ddp:
   nodes: 2
   devices: 2

@@ -126,3 +126,11 @@ class GeantElectron:
 
     def get_segmentation_map(self, instance_id):
         return Map(instance_id, self.grid, self.pixels)
+
+    def get_incidence_point_pixel_xy(self) -> np.ndarray:
+        point_xy_mm = np.array([self.incidence.x, self.incidence.y])
+        scaler = np.array(self.grid.pixel_size_um) * 1000
+        return point_xy_mm / scaler
+
+    def get_incidence_point_pixel_ij(self) -> np.ndarray:
+        return self.get_incidence_point_pixel_xy()[::-1]

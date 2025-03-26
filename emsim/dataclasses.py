@@ -6,6 +6,7 @@ import numpy as np
 from math import floor, ceil
 from scipy import sparse
 
+
 @dataclass
 class Rectangle:
     xmin: Union[int, float]
@@ -71,6 +72,13 @@ class Pixel:
     def index(self):
         return (floor(self.x), floor(self.y))
 
+    def xy(self):
+        return np.array([self.x, self.y])
+
+    def ij(self):
+        return np.array([self.y, self.x])
+
+
 @dataclass
 class IonizationElectronPixel(Pixel):
     ionization_electrons: int
@@ -107,6 +115,9 @@ class PixelSet:
     def __len__(self):
         return len(self._pixels)
 
+    def __iter__(self):
+        yield from self._pixels
+
     def append(self, item):
         self._pixels.append(item)
 
@@ -114,9 +125,7 @@ class PixelSet:
         return bounding_box(self._pixels)
 
     def crop_to_bounding_box(self, bounding_box):
-        new_pixels = [
-            pixel for pixel in self._pixels if pixel.in_box(bounding_box)
-            ]
+        new_pixels = [pixel for pixel in self._pixels if pixel.in_box(bounding_box)]
         return PixelSet(new_pixels)
 
     def xmin(self):
@@ -139,12 +148,9 @@ class BoundingBox(Rectangle):
 
     def center_format(self):
         """center_x, center_y, width, height"""
-        return np.asarray([
-            self.center_x(),
-            self.center_y(),
-            self.width(),
-            self.height()
-        ])
+        return np.asarray(
+            [self.center_x(), self.center_y(), self.width(), self.height()]
+        )
 
     def rescale_to_multiple(self, x_scale, y_scale):
         xmin = x_scale * floor(self.xmin) + 0.5

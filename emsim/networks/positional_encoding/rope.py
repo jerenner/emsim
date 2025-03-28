@@ -250,10 +250,13 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
             self.freqs.copy_(freqs)
 
 
-def prep_multilevel_positions(indices: Tensor, spatial_shapes: Tensor):
-    assert indices.ndim == 2
-    ij = indices[:, 1:-1] + 0.5
-    batch_level = torch.stack([indices[:, 0], indices[:, -1]], -1)
+def prep_multilevel_positions(bijl_indices: Tensor, spatial_shapes: Tensor):
+    assert bijl_indices.ndim == 2
+    ij = bijl_indices[:, 1:-1]
+    if not torch.is_floating_point(ij):
+        # convert from indices to coordinates of pixel centers
+        ij = ij + 0.5
+    batch_level = torch.stack([bijl_indices[:, 0], bijl_indices[:, -1]], -1)
     assert ij.shape[-1] == spatial_shapes.shape[-1]
     assert spatial_shapes.ndim in (2, 3)  # batch, level, 2 or level, 2
 
@@ -267,6 +270,6 @@ def prep_multilevel_positions(indices: Tensor, spatial_shapes: Tensor):
 
     rescaled_positions = ij * spatial_shapes / max_spatial_shape
 
-    positions = indices.clone().to(rescaled_positions)
+    positions = bijl_indices.clone().to(rescaled_positions)
     positions[:, 1:3] = rescaled_positions
     return positions

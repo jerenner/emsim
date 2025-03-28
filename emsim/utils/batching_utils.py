@@ -13,8 +13,27 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor):
 def deconcat_add_batch_dim(
     tensor: Tensor, batch_offsets: Tensor, pad_value: float = 0.0
 ) -> tuple[Tensor, Tensor]:
-    assert tensor.ndim == 2
-    assert batch_offsets.ndim == 1
+    """Converts concatenated sequences to batched and padded sequences.
+
+    Args:
+        tensor (Tensor): A tensor of shape (total_sequence_length, D1, D2, ..., Dn)
+        batch_offsets (Tensor): A 1D tensor specifying where along the first dimension
+            of `tensor` each sequence starts
+        pad_value (float, optional): Pad value. Defaults to 0.0.
+
+    Returns:
+        out (Tensor): A tensor of shape (batch_size, max_sequence_length, D1, D2, ..., Dn)
+        padding_mask (Tensor): A boolean tensor of shape (batch_size, max_sequence_length)
+            that is True at locations where `out` is padding
+    """
+    if not tensor.ndim == 2:
+        raise ValueError(
+            f"Expected tensor with at least 2 dimensions, got {tensor.ndim}"
+        )
+    if not batch_offsets.ndim == 1:
+        raise ValueError(f"Expected batch_offsets to be 1D, got {batch_offsets.ndim}")
+
+    # add the total length to the end of the batch offsets if needed
     if batch_offsets[-1] != tensor.shape[0]:
         assert batch_offsets[-1] < tensor.shape[0]
         batch_offsets = torch.cat(
@@ -30,19 +49,32 @@ def deconcat_add_batch_dim(
     seq_lens = batch_offsets[1:] - batch_offsets[:-1]
     batchsize = batch_offsets.shape[0] - 1
     max_len = int(torch.max(seq_lens))
-    feature_dim = tensor.shape[-1]
-    out_shape = torch.Size([batchsize, max_len, feature_dim])
+
+    feature_dims = tensor.shape[1:]
+    out_shape = torch.Size([batchsize, max_len] + list(feature_dims))
+
+    # If all sequences are equal length can just return a view
+    if torch.all(seq_lens == max_len):
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+        out = tensor.view(out_shape)
+        padding_mask = torch.zeros(
+            batchsize, max_len, device=tensor.device, dtype=torch.bool
+        )
+        return out, padding_mask
 
     out = tensor.new_full(out_shape, pad_value)
     padding_mask = torch.ones(
         torch.Size([batchsize, max_len]), device=tensor.device, dtype=torch.bool
     )
-    # for b, out_b, mask_b in zip(range(batchsize), out, padding_mask):
-    for b in torch.arange(batchsize, device=tensor.device):
-        start = batch_offsets[b]
-        end = batch_offsets[b + 1]
-        out[b, : end - start] = tensor[start:end]
-        padding_mask[b, : end - start] = False
+
+    # Fill the output tensor with slices from the input
+    for b in range(batchsize):
+        start = int(batch_offsets[b])
+        end = int(batch_offsets[b + 1])
+        seq_len = int(seq_lens[b])
+        out[b, :seq_len] = tensor[start:end]
+        padding_mask[b, :seq_len] = False
 
     return out, padding_mask
 
@@ -58,33 +90,60 @@ def concatted_to_nested_tensor(tensor: Tensor, batch_offsets: Tensor) -> Tensor:
 def remove_batch_dim_and_concat(
     tensor: Tensor, padding_mask: Optional[Tensor] = None
 ) -> tuple[Tensor, Tensor]:
-    assert tensor.ndim == 3
+    """Converts batched and padded sequences to concatenated sequences.
+
+    Args:
+        tensor (Tensor): A tensor of shape (batch_size, max_seq_length, D1, D2, ..., Dn)
+        batch_offsets (Tensor, optional): Optional boolean tensor of shape
+            (batch_size, max_seq_length) where True indicates padded positions
+
+    Returns:
+        out (Tensor): A tensor of shape (total_seq_length, D1, D2, ..., Dn)
+        batch_offsets (Tensor): A 1D tensor indicating where each batch element starts
+    """
+    assert (
+        tensor.ndim >= 3
+    ), f"Expected tensor with at least 3 dimensions; got {tensor.ndim}"
     batch_size = tensor.shape[0]
     max_len = tensor.shape[1]
-    if padding_mask is None:
-        padding_mask = torch.zeros(
-            batch_size, max_len, device=tensor.device, dtype=torch.bool
-        )
-    assert padding_mask.ndim == 2
-    nonpadded_batch_sizes = padding_mask.shape[-1] - padding_mask.sum(-1)
+    feature_dims = tensor.shape[2:]
+
+    if padding_mask is not None:
+        if not padding_mask.ndim == 2:
+            raise ValueError(f"Expected padding_mask to be 2D, got {padding_mask.ndim}")
+        if not padding_mask.shape[0] == batch_size:
+            raise ValueError("Batch size mismatch between tensor and padding_mask")
+        if not padding_mask.shape[1] == max_len:
+            raise ValueError("Sequence length mismatch between tesnor and padding_mask")
+
+    if padding_mask is None or not padding_mask.any():
+        # All sequences are same length so can just return a view
+        total_len = batch_size * max_len
+        out_shape = torch.Size([total_len] + list(feature_dims))
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+        out = tensor.view(out_shape)
+        batch_offsets = torch.arange(0, total_len, max_len, device=tensor.device)
+
+        return out, batch_offsets
+
+    nonpadded_seq_lens = padding_mask.shape[-1] - padding_mask.sum(-1)
     batch_offsets = torch.cat(
-        [nonpadded_batch_sizes.new_zeros([1]), nonpadded_batch_sizes.cumsum(-1)]
+        [nonpadded_seq_lens.new_zeros([1]), nonpadded_seq_lens.cumsum(-1)]
     )
-    # out_shape = [
-    #     nonpadded_batch_sizes.sum(),
-    #     torch.tensor(tensor.shape[2], device=nonpadded_batch_sizes.device, dtype=nonpadded_batch_sizes.dtype),
-    # ]
-    total_len = int(nonpadded_batch_sizes.sum())
-    out_shape = torch.Size([total_len, tensor.shape[2]])
+    total_len = int(batch_offsets[-1])
+
+    out_shape = torch.Size([total_len] + list(feature_dims))
     out = torch.zeros(out_shape, dtype=tensor.dtype, device=tensor.device)
 
-    assert tensor.shape[0] == len(batch_offsets[:-1])
+    for b in range(batch_size):
+        seq_len = int(nonpadded_seq_lens[b])
+        if seq_len == 0:
+            continue
 
-    for b, (batch, nonpadded_size, batch_start_index, batch_end_index) in enumerate(
-        zip(tensor, nonpadded_batch_sizes, batch_offsets[:-1], batch_offsets[1:])
-    ):
-        assert nonpadded_size == batch_end_index - batch_start_index
-        out[batch_start_index:batch_end_index] = batch[:nonpadded_size]
+        batch_start_index = int(batch_offsets[b])
+        batch_end_index = int(batch_offsets[b + 1])
+        out[batch_start_index:batch_end_index] = tensor[b, :seq_len]
 
     return out, batch_offsets[:-1]
 

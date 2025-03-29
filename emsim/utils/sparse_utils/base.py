@@ -145,37 +145,48 @@ def sparse_flatten_hw(tensor: Tensor) -> Tensor:
 @torch.jit.script
 def __flattened_indices(
     tensor: Tensor, start_axis: int, end_axis: int
-) -> tuple[Tensor, list[int], Tensor]:
+) -> tuple[Tensor, Tensor, Tensor]:
     tensor_indices = tensor.indices()
     indices_to_flatten = tensor_indices[start_axis : end_axis + 1]
-    dim_sizes = tensor.shape[start_axis : end_axis + 1]
+    dim_sizes = (
+        torch.tensor(
+            tensor.shape[start_axis : end_axis + 1],
+            device=tensor.device,
+            dtype=torch.long,
+        ),
+    )
     dim_sizes_1 = torch.cat(
         [
-            torch.tensor(dim_sizes, device=tensor.device, dtype=torch.int),
-            torch.tensor([1], device=tensor.device, dtype=torch.int),
+            dim_sizes,
+            torch.ones(1, device=tensor.device, dtype=torch.long),
         ]
     )
-    dim_linear_offsets = torch.cat(
-        [
-            torch.prod(dim_sizes_1[i + 1 :], dim=0, keepdim=True)
-            for i in torch.arange(
-                start=0,
-                end=end_axis - start_axis + 1,
-                dtype=torch.int32,
-                device=dim_sizes_1.device,
-            )
-        ],
-        0,
-    )
+
+    dim_factors = torch.ones_like(dim_sizes_1)
+    dim_factors[:-1] = dim_sizes_1[1:]
+    dim_linear_offsets = torch.cumprod(torch.flip(dim_factors, [0]), dim=0)
+    dim_linear_offsets = torch.flip(dim_linear_offsets, [0])[:-1]
 
     flattened_indices = (indices_to_flatten * dim_linear_offsets.unsqueeze(-1)).sum(
         0, keepdim=True
     )
 
-    new_shape = list(tensor.shape)[:start_axis]
-    new_shape.append(dim_sizes_1.prod().item())
-    new_shape.extend(tensor.shape[end_axis + 1 :])
-    assert len(new_shape) == tensor.ndim - (end_axis - start_axis)
+    shape_prefix = torch.tensor(
+        tensor.shape[:start_axis], device=tensor.device, dtype=torch.long
+    )
+    shape_suffix = torch.tensor(
+        tensor.shape[end_axis + 1 :], device=tensor.device, dtype=torch.long
+    )
+    flattened_dim_size = torch.prod(dim_sizes, dim=0, keepdim=True)
+    new_shape = torch.cat(
+        [
+            shape_prefix,
+            flattened_dim_size,
+            shape_suffix,
+        ],
+    )
+
+    assert new_shape.size(0) == tensor.ndim - (end_axis - start_axis)
 
     new_indices = torch.cat(
         [tensor_indices[:start_axis], flattened_indices, tensor_indices[end_axis + 1 :]]
@@ -197,7 +208,7 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
 
     new_indices, new_shape, _ = __flattened_indices(tensor, start_axis, end_axis)
     return torch.sparse_coo_tensor(
-        new_indices, tensor.values(), new_shape, is_coalesced=tensor.is_coalesced()
+        new_indices, tensor.values(), new_shape.tolist(), is_coalesced=tensor.is_coalesced()
     )
 
 
@@ -341,19 +352,39 @@ def gather_from_sparse_tensor(
 
     Args:
         sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
-        S leading sparse dimensions and M is the dense dimension
+        S leading sparse dimensions and M is the dense dimension.
         index_tensor (Tensor): Long tensor of dimension ..., S; where ... are
-        leading batch dimensions.
+        leading batch dimensions. Negative indices are not supported and will
+        be considered unspecified.
+        check_all_specified (bool): If True, this function will raise a
+        ValueError if any of the indices in `index_tensor` are not specified
+        in `sparse_tensor`. If False, selections at unspecified indices will be
+        returned with padding values of 0. Defaults to False.
 
     Returns:
         Tensor: Tensor of dimension ..., M; where the leading dimensions are
-        the same as the batch dimensions from `index_tensor`
+        the same as the batch dimensions from `index_tensor`.
         Tensor: Boolean tensor of dimension ...; where each element is True if
         the corresponding index is a specified (nonzero) element of the sparse
-        tensor and False if not
+        tensor and False if not.
     """
     if index_tensor.is_nested:
         return __gather_nested_index(sparse_tensor, index_tensor, check_all_specified)
+
+    # Check for out of bounds indices
+    out_of_bounds_indices = torch.logical_or(
+        torch.any(index_tensor < 0, -1),
+        torch.any(
+            index_tensor
+            > torch.tensor(
+                sparse_tensor.shape[: sparse_tensor.sparse_dim()],
+                device=index_tensor.device,
+            ),
+            -1,
+        ),
+    )
+    if out_of_bounds_indices.any():
+        index_tensor = index_tensor.masked_fill(out_of_bounds_indices.unsqueeze(-1), 0)
     (
         sparse_tensor_indices_linearized,
         sparse_tensor_values,
@@ -365,17 +396,21 @@ def gather_from_sparse_tensor(
     index_search = torch.searchsorted(
         sparse_tensor_indices_linearized, index_tensor_linearized
     ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
+
+    # significantly faster than sparse_tensor_vales[index_search] for some reason
     selected = torch.gather(
         sparse_tensor_values,
         0,
         index_search.unsqueeze(1).expand(-1, sparse_tensor_values.shape[-1]),
     )
+
     dense_dim = sparse_tensor.dense_dim()
     out_shape = list(index_tensor_shape[:-1])
     if dense_dim > 0:
         out_shape.extend(selected.shape[-dense_dim:])
     selected = selected.view(out_shape)
     is_specified_mask = is_specified_mask.view(index_tensor_shape[:-1])
+    is_specified_mask = torch.logical_and(is_specified_mask, ~out_of_bounds_indices)
     if not is_specified_mask.all():
         if check_all_specified:
             raise ValueError(

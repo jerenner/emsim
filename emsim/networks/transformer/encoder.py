@@ -23,7 +23,7 @@ from emsim.utils.batching_utils import (
     remove_batch_dim_and_concat,
 )
 from emsim.utils.sparse_utils import (
-    gather_from_sparse_tensor,
+    batch_sparse_index,
     linearize_sparse_and_index_tensors,
     minkowski_to_torch_sparse,
     scatter_to_sparse_tensor,
@@ -289,7 +289,7 @@ class EMTransformerEncoder(nn.Module):
             ).cumsum(0)[:-1]
             stacked_ij_indices_for_layer = torch.cat(ij_indices_for_layer, 0)
             stacked_xy_positions_for_layer = torch.cat(xy_positions_for_layer, 0)
-            query_for_layer = gather_from_sparse_tensor(
+            query_for_layer = batch_sparse_index(
                 stacked_feature_maps, stacked_ij_indices_for_layer, True
             )[0]
             # query_for_layer = torch.nested.as_nested_tensor(
@@ -300,7 +300,7 @@ class EMTransformerEncoder(nn.Module):
             #     )
             # )
             pos_encoding_for_layer = (
-                gather_from_sparse_tensor(
+                batch_sparse_index(
                     stacked_pos_encodings, stacked_ij_indices_for_layer, True
                 )[0]
                 if not self.use_rope

@@ -6,7 +6,7 @@ from torch import Tensor, nn
 
 from ..utils.sparse_utils import (
     batch_offsets_from_sparse_tensor_indices,
-    gather_from_sparse_tensor,
+    batch_sparse_index,
     spconv_to_torch_sparse,
 )
 
@@ -58,7 +58,7 @@ class QueryGenerator(nn.Module):
             self.max_queries_per_batch,
         ).T
         vae_params = spconv_to_torch_sparse(self.vae_encoder(pixel_features))
-        query_pixel_vae_params, is_specified_mask = gather_from_sparse_tensor(
+        query_pixel_vae_params, is_specified_mask = batch_sparse_index(
             vae_params, query_indices
         )
         assert is_specified_mask.all()

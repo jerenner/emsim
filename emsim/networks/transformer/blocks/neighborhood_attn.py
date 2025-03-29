@@ -5,7 +5,7 @@ from torch import Tensor, nn
 
 from .rope import RoPEEncodingNDGroupedFreqs, prep_multilevel_positions
 from emsim.utils.sparse_utils import (
-    gather_from_sparse_tensor,
+    batch_sparse_index,
     batch_offsets_from_sparse_tensor_indices,
 )
 from emsim.utils.batching_utils import (
@@ -70,7 +70,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         )
         keys_per_query = sum(self.neighborhood_sizes**2)
         assert value_bijl.shape == (n_queries, keys_per_query, 4)
-        value, value_is_specified = gather_from_sparse_tensor(
+        value, value_is_specified = batch_sparse_index(
             stacked_feature_maps, value_bijl
         )
         assert value.shape == (n_queries, keys_per_query, self.d_model)

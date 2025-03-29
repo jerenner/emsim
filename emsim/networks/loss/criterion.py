@@ -23,7 +23,7 @@ from ...utils.batching_utils import (
     unstack_model_output,
 )
 from ...utils.sparse_utils import (
-    gather_from_sparse_tensor,
+    batch_sparse_index,
     minkowski_to_torch_sparse,
     sparse_squeeze_dense_dim,
     union_sparse_indices,
@@ -752,7 +752,7 @@ def get_query_class_preds_targets_weights(
 # ):
 #     logits = predicted_dict["occupancy_logits"]
 #     targets = target_dict["electron_count_map_1/1"]
-#     gathered_targets = gather_from_sparse_tensor(targets, logits.indices().T)[0]
+#     gathered_targets = batch_sparse_index(targets, logits.indices().T)[0]
 #     weights = gathered_targets.new_ones((logits.shape[-1],), dtype=torch.float)
 #     # weights[0] = 1 - (torch.count_nonzero(gathered_targets) / gathered_targets.numel())
 #     weights[0] = no_electron_weight

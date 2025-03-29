@@ -4,7 +4,7 @@ from torch import Tensor, nn
 from math import log
 
 from ..utils.window_utils import windowed_keys_for_queries
-from ..utils.sparse_utils import spconv_to_torch_sparse, gather_from_sparse_tensor
+from ..utils.sparse_utils import spconv_to_torch_sparse, batch_sparse_index
 
 import spconv.pytorch as spconv
 
@@ -173,7 +173,7 @@ class PredictionHead(nn.Module):
             energy_portions.indices(),
             energy_portions.values(),
         )
-        pixel_energies, _ = gather_from_sparse_tensor(
+        pixel_energies, _ = batch_sparse_index(
             sparse_input_frame.cuda(),
             torch.cat(
                 [

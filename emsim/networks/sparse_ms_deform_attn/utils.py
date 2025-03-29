@@ -1,7 +1,7 @@
 from torch import Tensor
 import torch
 
-from emsim.utils.sparse_utils import gather_from_sparse_tensor
+from emsim.utils.sparse_utils import batch_sparse_index
 
 
 @torch.jit.script
@@ -128,7 +128,7 @@ def multilevel_sparse_bilinear_grid_sample(
     xy = torch.stack([x0_y0, x0_y1, x1_y0, x1_y1], -2)
     w = torch.stack([wa, wb, wc, wd], -1)
 
-    val = gather_from_sparse_tensor(sparse_tensor, xy)[0]
+    val = batch_sparse_index(sparse_tensor, xy)[0]
 
     out = torch.matmul(w, val.to(w)).squeeze(-2)
 

@@ -326,7 +326,7 @@ def __gather_nested_index(
     sparse_tensor: Tensor, index_tensor: Tensor, check_all_specified: bool = False
 ) -> tuple[Tensor, Tensor]:
     results = [
-        gather_from_sparse_tensor(
+        batch_sparse_index(
             sparse_tensor,
             index_subtensor,
             check_all_specified=check_all_specified,
@@ -341,7 +341,7 @@ def __gather_nested_index(
 
 
 @torch.jit.script
-def gather_from_sparse_tensor(
+def batch_sparse_index(
     sparse_tensor: Tensor, index_tensor: Tensor, check_all_specified: bool = False
 ) -> tuple[Tensor, Tensor]:
     """Batch selection of elements from a torch sparse tensor. Should be

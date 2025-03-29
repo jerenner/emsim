@@ -3,7 +3,7 @@ from emsim.utils.batching_utils import (
 )
 from emsim.utils.sparse_utils import (
     batch_offsets_from_sparse_tensor_indices,
-    gather_from_sparse_tensor,
+    batch_sparse_index,
     sparse_select,
 )
 
@@ -150,7 +150,7 @@ class PatchedSegmentationMapPredictor(SegmentationMapPredictor):
         patch_map_indices = torch.cat(patch_map_indices)
         patch_map_values = torch.cat(patch_map_values)
 
-        feature_map_values = gather_from_sparse_tensor(
+        feature_map_values = batch_sparse_index(
             fullscale_feature_map, patch_map_indices[..., :-1]
         )[0]
 

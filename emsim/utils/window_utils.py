@@ -1,4 +1,4 @@
-from emsim.utils.sparse_utils import gather_from_sparse_tensor
+from emsim.utils.sparse_utils import batch_sparse_index
 
 
 import torch
@@ -55,5 +55,5 @@ def windowed_keys_for_queries(
     )
 
     # queries x H x W x feat
-    keys, is_specified_mask = gather_from_sparse_tensor(image_feature_tensor, key_indices)
+    keys, is_specified_mask = batch_sparse_index(image_feature_tensor, key_indices)
     return keys, key_indices, key_offsets, key_pad_mask, is_specified_mask

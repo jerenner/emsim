@@ -26,7 +26,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         bias: bool = False,
         norm_first: bool = True,
         rope_theta: float = 10.0,
-        rope_dtype: torch.dtype = torch.double,
+        rope_dtype: torch.dtype = torch.float,
     ):
         super().__init__()
         self.d_model = d_model
@@ -63,9 +63,6 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         assert query.ndim == 2
         assert query_positions_bijl.shape == (query.shape[0], 4)
         n_queries = query.shape[0]
-        value_batch_offsets = batch_offsets_from_sparse_tensor_indices(
-            stacked_feature_maps.indices()
-        )
 
         # gather the neighborhood of each query
         value_bijl = get_multilevel_neighborhood(
@@ -93,12 +90,14 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         ).view(n_queries, keys_per_query, 4)[:, :, 1:]
 
         q, query_pad_mask = deconcat_add_batch_dim(q, query_batch_offsets)
-        k, key_pad_mask = deconcat_add_batch_dim(k, value_batch_offsets)
-        v, value_pad_mask = deconcat_add_batch_dim(v, value_batch_offsets)
+        k, key_pad_mask = deconcat_add_batch_dim(k, query_batch_offsets)
+        v, value_pad_mask = deconcat_add_batch_dim(v, query_batch_offsets)
         value_is_specified, _ = deconcat_add_batch_dim(
-            value_is_specified, value_batch_offsets
+            value_is_specified, query_batch_offsets
         )
         assert torch.equal(key_pad_mask, value_pad_mask)
+        assert k.shape == (q.shape[0], q.shape[1], keys_per_query, self.d_model)
+
         # pad value of 1.0 instead of 0.0 to suppress a false warning
         query_ijl, _ = deconcat_add_batch_dim(
             query_ijl,
@@ -107,10 +106,9 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         )
         key_ijl, _ = deconcat_add_batch_dim(
             key_ijl,
-            value_batch_offsets,
+            query_batch_offsets,
             key_ijl.new_ones([]),
         )
-        assert k.shape == (q.shape[0], q.shape[1], keys_per_query, self.d_model)
 
         q, k = self.pos_encoding(
             q,
@@ -118,20 +116,23 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             k.view(q.shape[0], -1, self.d_model),
             key_ijl.view(q.shape[0], -1, 3),
         )
+        q: Tensor = q.to(v)
+        k: Tensor = k.to(v)
         bsz, tgt_seq_len, n_heads, head_dim = q.shape
         q = q.transpose(1, 2)
         k = k.view(bsz, tgt_seq_len, keys_per_query, n_heads, head_dim).permute(
             0, 3, 1, 2, 4
         )
-        v = v.view(bsz, tgt_seq_len, keys_per_query, n_heads, head_dim).permute(
+        v: Tensor = v.view(bsz, tgt_seq_len, keys_per_query, n_heads, head_dim).permute(
             0, 3, 1, 2, 4
         )
 
-        attn_scores = torch.einsum("bhqd,bhqkd->bhqk")
+        attn_scores = torch.einsum("bhqd,bhqkd->bhqk", q, k)
         attn_scores = torch.masked_fill(
             attn_scores, value_is_specified.unsqueeze(1).logical_not(), -torch.inf
         )
         attn_weights = torch.softmax(attn_scores, -1)
+        attn_weights = attn_weights.nan_to_num(0.0)
         attn_weights = torch.dropout(
             attn_weights, self.attn_drop_rate, train=self.training
         )
@@ -166,7 +167,9 @@ def get_multilevel_neighborhood(
     assert bijl_positions.ndim == 2
     assert level_spatial_shapes.ndim == 2
     assert bijl_positions.shape[-1] == 4
-    assert torch.all(torch.tensor(neighborhood_sizes) % 2 == 1)  # all odd
+    if not isinstance(neighborhood_sizes, Tensor):
+        neighborhood_sizes = torch.tensor(neighborhood_sizes)
+    assert torch.all(neighborhood_sizes % 2 == 1)  # all odd
 
     n_queries = bijl_positions.shape[0]
 
@@ -179,20 +182,20 @@ def get_multilevel_neighborhood(
     neighborhood_offsets = [
         torch.stack(
             torch.meshgrid(
-                torch.arange(size, device=ij.device, dtype=torch.int),
-                torch.arange(size, device=ij.device, dtype=torch.int),
+                torch.arange(size, device=bijl_positions.device, dtype=torch.int),
+                torch.arange(size, device=bijl_positions.device, dtype=torch.int),
                 indexing="ij",
             ),
             -1,
         )
         - (size - 1) / 2
-        for size, ij in zip(neighborhood_sizes, query_multilevel_ijs)
+        for size in neighborhood_sizes
     ]
     query_multilevel_ij_neighborhoods = [
         ij[:, None, None, :].floor().int() + offset[None]
-        for ij, offset in zip(query_multilevel_ijs, neighborhood_offsets)
+        for ij, offset in zip(query_multilevel_ijs.unbind(1), neighborhood_offsets)
     ]
-    query_multilevel_ij_neighborhoods = [
+    query_multilevel_ij_neighborhoods_concat = [
         torch.cat(
             [
                 neighborhood,
@@ -205,7 +208,7 @@ def get_multilevel_neighborhood(
     ijl_neighborhoods_concat = torch.cat(
         [
             nhood.view(n_queries, -1, nhood.shape[-1])
-            for nhood in query_multilevel_ij_neighborhoods
+            for nhood in query_multilevel_ij_neighborhoods_concat
         ],
         1,
     )

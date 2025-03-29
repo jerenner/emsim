@@ -101,17 +101,16 @@ class EMModel(nn.Module):
             "pred_position_offsets": nms_topk_position_offsets,
             "token_normalized_xy": nms_proposal_normalized_xy,
         }
-        output["encoder_out"] = encoder_out
         output["score_dict"] = score_dict
         output["backbone_features"] = backbone_features
         output["backbone_features_pos_encoded"] = backbone_features_pos_encoded
+        output["encoder_out"] = encoder_out
         output["encoder_out_logits"] = encoder_out_logits
         output["topk"] = {
             "topk_scores": topk_scores,
             "topk_indices": topk_indices,
             "topk_bijl_indices": topk_bijl_indices,
         }
-
 
         if (self.training and self.aux_loss) or self.include_aux_outputs:
             output["aux_outputs"] = [
@@ -235,11 +234,15 @@ class EMModel(nn.Module):
             encoder_topk_sa=cfg.transformer.encoder.topk_sa,
             encoder_use_rope=cfg.transformer.encoder.use_rope,
             encoder_use_ms_deform_attn=cfg.transformer.encoder.use_ms_deform_attn,
+            encoder_use_neighborhood_attn=cfg.transformer.encoder.use_neighborhood_attn,
             n_query_embeddings=cfg.transformer.query_embeddings,
-            decoder_cross_attn_type=cfg.transformer.decoder.cross_attn_type,
+            decoder_use_ms_deform_attn=cfg.transformer.decoder.use_ms_deform_attn,
+            decoder_use_neighborhood_attn=cfg.transformer.decoder.use_neighborhood_attn,
+            decoder_use_full_cross_attn=cfg.transformer.decoder.use_full_cross_attn,
             decoder_look_forward_twice=cfg.transformer.decoder.look_forward_twice,
             decoder_detach_updated_positions=cfg.transformer.decoder.detach_updated_positions,
             decoder_use_rope=cfg.transformer.decoder.use_rope,
+            neighborhood_sizes=cfg.transformer.neighborhood_sizes,
             mask_main_queries_from_denoising=cfg.denoising.mask_main_queries_from_denoising,
         )
         criterion = EMCriterion(

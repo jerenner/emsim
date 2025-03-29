@@ -16,6 +16,7 @@ from emsim.networks.transformer.blocks import (
     MultilevelSelfAttentionBlockWithRoPE,
     SelfAttentionBlock,
     SparseDeformableAttentionBlock,
+    SparseNeighborhoodAttentionBlock,
 )
 from emsim.utils.batching_utils import (
     deconcat_add_batch_dim,
@@ -35,14 +36,16 @@ class TransformerEncoderLayer(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
+        use_msdeform_attn: bool = True,
         n_deformable_value_levels: int = 4,
         n_deformable_points: int = 4,
+        use_neighborhood_attn: bool = True,
+        neighborhood_sizes: list[int] = [3, 5, 7, 9],
         dropout: float = 0.1,
         activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
         topk_sa: int = 1000,
-        use_msdeform_attn: bool = True,
         use_rope: bool = False,
         rope_base_theta: float = 10.0,
     ):
@@ -52,6 +55,7 @@ class TransformerEncoderLayer(nn.Module):
         self.dim_feedforward = dim_feedforward
         self.topk_sa = topk_sa
         self.use_msdeform_attn = use_msdeform_attn
+        self.use_neighborhood_attn = use_neighborhood_attn
         self.use_rope = use_rope
 
         if not use_rope:
@@ -79,7 +83,20 @@ class TransformerEncoderLayer(nn.Module):
                 norm_first,
             )
         else:
-            self.msdeform_attn = nn.Identity()
+            self.msdeform_attn = None
+        if use_neighborhood_attn:
+            self.neighborhood_attn = SparseNeighborhoodAttentionBlock(
+                d_model,
+                n_heads,
+                n_deformable_value_levels,
+                neighborhood_sizes=neighborhood_sizes,
+                dropout=dropout,
+                bias=attn_proj_bias,
+                norm_first=norm_first,
+                rope_theta=rope_base_theta,
+            )
+        else:
+            self.neighborhood_attn = None
         self.ffn = FFNBlock(
             d_model, dim_feedforward, dropout, activation_fn, norm_first
         )
@@ -177,26 +194,34 @@ class TransformerEncoderLayer(nn.Module):
         #     queries_batched, pad_mask
         # )
         # assert torch.equal(batch_offsets, batch_offsets_2)
-        queries_2 = queries.scatter(0, indices_flat_unsq, self_attn_out)
+        queries = queries.scatter(0, indices_flat_unsq, self_attn_out)
 
         if self.use_msdeform_attn:
-            queries_3 = self.msdeform_attn(
-                queries_2,
+            queries = self.msdeform_attn(
+                queries,
                 query_pos_encoding,
                 query_normalized_xy_positions,
                 batch_offsets,
                 stacked_feature_maps,
                 spatial_shapes,
             )
-        else:
-            queries_3 = self.msdeform_attn(queries_2)
-        queries_4 = self.ffn(queries_3)
-        return queries_4
+        if self.use_neighborhood_attn:
+            queries = self.neighborhood_attn(
+                queries,
+                query_bijl_indices,
+                batch_offsets,
+                stacked_feature_maps,
+                spatial_shapes,
+            )
+        queries = self.ffn(queries)
+        return queries
 
     def reset_parameters(self):
         self.self_attn.reset_parameters()
         if hasattr(self.msdeform_attn, "reset_parameters"):
             self.msdeform_attn.reset_parameters()
+        if hasattr(self.neighborhood_attn, "reset_parameters"):
+            self.neighborhood_attn.reset_parameters()
         self.ffn.reset_parameters()
 
 

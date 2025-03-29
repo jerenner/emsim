@@ -17,6 +17,7 @@ transformer:
   n_heads: 8
   dim_feedforward: 1024
   n_deformable_points: 4
+  neighborhood_sizes: [3, 5, 7 ,9]
   dropout: 0.1
   activation_fn: "gelu"
   rope_base_theta: 10.0
@@ -28,10 +29,13 @@ transformer:
     layers: 6
     topk_sa: 100
     use_ms_deform_attn: true
+    use_neighborhood_attn: true
     use_rope: true
   decoder:
     layers: 6
-    cross_attn_type: "ms_deform_attn"
+    use_ms_deform_attn: true
+    use_neighborhood_attn: true
+    use_full_cross_attn: false    
     detach_updated_positions: true
     look_forward_twice: true
     use_rope: true

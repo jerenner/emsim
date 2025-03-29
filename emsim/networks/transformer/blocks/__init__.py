@@ -6,3 +6,4 @@ from .ms_deform_attn import (
     SparseDeformableAttentionBlock,
     SparseDeformableAttentionBlockWithRoPE,
 )
+from .neighborhood_attn import SparseNeighborhoodAttentionBlock

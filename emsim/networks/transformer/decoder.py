@@ -27,6 +27,7 @@ from .blocks import (
     FFNBlock,
     MultilevelCrossAttentionBlockWithRoPE,
     MultilevelSelfAttentionBlockWithRoPE,
+    SparseNeighborhoodAttentionBlock,
 )
 from ..segmentation_map import PatchedSegmentationMapPredictor
 
@@ -37,9 +38,12 @@ class TransformerDecoderLayer(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
-        cross_attn_type: str = "ms_deform_attn",
+        use_ms_deform_attn: bool = True,
         n_deformable_value_levels: int = 4,
         n_deformable_points: int = 4,
+        use_neighborhood_attn: bool = True,
+        neighborhood_sizes: list[int] = [3, 5, 7, 9],
+        use_full_cross_attn: bool = False,
         predict_box: bool = False,
         dropout: float = 0.1,
         activation_fn: Union[str, nn.Module] = "gelu",
@@ -53,7 +57,9 @@ class TransformerDecoderLayer(nn.Module):
         self.n_heads = n_heads
         self.dim_feedforward = dim_feedforward
         self.self_attn_rope = self_attn_use_rope
-        self.cross_attn_type = cross_attn_type
+        self.use_ms_deform_attn = use_ms_deform_attn
+        self.use_neighborhood_attn = use_neighborhood_attn
+        self.use_full_cross_attn = use_full_cross_attn
         self.use_rope = self_attn_use_rope
         self.predict_box = predict_box
 
@@ -72,8 +78,8 @@ class TransformerDecoderLayer(nn.Module):
             self.self_attn = SelfAttentionBlock(
                 d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
             )
-        if cross_attn_type == "ms_deform_attn":
-            self.cross_attn = SparseDeformableAttentionBlock(
+        if use_ms_deform_attn:
+            self.ms_deform_attn = SparseDeformableAttentionBlock(
                 d_model,
                 n_heads,
                 n_deformable_value_levels,
@@ -81,8 +87,23 @@ class TransformerDecoderLayer(nn.Module):
                 dropout,
                 norm_first,
             )
-        elif cross_attn_type == "multi_head_attn":
-            self.cross_attn = MultilevelCrossAttentionBlockWithRoPE(
+        else:
+            self.ms_deform_attn = None
+        if use_neighborhood_attn:
+            self.neighborhood_attn = SparseNeighborhoodAttentionBlock(
+                d_model,
+                n_heads,
+                n_deformable_value_levels,
+                neighborhood_sizes=neighborhood_sizes,
+                dropout=dropout,
+                bias=attn_proj_bias,
+                norm_first=norm_first,
+                rope_theta=rope_base_theta,
+            )
+        else:
+            self.neighborhood_attn = None
+        if use_full_cross_attn:
+            self.full_cross_attn = MultilevelCrossAttentionBlockWithRoPE(
                 d_model,
                 n_heads,
                 n_deformable_value_levels,
@@ -90,6 +111,8 @@ class TransformerDecoderLayer(nn.Module):
                 attn_proj_bias,
                 norm_first=norm_first,
             )
+        else:
+            self.full_cross_attn = None
         self.ffn = FFNBlock(
             d_model, dim_feedforward, dropout, activation_fn, norm_first
         )
@@ -140,9 +163,8 @@ class TransformerDecoderLayer(nn.Module):
                 attn_mask=attn_mask,
                 batch_offsets=batch_offsets,
             )
-
-        if self.cross_attn_type == "ms_deform_attn":
-            x = self.cross_attn(
+        if self.use_ms_deform_attn:
+            x = self.ms_deform_attn(
                 x,
                 query_pos_encoding,
                 query_normalized_xy_positions,
@@ -150,14 +172,16 @@ class TransformerDecoderLayer(nn.Module):
                 stacked_feature_maps,
                 spatial_shapes,
             )
-        elif self.cross_attn_type == "multi_head_attn":
-            # batched_values, value_indices, value_pad_mask = sparse_tensor_to_batched(
-            #     stacked_feature_maps
-            # )
-            # value_pos_normalized_xy = multilevel_normalized_xy(
-            #     stacked_feature_maps, spatial_shapes
-            # )
-            x = self.cross_attn(
+        if self.use_neighborhood_attn:
+            x = self.neighborhood_attn(
+                x,
+                query_positions_ij,
+                batch_offsets,
+                stacked_feature_maps,
+                spatial_shapes,
+            )
+        if self.use_full_cross_attn:
+            x = self.full_cross_attn(
                 query=x,
                 query_normalized_xy_positions=query_normalized_xy_positions,
                 query_batch_offsets=batch_offsets,
@@ -169,7 +193,12 @@ class TransformerDecoderLayer(nn.Module):
 
     def reset_parameters(self):
         self.self_attn.reset_parameters()
-        self.cross_attn.reset_parameters()
+        if hasattr(self.ms_deform_attn, "reset_parameters"):
+            self.ms_deform_attn.reset_parameters()
+        if hasattr(self.neighborhood_attn, "reset_parameters"):
+            self.neighborhood_attn.reset_parameters()
+        if hasattr(self.full_cross_attn, "reset_parameters"):
+            self.full_cross_attn.reset_parameters()
         self.ffn.reset_parameters()
 
 

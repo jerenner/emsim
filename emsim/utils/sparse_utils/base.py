@@ -148,12 +148,10 @@ def __flattened_indices(
 ) -> tuple[Tensor, Tensor, Tensor]:
     tensor_indices = tensor.indices()
     indices_to_flatten = tensor_indices[start_axis : end_axis + 1]
-    dim_sizes = (
-        torch.tensor(
-            tensor.shape[start_axis : end_axis + 1],
-            device=tensor.device,
-            dtype=torch.long,
-        ),
+    dim_sizes = torch.tensor(
+        tensor.shape[start_axis : end_axis + 1],
+        device=tensor.device,
+        dtype=torch.long,
     )
     dim_sizes_1 = torch.cat(
         [
@@ -207,8 +205,11 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
     tensor = tensor.coalesce()
 
     new_indices, new_shape, _ = __flattened_indices(tensor, start_axis, end_axis)
+    new_shape: list[int] = new_shape.tolist()
     return torch.sparse_coo_tensor(
-        new_indices, tensor.values(), new_shape.tolist(), is_coalesced=tensor.is_coalesced()
+        new_indices,
+        tensor.values(),
+        is_coalesced=tensor.is_coalesced(),
     )
 
 

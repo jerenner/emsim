@@ -406,7 +406,6 @@ class EMTransformerEncoder(nn.Module):
     def get_background_indices(stacked_feature_maps, foreground_indices):
         (
             linear_sparse_indices,
-            _,
             index_tensor_linearized,
         ) = linearize_sparse_and_index_tensors(stacked_feature_maps, foreground_indices)
         background_token_indices = ~torch.isin(

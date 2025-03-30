@@ -247,7 +247,7 @@ def unpack_sparse_tensors(batch: dict[str, Tensor]) -> dict[str, Tensor]:
 @torch.jit.script
 def linearize_sparse_and_index_tensors(
     sparse_tensor: Tensor, index_tensor: Tensor
-) -> tuple[Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
         if (
             sparse_tensor.sparse_dim() - 1 == index_tensor.shape[-1]
@@ -278,7 +278,6 @@ def linearize_sparse_and_index_tensors(
 
     return (
         sparse_tensor_indices_linear,
-        sparse_tensor.values(),
         index_tensor_linearized,
     )
 
@@ -338,7 +337,10 @@ def batch_sparse_index(
 
     sparse_dim = sparse_tensor.sparse_dim()
     dense_dim = sparse_tensor.dense_dim()
-    sparse_tensor_shape = torch._shape_as_tensor(sparse_tensor).to(device=index_tensor.device)
+    sparse_tensor_shape = torch._shape_as_tensor(sparse_tensor).to(
+        device=index_tensor.device
+    )
+    sparse_tensor_values = sparse_tensor.values()
 
     sparse_shape = sparse_tensor_shape[:sparse_dim]
 
@@ -348,10 +350,11 @@ def batch_sparse_index(
 
     # put dummy value of 0 in the OOB indices.
     # Maybe it'll make the linearization computations and searchsorted faster
-    index_tensor = index_tensor.clone().masked_fill_(out_of_bounds_indices.unsqueeze(-1), 0)
+    index_tensor = index_tensor.clone().masked_fill_(
+        out_of_bounds_indices.unsqueeze(-1), 0
+    )
     (
         sparse_tensor_indices_linearized,
-        sparse_tensor_values,
         index_tensor_linearized,
     ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
 
@@ -415,9 +418,9 @@ def scatter_to_sparse_tensor(
     assert index_tensor.shape[:-1] == values.shape[:-1]
     assert sparse_tensor.dense_dim() == values.ndim - 1
 
+    sparse_tensor_values = sparse_tensor.values()
     (
         sparse_tensor_indices_linearized,
-        sparse_tensor_values,
         index_tensor_linearized,
     ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
 

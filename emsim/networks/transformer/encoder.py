@@ -408,8 +408,6 @@ class EMTransformerEncoder(nn.Module):
             linear_sparse_indices,
             _,
             index_tensor_linearized,
-            _,
-            _,
         ) = linearize_sparse_and_index_tensors(stacked_feature_maps, foreground_indices)
         background_token_indices = ~torch.isin(
             linear_sparse_indices, index_tensor_linearized

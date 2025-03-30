@@ -26,7 +26,7 @@ def deconcat_add_batch_dim(
         padding_mask (Tensor): A boolean tensor of shape (batch_size, max_sequence_length)
             that is True at locations where `out` is padding
     """
-    if not tensor.ndim == 2:
+    if not tensor.ndim >= 2:
         raise ValueError(
             f"Expected tensor with at least 2 dimensions, got {tensor.ndim}"
         )

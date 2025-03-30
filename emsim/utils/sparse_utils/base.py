@@ -4,6 +4,7 @@ from typing import Optional, Union
 import sparse
 import torch
 from torch import Tensor
+import torch.nn.functional as F
 
 from ..batching_utils import (
     batch_dim_to_leading_index,
@@ -302,6 +303,60 @@ def __gather_nested_index(
 
 
 @torch.jit.script
+def _get_sparse_index_mapping(
+    sparse_tensor: Tensor, index_tensor: Tensor
+) -> tuple[Tensor, Tensor]:
+    """Finds the locations along a sparse tensor's values tensor for specified sparse indices"""
+    sparse_dim = sparse_tensor.sparse_dim()
+    sparse_tensor_shape = torch._shape_as_tensor(sparse_tensor).to(
+        device=index_tensor.device
+    )
+
+    sparse_shape = sparse_tensor_shape[:sparse_dim]
+
+    # Check for out of bounds indices (below 0 or outside tensor dim)
+    out_of_bounds_indices = torch.any(index_tensor < 0, -1)
+    out_of_bounds_indices.logical_or_(torch.any(index_tensor > sparse_shape, -1))
+
+    # put dummy value of 0 in the OOB indices.
+    # Maybe it'll make the linearization computations and searchsorted faster
+    index_tensor = index_tensor.clone().masked_fill_(
+        out_of_bounds_indices.unsqueeze(-1), 0
+    )
+    (
+        sparse_tensor_indices_linearized,
+        index_tensor_linearized,
+    ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
+
+    index_search = torch.searchsorted(
+        sparse_tensor_indices_linearized, index_tensor_linearized
+    ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
+
+    is_specified_mask: Tensor = (
+        sparse_tensor_indices_linearized[index_search] == index_tensor_linearized
+    )
+    is_specified_mask.logical_and_(~out_of_bounds_indices.view(-1))
+
+    return index_search, is_specified_mask
+
+
+@torch.jit.script
+def _gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor):
+    """Performs values[indices].masked_fill(mask, 0.0) efficiently"""
+    assert values.ndim == 2
+    assert indices.ndim == 1
+    assert indices.shape == mask.shape
+
+    # significantly faster than values[indices] for some reason
+    selected = torch.gather(
+        values, 0, indices.unsqueeze(-1).expand(-1, values.shape[-1])
+    )
+
+    selected.masked_fill(mask.unsqueeze(-1), 0.0)
+    return selected
+
+
+@torch.jit.script
 def batch_sparse_index(
     sparse_tensor: Tensor, index_tensor: Tensor, check_all_specified: bool = False
 ) -> tuple[Tensor, Tensor]:
@@ -334,46 +389,19 @@ def batch_sparse_index(
         # return __gather_nested_index(sparse_tensor, index_tensor, check_all_specified)
 
     sparse_tensor = sparse_tensor.coalesce()
-
-    sparse_dim = sparse_tensor.sparse_dim()
-    dense_dim = sparse_tensor.dense_dim()
-    sparse_tensor_shape = torch._shape_as_tensor(sparse_tensor).to(
-        device=index_tensor.device
-    )
     sparse_tensor_values = sparse_tensor.values()
+    dense_dim = sparse_tensor.dense_dim()
 
-    sparse_shape = sparse_tensor_shape[:sparse_dim]
-
-    # Check for out of bounds indices (below 0 or outside tensor dim)
-    out_of_bounds_indices = torch.any(index_tensor < 0, -1)
-    out_of_bounds_indices.logical_or_(torch.any(index_tensor > sparse_shape, -1))
-
-    # put dummy value of 0 in the OOB indices.
-    # Maybe it'll make the linearization computations and searchsorted faster
-    index_tensor = index_tensor.clone().masked_fill_(
-        out_of_bounds_indices.unsqueeze(-1), 0
+    index_search, is_specified_mask = _get_sparse_index_mapping(
+        sparse_tensor, index_tensor
     )
-    (
-        sparse_tensor_indices_linearized,
-        index_tensor_linearized,
-    ) = linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
+    if check_all_specified and not is_specified_mask.all():
+        raise ValueError(
+            "`check_all_specified` was set to True but not all gathered values "
+            "were specified"
+        )
 
-    index_search = torch.searchsorted(
-        sparse_tensor_indices_linearized, index_tensor_linearized
-    ).clamp_max(sparse_tensor_indices_linearized.shape[0] - 1)
-
-    is_specified_mask: Tensor = (
-        sparse_tensor_indices_linearized[index_search] == index_tensor_linearized
-    )
-    is_specified_mask.logical_and_(~out_of_bounds_indices.view(-1))
-
-    # significantly faster than sparse_tensor_vales[index_search] for some reason
-    selected = torch.gather(
-        sparse_tensor_values,
-        0,
-        index_search.unsqueeze(1).expand(-1, sparse_tensor_values.shape[-1]),
-    )
-    selected.masked_fill_(~is_specified_mask.unsqueeze(-1), 0.0)
+    selected = _gather_and_mask(sparse_tensor_values, index_search, ~is_specified_mask)
 
     out_shape = list(index_tensor.shape[:-1])
     if dense_dim > 0:
@@ -381,13 +409,124 @@ def batch_sparse_index(
     selected = selected.view(out_shape)
     is_specified_mask = is_specified_mask.view(out_shape[:-1])
 
+    return selected, is_specified_mask
+
+
+class GatherAndTransformFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        sparse_tensor_values: Tensor,
+        index_search: Tensor,
+        is_specified_mask: Tensor,
+        weight: Tensor,
+        bias: Optional[Tensor] = None,
+    ) -> Tensor:
+        """
+        Performs F.linear(sparse_tensor_values[index_search], weight, bias)
+        with minimal memory use.
+        """
+        selected = _gather_and_mask(
+            sparse_tensor_values, index_search, ~is_specified_mask
+        )
+        out = F.linear(selected, weight, bias)
+
+        ctx.save_for_backward(sparse_tensor_values, weight, bias)
+        ctx.index_search = index_search
+        ctx.is_specified_mask = is_specified_mask
+
+        return out
+
+    @staticmethod
+    def backward(ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor):
+        sparse_tensor_values, weight, bias = ctx.saved_tensors
+        index_search = ctx.index_search
+        is_specified_mask = ctx.is_specified_mask
+
+        grad_values: Optional[Tensor] = None
+        grad_weight: Optional[Tensor] = None
+        grad_bias: Optional[Tensor] = None
+
+        if bias is not None and ctx.needs_input_grad[4]:
+            grad_bias = grad_output.sum(0)
+
+        if ctx.needs_input_grad[3]:
+            selected = _gather_and_mask(
+                sparse_tensor_values, index_search, ~is_specified_mask
+            )
+            grad_weight = torch.mm(grad_output.t(), selected)
+
+        if ctx.needs_input_grad[0]:
+            grad_selected = torch.mm(grad_output, weight)
+            grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1))
+
+            grad_values = torch.zeros_like(sparse_tensor_values)
+            grad_values.index_add_(0, index_search, grad_selected)
+
+        return grad_values, None, None, grad_weight, grad_bias
+
+
+@torch.jit.script
+def batch_sparse_index_linear(
+    sparse_tensor: Tensor,
+    index_tensor: Tensor,
+    weight: Tensor,
+    bias: Optional[Tensor] = None,
+    check_all_specified: bool = False,
+) -> tuple[Tensor, Tensor]:
+    """Batch selection of elements from a torch sparse tensor. Should be
+    equivalent to sparse_tensor[index_tensor]. It works by flattening the sparse
+    tensor's sparse dims and the index tensor to 1D (and converting n-d indices
+    to raveled indices), then using searchsorted along the flattened sparse
+    tensor indices.
+
+    Args:
+        sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
+            S leading sparse dimensions and M is the dense dimension.
+        index_tensor (Tensor): Long tensor of dimension ..., S; where ... are
+            leading batch dimensions. Negative indices are not supported and will
+            be considered unspecified.
+        weight (Tensor): Weight matrix, of shape [out_dim, in_dim]
+        bias (Optional[Tensor]): Optional bias vector, of shape [out_dim]
+        check_all_specified (bool): If True, this function will raise a
+            ValueError if any of the indices in `index_tensor` are not specified
+            in `sparse_tensor`. If False, selections at unspecified indices will be
+            returned with padding values of 0. Defaults to False.
+
+    Returns:
+        Tensor: Tensor of dimension ..., M; where the leading dimensions are
+            the same as the batch dimensions from `index_tensor`.
+        Tensor: Boolean tensor of dimension ...; where each element is True if
+            the corresponding index is a specified (nonzero) element of the sparse
+            tensor and False if not.
+    """
+    if index_tensor.is_nested:
+        raise ValueError("Nested index tensor not supported")
+        # return __gather_nested_index(sparse_tensor, index_tensor, check_all_specified)
+
+    sparse_tensor = sparse_tensor.coalesce()
+    sparse_tensor_values = sparse_tensor.values()
+
+    index_search, is_specified_mask = _get_sparse_index_mapping(
+        sparse_tensor, index_tensor
+    )
     if check_all_specified and not is_specified_mask.all():
         raise ValueError(
             "`check_all_specified` was set to True but not all gathered values "
             "were specified"
         )
 
-    return selected, is_specified_mask
+    # Call into custom grad function
+    transformed = GatherAndTransformFunction.apply(
+        sparse_tensor_values, index_search, is_specified_mask, weight, bias
+    )
+
+    out_shape = list(index_tensor.shape[:-1])
+    out_shape.append(weight.size(0))
+    transformed = transformed.view(out_shape)
+    is_specified_mask = is_specified_mask.view(out_shape[:-1])
+
+    return transformed, is_specified_mask
 
 
 def scatter_to_sparse_tensor(

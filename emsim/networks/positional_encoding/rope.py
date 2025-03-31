@@ -93,9 +93,16 @@ class RoPEEncodingND(nn.Module):
         dtype=torch.float,
     ):
         super().__init__()
-        assert d_model % n_heads == 0
+        if d_model % n_heads != 0:
+            raise ValueError(
+                "Expected d_model to be divisible by n_heads, got "
+                f"{d_model} and {n_heads}"
+            )
         self.head_dim = d_model // n_heads
-        assert self.head_dim % 2 == 0
+        if self.head_dim % 2 != 0:
+            raise ValueError(
+                f"Expected head dim to be divisible by 2, got {self.head_dim}"
+            )
         self.pos_dim = position_dim
         self.d_model = d_model
         self.n_heads = n_heads
@@ -121,14 +128,14 @@ class RoPEEncodingND(nn.Module):
         query_pos: Tensor,
         key: Optional[Tensor] = None,
         key_pos: Optional[Tensor] = None,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> Union[Tensor, tuple[Tensor, Tensor]]:
         self.shape_check(query, query_pos)
         if query_pos.numel() > 0 and query_pos.max() <= 1.0:
             warnings.warn(
                 "Expected un-normalized (i.e., not inside [0,1]) coordinates "
-                "for position but found normalized coordinates. Did you accidentally "
-                "pass in normalized coordinates?\n"
-                f"Coord range: [{query_pos.min(), query_pos.max()}]"
+                "for position but found potentially normalized coordinates. "
+                "Did you accidentally pass in normalized coordinates?\n"
+                f"(Your coord range: [{query_pos.min(), query_pos.max()}])"
             )
         if key_pos is not None:
             self.shape_check(key, key_pos)
@@ -167,15 +174,35 @@ class RoPEEncodingND(nn.Module):
         return torch.view_as_real(query_or_key * rot_vec).flatten(-2)
 
     def shape_check(self, query_or_key: Tensor, query_or_key_pos: Tensor):
-        assert query_or_key.ndim == query_or_key_pos.ndim  # ..., seq_len, d_model
-        # assert query_or_key_pos.ndim == 3  # batch, seq_len, pos_dim
-        assert query_or_key.shape[-1] == self.d_model
-        assert query_or_key_pos.shape[-1] == self.pos_dim
-        assert query_or_key.shape[:-1] == query_or_key_pos.shape[:-1]
+        if query_or_key.ndim != query_or_key_pos.ndim:  # ..., seq_len, d_model
+            raise ValueError(
+                "Expected query_or_key and query_or_key_pos to have same number "
+                f"of dimensions, got {query_or_key.ndim} and {query_or_key_pos.ndim}"
+            )
+        if query_or_key.shape[-1] != self.d_model:
+            raise ValueError(
+                "Expected query_or_key to have last dim equal to d_model "
+                f"(={self.d_model}), got {query_or_key.shape[-1]}"
+            )
+        if query_or_key_pos.shape[-1] != self.pos_dim:
+            raise ValueError(
+                "Expected query_or_key_pos to have last dim equal to pos_dim "
+                f"(={self.pos_dim}), got {query_or_key_pos.shape[-1]}"
+            )
+        if query_or_key.shape[:-1] != query_or_key_pos.shape[:-1]:
+            raise ValueError(
+                "Expected query_or_key and query_or_key_pos to have matching leading dims,"
+                f" got {query_or_key.shape[:-1]} and {query_or_key_pos.shape[:-1]}"
+            )
 
     def reset_parameters(self):
         freqs = init_nd_freqs(
-            self.pos_dim, self.head_dim, self.n_heads, self._base_theta
+            self.pos_dim,
+            self.head_dim,
+            self.n_heads,
+            self._base_theta,
+            dtype=self.freqs.dtype,
+            device=self.freqs.device,
         )
         with torch.no_grad():
             self.freqs.copy_(freqs)
@@ -187,16 +214,27 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
         position_dim: int,
         d_model: int,
         n_heads: int,
-        pos_dim_to_rope_dim: Union[Tensor, list[int]],
+        pos_dim_to_rope_group: Union[Tensor, list[int]],
         rope_base_theta: float = 10.0,
         dtype=torch.float,
     ):
-        self.pos_dim_to_rope_group = torch.as_tensor(pos_dim_to_rope_dim)
-        assert self.pos_dim_to_rope_group.ndim == 1
-        assert len(self.pos_dim_to_rope_group) == position_dim
+        self.pos_dim_to_rope_group = torch.as_tensor(pos_dim_to_rope_group)
+        if self.pos_dim_to_rope_group.ndim != 1:
+            raise ValueError(
+                f"Expected 1D pos_dim_to_rope_group, got {pos_dim_to_rope_group.ndim}"
+            )
+        if len(self.pos_dim_to_rope_group) != position_dim:
+            raise ValueError(
+                "Expected pos_dim_to_rope_group to have length equal to position_dim,"
+                f" got {len(self.pos_dim_to_rope_group)} and {position_dim}"
+            )
         self.n_freq_groups = len(self.pos_dim_to_rope_group.unique())
         super().__init__(position_dim, d_model, n_heads, rope_base_theta, dtype)
-        assert self.head_dim % self.n_freq_groups == 0
+        if self.head_dim % self.n_freq_groups != 0:
+            raise ValueError(
+                "head_dim must be divisible by number of freq groups, got "
+                f"{self.head_dim} and {self.n_freq_groups}"
+            )
 
     def _init_freq_param(self):
         freqs = init_nd_freqs(
@@ -245,6 +283,8 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
             self.head_dim // self.n_freq_groups,
             self.n_heads,
             self._base_theta,
+            dtype=self.freqs.dtype,
+            device=self.freqs.device,
         )
         with torch.no_grad():
             self.freqs.copy_(freqs)

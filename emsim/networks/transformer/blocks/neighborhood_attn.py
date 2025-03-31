@@ -6,6 +6,7 @@ from torch import Tensor, nn
 from .rope import RoPEEncodingNDGroupedFreqs, prep_multilevel_positions
 from emsim.utils.sparse_utils import (
     batch_sparse_index,
+    batch_sparse_index_linear,
     batch_offsets_from_sparse_tensor_indices,
 )
 from emsim.utils.batching_utils import (
@@ -64,23 +65,28 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         assert query_positions_bijl.shape == (query.shape[0], 4)
         n_queries = query.shape[0]
 
+        residual = query
+        if self.norm_first:
+            query = self.norm(query)
+        q = self.q_in_proj(query)
+
         # gather the neighborhood of each query
         value_bijl = get_multilevel_neighborhood(
             query_positions_bijl, level_spatial_shapes, self.neighborhood_sizes
         )
         keys_per_query = sum(self.neighborhood_sizes**2)
         assert value_bijl.shape == (n_queries, keys_per_query, 4)
-        value, value_is_specified = batch_sparse_index(
-            stacked_feature_maps, value_bijl
-        )
-        assert value.shape == (n_queries, keys_per_query, self.d_model)
-        assert value_is_specified.shape == (n_queries, keys_per_query)
 
-        residual = query
-        if self.norm_first:
-            query = self.norm(query)
-        q = self.q_in_proj(query)
-        k, v = self.kv_in_proj(value).chunk(2, dim=-1)
+        kv, value_is_specified = batch_sparse_index_linear(
+            stacked_feature_maps,
+            value_bijl,
+            weight=self.kv_in_proj.weight,
+            bias=self.kv_in_proj.bias,
+        )
+        k, v = kv.chunk(2, dim=-1)
+
+        assert v.shape == (n_queries, keys_per_query, self.d_model)
+        assert value_is_specified.shape == (n_queries, keys_per_query)
 
         query_ijl = prep_multilevel_positions(
             query_positions_bijl, level_spatial_shapes

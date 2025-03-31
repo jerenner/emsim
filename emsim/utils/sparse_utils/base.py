@@ -199,52 +199,6 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
     )
 
 
-def unpack_sparse_tensors(batch: dict[str, Tensor]) -> dict[str, Tensor]:
-    """
-    Takes in a batch dict and converts packed sparse tensors (with separate
-    indices and values tensors, and shape tuple) into sparse torch.Tensors
-
-    Args:
-        batch (dict[str, Tensor]): Input batch dict
-
-    Returns:
-        dict[str, Tensor]: Input batch dict with sparse tensors unpacked into
-        sparse torch.Tensor format
-    """
-    prefixes_indices = [
-        match[0]
-        for match in [re.match(".+(?=_indices$)", key) for key in batch.keys()]
-        if match is not None
-    ]
-    prefixes_values = [
-        match[0]
-        for match in [re.match(".+(?=_values$)", key) for key in batch.keys()]
-        if match is not None
-    ]
-    prefixes_shape = [
-        match[0]
-        for match in [re.match(".+(?=_shape$)", key) for key in batch.keys()]
-        if match is not None
-    ]
-    prefixes = list(set(prefixes_indices) & set(prefixes_values) & set(prefixes_shape))
-    for prefix in prefixes:
-        assert not batch[prefix + "_values"].requires_grad
-        shape = batch[prefix + "_shape"]
-        if isinstance(shape, Tensor):
-            shape = shape.tolist()
-        batch[prefix] = torch.sparse_coo_tensor(
-            batch[prefix + "_indices"],
-            batch[prefix + "_values"],
-            shape,
-            dtype=batch[prefix + "_values"].dtype,
-            device=batch[prefix + "_values"].device,
-        ).coalesce()
-        del batch[prefix + "_indices"]
-        del batch[prefix + "_values"]
-        del batch[prefix + "_shape"]
-    return batch
-
-
 @torch.jit.script
 def linearize_sparse_and_index_tensors(
     sparse_tensor: Tensor, index_tensor: Tensor
@@ -352,7 +306,7 @@ def _gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor):
         values, 0, indices.unsqueeze(-1).expand(-1, values.shape[-1])
     )
 
-    selected.masked_fill(mask.unsqueeze(-1), 0.0)
+    selected.masked_fill_(mask.unsqueeze(-1), 0.0)
     return selected
 
 
@@ -443,9 +397,9 @@ class GatherAndTransformFunction(torch.autograd.Function):
         index_search = ctx.index_search
         is_specified_mask = ctx.is_specified_mask
 
-        grad_values: Optional[Tensor] = None
-        grad_weight: Optional[Tensor] = None
-        grad_bias: Optional[Tensor] = None
+        grad_values = None
+        grad_weight = None
+        grad_bias = None
 
         if bias is not None and ctx.needs_input_grad[4]:
             grad_bias = grad_output.sum(0)
@@ -838,3 +792,49 @@ def nested_flattened_tensors_to_sparse_tensors(
         )
     ]
     return out
+
+
+def unpack_sparse_tensors(batch: dict[str, Tensor]) -> dict[str, Tensor]:
+    """
+    Takes in a batch dict and converts packed sparse tensors (with separate
+    indices and values tensors, and shape tuple) into sparse torch.Tensors
+
+    Args:
+        batch (dict[str, Tensor]): Input batch dict
+
+    Returns:
+        dict[str, Tensor]: Input batch dict with sparse tensors unpacked into
+        sparse torch.Tensor format
+    """
+    prefixes_indices = [
+        match[0]
+        for match in [re.match(".+(?=_indices$)", key) for key in batch.keys()]
+        if match is not None
+    ]
+    prefixes_values = [
+        match[0]
+        for match in [re.match(".+(?=_values$)", key) for key in batch.keys()]
+        if match is not None
+    ]
+    prefixes_shape = [
+        match[0]
+        for match in [re.match(".+(?=_shape$)", key) for key in batch.keys()]
+        if match is not None
+    ]
+    prefixes = list(set(prefixes_indices) & set(prefixes_values) & set(prefixes_shape))
+    for prefix in prefixes:
+        assert not batch[prefix + "_values"].requires_grad
+        shape = batch[prefix + "_shape"]
+        if isinstance(shape, Tensor):
+            shape = shape.tolist()
+        batch[prefix] = torch.sparse_coo_tensor(
+            batch[prefix + "_indices"],
+            batch[prefix + "_values"],
+            shape,
+            dtype=batch[prefix + "_values"].dtype,
+            device=batch[prefix + "_values"].device,
+        ).coalesce()
+        del batch[prefix + "_indices"]
+        del batch[prefix + "_values"]
+        del batch[prefix + "_shape"]
+    return batch

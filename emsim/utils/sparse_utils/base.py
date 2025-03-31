@@ -274,9 +274,8 @@ def _get_sparse_index_mapping(
 
     # put dummy value of 0 in the OOB indices.
     # Maybe it'll make the linearization computations and searchsorted faster
-    index_tensor = index_tensor.clone().masked_fill_(
-        out_of_bounds_indices.unsqueeze(-1), 0
-    )
+    # without requiring a cpu sync to pull them out of the tensor
+    index_tensor = index_tensor.masked_fill(out_of_bounds_indices.unsqueeze(-1), 0)
     (
         sparse_tensor_indices_linearized,
         index_tensor_linearized,

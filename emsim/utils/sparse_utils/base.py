@@ -296,7 +296,7 @@ def _get_sparse_index_mapping(
 
 @torch.jit.script
 def _gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor):
-    """Performs values[indices].masked_fill(mask, 0.0) efficiently"""
+    """Performs values[indices].masked_fill(mask, 0) efficiently"""
     assert values.ndim == 2
     assert indices.ndim == 1
     assert indices.shape == mask.shape
@@ -306,7 +306,7 @@ def _gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor):
         values, 0, indices.unsqueeze(-1).expand(-1, values.shape[-1])
     )
 
-    selected.masked_fill_(mask.unsqueeze(-1), 0.0)
+    selected.masked_fill_(mask.unsqueeze(-1), 0)
     return selected
 
 
@@ -428,11 +428,15 @@ def batch_sparse_index_linear(
     bias: Optional[Tensor] = None,
     check_all_specified: bool = False,
 ) -> tuple[Tensor, Tensor]:
-    """Batch selection of elements from a torch sparse tensor. Should be
-    equivalent to sparse_tensor[index_tensor]. It works by flattening the sparse
-    tensor's sparse dims and the index tensor to 1D (and converting n-d indices
-    to raveled indices), then using searchsorted along the flattened sparse
-    tensor indices.
+    """Batch selection of elements from a torch sparse tensor followed by a.
+    linear transformation. Should be equivalent to
+    F.linear(sparse_tensor[index_tensor], weight, bias). It works by flattening
+    the sparse tensor's sparse dims and the index tensor to 1D
+    (and converting n-d indices to raveled indices), then using searchsorted
+    along the flattened sparse tensor indices. Then, the retrieved values are
+    linearly transformed according to the input weight and optional bias in
+    a custom autograd function to avoid storing an extra tensor of the retrieved
+    sparse values.
 
     Args:
         sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are

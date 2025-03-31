@@ -412,7 +412,7 @@ class GatherAndTransformFunction(torch.autograd.Function):
 
         if ctx.needs_input_grad[0]:
             grad_selected = torch.mm(grad_output, weight)
-            grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1))
+            grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1), 0)
 
             grad_values = torch.zeros_like(sparse_tensor_values)
             grad_values.index_add_(0, index_search, grad_selected)

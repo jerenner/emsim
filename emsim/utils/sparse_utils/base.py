@@ -474,7 +474,9 @@ class GatherAndLinearFunction(torch.autograd.Function):
 
     @staticmethod
     @torch.autograd.function.once_differentiable
-    def backward(ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor):
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor
+    ) -> tuple[Optional[Tensor], ...]:
         sparse_tensor_values, weight, bias = ctx.saved_tensors
         index_search = ctx.index_search
         is_specified_mask = ctx.is_specified_mask
@@ -642,7 +644,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         head_dim: int,
         batch_size: int,
         n_queries: int,
-    ):
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Computes the key and value tensor and reshapes them and the query tensor
 
@@ -684,7 +686,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         bias_k: Optional[Tensor] = None,
         bias_v: Optional[Tensor] = None,
         scale_factor: float = None,  # scaling for attn, default 1/sqrt(d)
-    ):
+    ) -> Tensor:
         """Performs sparse neighborhood attention with minimal memory use"""
         ctx.set_materialize_grads(False)
 
@@ -755,7 +757,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
     @staticmethod
     @torch.autograd.function.once_differentiable
-    def backward(ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor):
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor
+    ) -> tuple[Optional[Tensor], ...]:
         """Implements the backward pass for sparse neighborhood attn"""
 
         # retrieve tensors
@@ -805,22 +809,31 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         # reshape the grad output tensor to compute-friendly form
         # (flatten batch dims and split heads)
-        grad_output_reshaped = grad_output.reshape(
-            batch_size, n_queries, n_heads, head_dim
-        )
-
+        grad_output = grad_output.reshape(batch_size, n_queries, n_heads, head_dim)
         # (batch, n_heads, n_queries, head_dim)
-        grad_output_reshaped = grad_output_reshaped.permute(0, 2, 1, 3)
+        grad_output = grad_output.permute(0, 2, 1, 3)
 
-        # fmt: off
-        if needs_grad_query or needs_grad_sparse_values or needs_grad_Wk or needs_grad_Wv:
+        if (
+            needs_grad_query
+            or needs_grad_sparse_values
+            or needs_grad_Wk
+            or needs_grad_Wv
+            or needs_grad_bias_k
+            or needs_grad_bias_v
+        ):
+            # fmt: off
             grad_attn_weights = torch.matmul(
-                grad_output_reshaped.unsqueeze(-2), # (batch, n_heads, n_queries, 1, head_dim)
-                v.transpose(-1, -2),                # (batch, n_heads, n_queries, head_dim, n_keys_per_query)
-            ).squeeze(3)                            # (batch, n_heads, n_queries, n_keys_per_query)
+                grad_output.unsqueeze(-2), # (batch, n_heads, n_queries, 1, head_dim)
+                v.transpose(-1, -2),       # (batch, n_heads, n_queries, head_dim, n_keys_per_query)
+            ).squeeze(3)                   # (batch, n_heads, n_queries, n_keys_per_query)
             # fmt: on
+
+            # softmax gradient: dL/dz = S * (dL/dS - sum_j(S_j * dL/dS_j))
+            # where z = attn_scores, S = softmax(z), dL/dS = grad_attn_weights
+            # and j indexes keys
             grad_attn_scores = attn_weights * (
-                grad_attn_weights - (attn_weights * grad_attn_weights).sum(-1, keepdim=True)
+                grad_attn_weights
+                - (attn_weights * grad_attn_weights).sum(-1, keepdim=True)
             )
             grad_attn_scores.masked_fill_(~expanded_mask, 0)
         del v  # big tensor we no longer need
@@ -840,33 +853,51 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             # fmt: on
         del k
 
-        if needs_grad_sparse_values or needs_grad_Wk or needs_grad_Wv:
-            # fmt: off
-            grad_v = torch.matmul(
-                attn_weights.unsqueeze(-1),        # (batch, n_heads, n_queries, n_keys_per_query, 1)
-                grad_output_reshaped.unsqueeze(-2) # (batch, n_heads, n_queries, 1, head_dim)
-            )                                      # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
+        if (
+            needs_grad_sparse_values
+            or needs_grad_Wk
+            or needs_grad_Wv
+            or needs_grad_bias_k
+            or needs_grad_bias_v
+        ):
+            if needs_grad_sparse_values or needs_grad_Wk or needs_grad_bias_k:
+                # fmt: off
+                grad_k = torch.matmul(
+                    grad_attn_scores.unsqueeze(-1), # (batch, n_heads, n_queries, n_keys_per_query, 1)
+                    q.unsqueeze(-2) * scale_factor, # (batch, n_heads, n_queries, 1, head_dim)
+                )                                   # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
+                # fmt: on
 
-            grad_k = torch.matmul(
-                grad_attn_scores.unsqueeze(-1), # (batch, n_heads, n_queries, n_keys_per_query, 1)
-                q.unsqueeze(-2) * scale_factor, # (batch, n_heads, n_queries, 1, head_dim)
-            )                                   # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
-            # fmt: on
+                # (batch, n_queries, n_keys_per_query, n_heads, head_dim)
+                grad_k = grad_k.permute(0, 2, 3, 1, 4)
+                grad_k = grad_k.reshape(
+                    batch_size, n_queries, n_keys_per_query, embed_dim
+                )
+
+                # Flatten to multiply with selected
+                grad_k_flat = grad_k.view(-1, embed_dim)
+            del grad_attn_scores
             del q
 
-            # (batch, n_queries, n_keys_per_query, n_heads, head_dim)
-            grad_k = grad_k.permute(0, 2, 3, 1, 4)
-            grad_v = grad_v.permute(0, 2, 3, 1, 4)
+            if needs_grad_sparse_values or needs_grad_Wv or needs_grad_bias_v:
+                # fmt: off
+                grad_v = torch.matmul(
+                    attn_weights.unsqueeze(-1), # (batch, n_heads, n_queries, n_keys_per_query, 1)
+                    grad_output.unsqueeze(-2)   # (batch, n_heads, n_queries, 1, head_dim)
+                )                               # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
+                # fmt: on
 
-            grad_k = grad_k.reshape(batch_size, n_queries, n_keys_per_query, embed_dim)
-            grad_v = grad_v.reshape(batch_size, n_queries, n_keys_per_query, embed_dim)
+                # (batch, n_queries, n_keys_per_query, n_heads, head_dim)
+                grad_v = grad_v.permute(0, 2, 3, 1, 4)
+                grad_v = grad_v.reshape(
+                    batch_size, n_queries, n_keys_per_query, embed_dim
+                )
 
-            # Flatten to multiply with selected
-            grad_k_flat = grad_k.view(-1, embed_dim)
-            grad_v_flat = grad_v.view(-1, embed_dim)
+                # Flatten to multiply with selected
+                grad_v_flat = grad_v.view(-1, embed_dim)
 
             if needs_grad_Wk or needs_grad_Wv:
-                selected_t = selected.t()
+                selected_t = selected.t().contiguous()
 
                 if needs_grad_Wk:
                     grad_Wk = torch.matmul(selected_t, grad_k_flat)
@@ -882,9 +913,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 grad_bias_v = grad_v_flat.sum(0)
 
             if needs_grad_sparse_values:
-                grad_stacked = torch.stack([grad_k_flat, grad_v_flat])
+                # two matrix multiplies - faster if we batch them
+                grad_k_v_stacked = torch.stack([grad_k_flat, grad_v_flat])
                 W_t_stacked = torch.stack([Wk, Wv]).transpose(-1, -2)
-                grad_selected = torch.bmm(grad_stacked, W_t_stacked).sum(0)
+                grad_selected = torch.bmm(grad_k_v_stacked, W_t_stacked).sum(0)
 
                 # Zero out grads for masked selecteds
                 grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1), 0)
@@ -894,16 +926,16 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 grad_sparse_values.index_add_(0, index_search, grad_selected)
 
         return (
-            grad_query,          # query_tensor
-            None,                # n_keys_per_query
-            None,                # n_heads
+            grad_query,  # query_tensor
+            None,  # n_keys_per_query
+            None,  # n_heads
             grad_sparse_values,  # sparse_tensor_values
-            None,                # index_search
-            None,                # is_specified_mask
-            grad_Wk,             # Wk
-            grad_Wv,             # Wv
-            grad_bias_k,         # bias_k
-            grad_bias_v,         # bias_v
+            None,  # index_search
+            None,  # is_specified_mask
+            grad_Wk,  # Wk
+            grad_Wv,  # Wv
+            grad_bias_k,  # bias_k
+            grad_bias_v,  # bias_v
             None,
         )
 

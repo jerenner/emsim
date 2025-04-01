@@ -147,30 +147,46 @@ def sparse_flatten_hw(tensor: Tensor) -> Tensor:
 def __flattened_indices(
     tensor: Tensor, start_axis: int, end_axis: int
 ) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Converts a sparse tensor's multidimensional indices to linearized indices
+    by flattening dimensions from start_axis to end_axis.
+    """
     tensor_indices = tensor.indices()
     indices_to_flatten = tensor_indices[start_axis : end_axis + 1]
 
+    # convert shape to tensor since we will be doing math on it.
+    # it needs to be on the same device as the sparse tensor rather than
+    # staying on cpu because downstream tensors will be interacting with
+    # the sparse tensor's indices tensor
     shape = torch._shape_as_tensor(tensor).to(tensor.device)
+
+    # concatenate a 1 onto the end of the dimensions to be flattened since
+    # the trailing dimension will have a stride of 1
     dim_sizes_1 = torch.cat(
         [
-            shape[start_axis : end_axis + 1],
+            shape[start_axis + 1 : end_axis + 1],
             torch.ones(1, device=tensor.device, dtype=torch.long),
         ]
     )
 
-    # reverse cumprod
-    dim_linear_offsets = dim_sizes_1.flip([0]).cumprod(0).flip([0])[1:]
+    # calculate linear offsets for each multidimensional axis's step
+    # i.e., for dims [d0, d1, d2], the offsets would be [d1*d2, d2, 1].
+    # we accomplish this with a reversed cumprod
+    dim_linear_offsets = dim_sizes_1.flip([0]).cumprod(0).flip([0])
 
-    # compute strided 1D indices over the flattened dims
-    flattened_indices = (indices_to_flatten * dim_linear_offsets.unsqueeze(-1)).sum(
-        0, keepdim=True
-    )
+    # compute strided 1D indices over the flattened dims by summing each axis's
+    # individual contribution
+    flattened_indices = indices_to_flatten * dim_linear_offsets.unsqueeze(-1)
+    flattened_indices = flattened_indices.sum(0, keepdim=True)
 
+    # make new shape with the flattened axes stacked together
     new_shape = torch.cat(
         [shape[:start_axis], dim_sizes_1.prod(0, keepdim=True), shape[end_axis + 1 :]]
     )
+    # this assertion shouldn't cause a cpu sync
     assert new_shape.size(0) == tensor.ndim - (end_axis - start_axis)
 
+    # plug the flattened indices into the existing indices
     new_indices = torch.cat(
         [tensor_indices[:start_axis], flattened_indices, tensor_indices[end_axis + 1 :]]
     )
@@ -195,7 +211,7 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
         new_indices,
         tensor.values(),
         new_shape,
-        is_coalesced=tensor.is_coalesced(),
+        is_coalesced=tensor.is_coalesced(),  # indices still unique and in correct order
     )
 
 
@@ -203,15 +219,37 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
 def linearize_sparse_and_index_tensors(
     sparse_tensor: Tensor, index_tensor: Tensor
 ) -> tuple[Tensor, Tensor]:
+    """Converts multidimensional indices of a sparse tensor and a tensor of indices
+    that we want to retrieve to a shared linearized (flattened) format suitable
+    for fast lookup.
+
+    Args:
+        sparse_tensor (Tensor): torch.sparse_coo_tensor with indices to linearize.
+        index_tensor (Tensor): Dense tensor with indices matching sparse_tensor's
+            sparse dims. Can be of any dimension as long as the last dimension
+            has length equal to the sparse tensor's sparse dimension.
+
+    Raises:
+        ValueError: If the index tensor has a different last dimension than the
+            sparse tensor's sparse dim.
+
+    Returns:
+        sparse_tensor_indices_linear (Tensor): Linearized version of
+            sparse_tensor.indices().
+        index_tensor_linearized (Tensor): Linearized version of index_tensor
+            with the last dimension squeezed out.
+    """
     if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
         if (
             sparse_tensor.sparse_dim() - 1 == index_tensor.shape[-1]
             and sparse_tensor.shape[-1] == 1
             and sparse_tensor.dense_dim() == 0
         ):
+            # handle case where there's a length-1 trailing sparse dim and the
+            # index tensor ignores it
             sparse_tensor = sparse_tensor[..., 0].coalesce()
         else:
-            # build error like this because of torchscript not liking f strings
+            # build error str like this because of torchscript not liking f strings
             error_str = "Expected last dim of `index_tensor` to be the same as "
             error_str += "`sparse_tensor.sparse_dim()`, got "
             error_str += str(index_tensor.shape[-1])
@@ -220,15 +258,13 @@ def linearize_sparse_and_index_tensors(
             error_str += ", respectively."
             raise ValueError(error_str)
 
-    if index_tensor.shape[-1] != sparse_tensor.sparse_dim():
-        assert index_tensor.shape[-1] == sparse_tensor.sparse_dim() - 1
-        index_tensor = batch_dim_to_leading_index(index_tensor)
-
     sparse_tensor_indices_linear, _, dim_linear_offsets = __flattened_indices(
         sparse_tensor, 0, sparse_tensor.sparse_dim() - 1
     )
     sparse_tensor_indices_linear.squeeze_(0)
 
+    # repeat the index flattening for the index tensor. The sparse tensor's indices
+    # were already flattened in __flattened_indices
     index_tensor_linearized = (index_tensor * dim_linear_offsets).sum(-1).view(-1)
 
     return (

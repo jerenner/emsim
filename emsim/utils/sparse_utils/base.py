@@ -368,12 +368,15 @@ def get_sparse_index_mapping(
 def _gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
     """Performs values[indices].masked_fill(mask, 0) efficiently"""
     if values.ndim != 2:
-        raise ValueError(f"Expected values to be 2D, got shape {values.shape}")
+        error_str = "Expected values to be 2D, got shape "
+        error_str += str(values.shape)
+        raise ValueError(error_str)
     if indices.shape != mask.shape:
-        raise ValueError(
-            "Expected indices and mask to have same shape, got "
-            f"{indices.shape} and {mask.shape}"
-        )
+        error_str = "Expected indices and mask to have same shape, got "
+        error_str += str(indices.shape)
+        error_str += " and "
+        error_str += str(mask.shape)
+        raise ValueError(error_str)
 
     indices_flat = indices.reshape(-1)
     mask_flat = mask.reshape(-1)
@@ -385,7 +388,8 @@ def _gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
 
     selected.masked_fill_(mask_flat.unsqueeze(-1), 0)
 
-    selected = selected.reshape(*indices.shape, values.shape[-1])
+    new_shape = indices.shape + (values.shape[-1],)
+    selected = selected.reshape(new_shape)
     return selected
 
 
@@ -436,9 +440,8 @@ def batch_sparse_index(
     out_shape = list(index_tensor.shape[:-1])
     if dense_dim > 0:
         out_shape.extend(sparse_tensor.shape[-dense_dim:])
-    out_shape = tuple(out_shape)
-    assert selected.shape == out_shape
-    assert is_specified_mask.shape == out_shape[:-1]
+    assert list(selected.shape) == out_shape
+    assert list(is_specified_mask.shape) == out_shape[:-1]
     # selected = selected.view(out_shape)
     # is_specified_mask = is_specified_mask.view(out_shape[:-1])
 
@@ -485,21 +488,22 @@ class GatherAndLinearFunction(torch.autograd.Function):
         grad_weight = None
         grad_bias = None
 
-        if bias is not None and ctx.needs_input_grad[4]:
-            grad_bias = grad_output.sum(0)
+        if grad_output is not None:
+            if bias is not None and ctx.needs_input_grad[4]:
+                grad_bias = grad_output.sum(0)
 
-        if ctx.needs_input_grad[3]:
-            selected = _gather_and_mask(
-                sparse_tensor_values, index_search, ~is_specified_mask
-            )
-            grad_weight = torch.mm(grad_output.t(), selected)
+            if ctx.needs_input_grad[3]:
+                selected = _gather_and_mask(
+                    sparse_tensor_values, index_search, ~is_specified_mask
+                )
+                grad_weight = torch.mm(grad_output.t(), selected)
 
-        if ctx.needs_input_grad[0]:
-            grad_selected = torch.mm(grad_output, weight)
-            grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1), 0)
+            if ctx.needs_input_grad[0]:
+                grad_selected = torch.mm(grad_output, weight)
+                grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1), 0)
 
-            grad_values = torch.zeros_like(sparse_tensor_values)
-            grad_values.index_add_(0, index_search, grad_selected)
+                grad_values = torch.zeros_like(sparse_tensor_values)
+                grad_values.index_add_(0, index_search, grad_selected)
 
         return grad_values, None, None, grad_weight, grad_bias
 
@@ -563,9 +567,8 @@ def batch_sparse_index_linear(
 
     out_shape = list(index_tensor.shape[:-1])
     out_shape.append(weight.size(0))
-    out_shape = tuple(out_shape)
-    assert transformed.shape == out_shape
-    assert is_specified_mask.shape == out_shape[:-1]
+    assert list(transformed.shape) == out_shape
+    assert list(is_specified_mask.shape) == out_shape[:-1]
     # transformed = transformed.view(out_shape)
     # is_specified_mask = is_specified_mask.view(out_shape[:-1])
 

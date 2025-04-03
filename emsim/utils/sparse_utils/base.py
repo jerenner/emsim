@@ -365,8 +365,11 @@ def get_sparse_index_mapping(
 
 
 @torch.jit.script
-def _gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
-    """Performs values[indices].masked_fill(mask, 0) efficiently"""
+def _gather_and_mask(
+    values: Tensor, indices: Tensor, mask: Tensor, mask_inplace: bool = True
+) -> Tensor:
+    """Performs values[indices].masked_fill(mask, 0) efficiently.
+    Set mask_inplace=False if you need the selected values to be backproppable."""
     if values.ndim != 2:
         error_str = "Expected values to be 2D, got shape "
         error_str += str(values.shape)
@@ -383,10 +386,13 @@ def _gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
 
     # significantly faster than values[indices] for some reason
     selected = torch.gather(
-        values, 0, indices_flat.unsqueeze(-1).expand(-1, values.shape[-1])
+        values, 0, indices_flat.unsqueeze(-1).expand(-1, values.size(-1))
     )
 
-    selected.masked_fill_(mask_flat.unsqueeze(-1), 0)
+    if mask_inplace:
+        selected.masked_fill_(mask_flat.unsqueeze(-1), 0)
+    else:
+        selected = selected.masked_fill(mask_flat.unsqueeze(-1), 0)
 
     new_shape = indices.shape + (values.shape[-1],)
     selected = selected.reshape(new_shape)
@@ -575,62 +581,6 @@ def batch_sparse_index_linear(
     return transformed, is_specified_mask
 
 
-@torch.jit.script
-def batch_sparse_index_subset_attn(
-    sparse_tensor: Tensor,
-    index_tensor: Tensor,
-    query_tensor: Tensor,
-    n_heads: int,
-    key_weight: Tensor,
-    value_weight: Tensor,
-    key_bias: Optional[Tensor] = None,
-    value_bias: Optional[Tensor] = None,
-    scale_factor: Optional[float] = None,
-    check_all_specified: bool = False,
-):
-    if index_tensor.is_nested:
-        raise ValueError("Nested index tensor not supported")
-        # return __gather_nested_index(sparse_tensor, index_tensor, check_all_specified)
-
-    sparse_tensor = sparse_tensor.coalesce()
-    sparse_tensor_values = sparse_tensor.values()
-
-    n_keys_per_query = index_tensor.size(-2)
-    index_search, is_specified_mask = get_sparse_index_mapping(
-        sparse_tensor, index_tensor
-    )
-    if check_all_specified and not is_specified_mask.all():
-        raise ValueError(
-            "`check_all_specified` was set to True but not all gathered values "
-            "were specified"
-        )
-
-    # Call into custom grad function
-    attended = GatherAndSubsetAttentionFunction.apply(
-        query_tensor,
-        n_keys_per_query,
-        n_heads,
-        sparse_tensor_values,
-        index_search,
-        is_specified_mask,
-        key_weight,
-        value_weight,
-        key_bias,
-        value_bias,
-        scale_factor,
-    )
-
-    out_shape = list(index_tensor.shape[:-1])
-    out_shape.append(value_weight.size(0))
-    out_shape = tuple(out_shape)
-    assert attended.shape == out_shape
-    assert is_specified_mask.shape == out_shape[:-1]
-    # attended = attended.view(out_shape)
-    # is_specified_mask = is_specified_mask.view(out_shape[:-1])
-
-    return attended, is_specified_mask
-
-
 class GatherAndSubsetAttentionFunction(torch.autograd.Function):
     @staticmethod
     def _prep_qkv(
@@ -642,17 +592,21 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         Wv: Tensor,
         bias_k: Optional[Tensor],
         bias_v: Optional[Tensor],
-        n_keys_per_query: int,
         n_heads: int,
         head_dim: int,
-        batch_size: int,
-        n_queries: int,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Computes the key and value tensor and reshapes them and the query tensor
 
         Returns: (q, k, v, selected (pre-q/v features))
         """
+        assert query_tensor.ndim == 2
+        assert index_search.ndim == 2
+        assert sparse_tensor_values.ndim == 2
+
+        n_queries = query_tensor.size(0)
+        n_keys_per_query = index_search.size(1)
+
         selected = _gather_and_mask(
             sparse_tensor_values, index_search, ~is_specified_mask
         )
@@ -660,18 +614,18 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         k = F.linear(selected, Wk, bias_k)
         v = F.linear(selected, Wv, bias_v)
 
-        k = k.view(batch_size, n_queries, n_keys_per_query, n_heads, head_dim)
-        v = v.view(batch_size, n_queries, n_keys_per_query, n_heads, head_dim)
+        # split heads
+        k = k.view(n_queries, n_keys_per_query, n_heads, head_dim)
+        v = v.view(n_queries, n_keys_per_query, n_heads, head_dim)
+        q = query_tensor.view(n_queries, n_heads, head_dim)
 
-        # (*batch_dims, n_queries, embed_dim)
-        # -> (batch_size, n_queries, n_heads, head_dim)
-        q = query_tensor.view(batch_size, n_queries, n_heads, head_dim)
+        # (n_queries, embed_dim) -> (n_queries, n_heads, head_dim)
         # Move n_head dim forward
-        q = q.permute(0, 2, 1, 3)  # (batch, n_heads, n_queries, head_dim)
+        q = q.transpose(-2, -3).contiguous()  # (n_heads, n_queries, head_dim)
 
-        # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
-        k = k.permute(0, 3, 1, 2, 4)
-        v = v.permute(0, 3, 1, 2, 4)
+        # (n_heads, n_queries, n_keys_per_query, head_dim)
+        k = k.permute(2, 0, 1, 3).contiguous()
+        v = v.permute(2, 0, 1, 3).contiguous()
 
         return q, k, v, selected
 
@@ -679,7 +633,6 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
         query_tensor: Tensor,
-        n_keys_per_query: int,
         n_heads: int,
         sparse_tensor_values: Tensor,
         index_search: Tensor,
@@ -693,15 +646,21 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         """Performs sparse neighborhood attention with minimal memory use"""
         ctx.set_materialize_grads(False)
 
-        batch_dims = query_tensor.shape[:-2]
-        batch_size = np.prod(batch_dims)
-        n_queries = query_tensor.size(-2)
-        embed_dim = query_tensor.size(-1)
+        assert query_tensor.ndim == 2  # (n_queries, embed_dim)
+        assert index_search.ndim == 2  # (n_queries, n_keys_per_query)
+        assert query_tensor.size(0) == index_search.size(0)  # n_queries
+        assert index_search.shape == is_specified_mask.shape
+        assert Wk.ndim == 2
+        assert Wv.ndim == 2
+        assert Wk.size(1) == Wv.size(1) == sparse_tensor_values.size(-1)
+        assert Wk.size(0) == query_tensor.size(-1)
+
+        n_queries = query_tensor.size(0)
+        embed_dim = query_tensor.size(1)
+        n_keys_per_query = index_search.size(1)
         head_dim = embed_dim // n_heads
 
         # save shape info
-        ctx.batch_dims = batch_dims
-        ctx.batch_size = batch_size
         ctx.n_queries = n_queries
         ctx.embed_dim = embed_dim
         ctx.n_heads = n_heads
@@ -728,32 +687,28 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # fmt: off
         q, k, v, _ = GatherAndSubsetAttentionFunction._prep_qkv(
             query_tensor, sparse_tensor_values, index_search, is_specified_mask,
-            Wk, Wv, bias_k, bias_v, n_keys_per_query, n_heads, head_dim,
-            batch_size, n_queries,
+            Wk, Wv, bias_k, bias_v, n_heads, head_dim,
         )
-        # fmt: on
 
-        mask = is_specified_mask.view(batch_size, n_queries, n_keys_per_query)
-        # fmt: off
         attn_scores = torch.matmul(
-            q.unsqueeze(-2) * scale_factor, # (batch, n_heads, n_queries, 1, head_dim)
-            k.transpose(-1, -2)             # (batch, n_heads, n_queries, head_dim, n_keys_per_query)
-        ).squeeze(-2)                       # (batch, n_heads, n_queries, n_keys_per_query)
+            q.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
+            k.transpose(-1, -2)             # (n_heads, n_queries, head_dim, n_keys_per_query)
+        ).squeeze(-2)                       # (n_heads, n_queries, n_keys_per_query)
 
-        expanded_mask = mask.unsqueeze(1).expand(-1, n_heads, -1, -1)
-        attn_scores.masked_fill_(~expanded_mask, -torch.inf)
+        attn_scores.masked_fill_(~is_specified_mask, -torch.inf)
         attn_weights = attn_scores.softmax(-1)
+        # nans expected if all of the keys a query tried to attend to were unspecified
+        attn_weights.nan_to_num_(0.0)
 
         output = torch.matmul(
-            attn_weights.unsqueeze(-2), # (batch, n_heads, n_queries, 1, n_keys_per_query)
-            v,                          # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
-        ).squeeze(-2)                   # (batch, n_heads, n_queries, head_dim)
+            attn_weights.unsqueeze(-2), # (n_heads, n_queries, 1, n_keys_per_query)
+            v,                          # (n_heads, n_queries, n_keys_per_query, head_dim)
+        ).squeeze(-2)                   # (n_heads, n_queries, head_dim)
         # fmt: on
 
-        output = output.permute(0, 2, 1, 3)  # (batch, n_queries, n_heads, head_dim)
-        output = output.reshape(*batch_dims, n_queries, embed_dim)
+        output = output.transpose(-2, -3)  # (n_queries, n_heads, head_dim)
+        output = output.reshape(n_queries, embed_dim)
 
-        ctx.expanded_mask = expanded_mask
         ctx.attn_weights = attn_weights
 
         return output
@@ -770,12 +725,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         index_search: Tensor = ctx.index_search
         is_specified_mask: Tensor = ctx.is_specified_mask
 
-        expanded_mask: Tensor = ctx.expanded_mask
         attn_weights: Tensor = ctx.attn_weights
 
         # retrieve shape info
-        batch_dims: tuple[int, ...] = ctx.batch_dims
-        batch_size: int = ctx.batch_size
         n_queries: int = ctx.n_queries
         embed_dim: int = ctx.embed_dim
         n_heads: int = ctx.n_heads
@@ -787,11 +739,11 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         # account for which inputs need gradients
         needs_grad_query = ctx.needs_input_grad[0]
-        needs_grad_sparse_values = ctx.needs_input_grad[3]
-        needs_grad_Wk = ctx.needs_input_grad[6]
-        needs_grad_Wv = ctx.needs_input_grad[7]
-        needs_grad_bias_k = bias_k is not None and ctx.needs_input_grad[8]
-        needs_grad_bias_v = bias_v is not None and ctx.needs_input_grad[9]
+        needs_grad_sparse_values = ctx.needs_input_grad[2]
+        needs_grad_Wk = ctx.needs_input_grad[5]
+        needs_grad_Wv = ctx.needs_input_grad[6]
+        needs_grad_bias_k = bias_k is not None and ctx.needs_input_grad[7]
+        needs_grad_bias_v = bias_v is not None and ctx.needs_input_grad[8]
 
         # initalize grad vars
         grad_query = None
@@ -801,20 +753,32 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         grad_bias_k = None
         grad_bias_v = None
 
+        if grad_output is None:
+            return (
+                grad_query,  # query_tensor
+                None,  # n_heads
+                grad_sparse_values,  # sparse_tensor_values
+                None,  # index_search
+                None,  # is_specified_mask
+                grad_Wk,  # Wk
+                grad_Wv,  # Wv
+                grad_bias_k,  # bias_k
+                grad_bias_v,  # bias_v
+                None,  # scale_factor
+            )
+
         # recompute q, k, v
         # fmt: off
         q, k, v, selected = GatherAndSubsetAttentionFunction._prep_qkv(
             query_tensor, sparse_tensor_values, index_search, is_specified_mask,
-            Wk, Wv, bias_k, bias_v, n_keys_per_query, n_heads, head_dim,
-            batch_size, n_queries,
+            Wk, Wv, bias_k, bias_v, n_heads, head_dim,
         )
         # fmt: on
 
-        # reshape the grad output tensor to compute-friendly form
-        # (flatten batch dims and split heads)
-        grad_output = grad_output.reshape(batch_size, n_queries, n_heads, head_dim)
-        # (batch, n_heads, n_queries, head_dim)
-        grad_output = grad_output.permute(0, 2, 1, 3)
+        # split heads on the grad tensor
+        grad_output = grad_output.reshape(n_queries, n_heads, head_dim)
+        # (n_heads, n_queries, head_dim)
+        grad_output = grad_output.transpose(-2, -3).contiguous()
 
         if (
             needs_grad_query
@@ -826,9 +790,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         ):
             # fmt: off
             grad_attn_weights = torch.matmul(
-                grad_output.unsqueeze(-2), # (batch, n_heads, n_queries, 1, head_dim)
-                v.transpose(-1, -2),       # (batch, n_heads, n_queries, head_dim, n_keys_per_query)
-            ).squeeze(3)                   # (batch, n_heads, n_queries, n_keys_per_query)
+                grad_output.unsqueeze(-2), # (n_heads, n_queries, 1, head_dim)
+                v.transpose(-1, -2),       # (n_heads, n_queries, head_dim, n_keys_per_query)
+            ).squeeze(-2)                  # (n_heads, n_queries, n_keys_per_query)
             # fmt: on
 
             # softmax gradient: dL/dz = S * (dL/dS - sum_j(S_j * dL/dS_j))
@@ -838,21 +802,22 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 grad_attn_weights
                 - (attn_weights * grad_attn_weights).sum(-1, keepdim=True)
             )
-            grad_attn_scores.masked_fill_(~expanded_mask, 0)
+
+            grad_attn_scores.masked_fill_(~is_specified_mask, 0)
         del v  # big tensor we no longer need
 
         if needs_grad_query:
             # fmt: off
             grad_q = torch.matmul(
-                grad_attn_scores.unsqueeze(-2),  # (batch, n_heads, n_queries, 1, n_keys_per_query)
-                k,                               # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
-            ).squeeze(-2)                        # (batch, n_heads, n_queries, head_dim
+                grad_attn_scores.unsqueeze(-2),  # (n_heads, n_queries, 1, n_keys_per_query)
+                k,                               # (n_heads, n_queries, n_keys_per_query, head_dim)
+            ).squeeze(-2)                        # (n_heads, n_queries, head_dim
 
             grad_q *= scale_factor
 
-            # Reshape to original batch dims
-            grad_q = grad_q.permute(0, 2, 1, 3)  # (batch, n_queries, n_heads, head_dim)
-            grad_query = grad_q.reshape(*batch_dims, n_queries, embed_dim)
+            # Flip dims back and stack heads
+            grad_q = grad_q.transpose(-2, -3)  # (n_queries, n_heads, head_dim)
+            grad_query = grad_q.reshape(n_queries, embed_dim)
             # fmt: on
         del k
 
@@ -866,18 +831,16 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             if needs_grad_sparse_values or needs_grad_Wk or needs_grad_bias_k:
                 # fmt: off
                 grad_k = torch.matmul(
-                    grad_attn_scores.unsqueeze(-1), # (batch, n_heads, n_queries, n_keys_per_query, 1)
-                    q.unsqueeze(-2) * scale_factor, # (batch, n_heads, n_queries, 1, head_dim)
-                )                                   # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
+                    grad_attn_scores.unsqueeze(-1), # (n_heads, n_queries, n_keys_per_query, 1)
+                    q.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
+                )                                   # (n_heads, n_queries, n_keys_per_query, head_dim)
                 # fmt: on
 
-                # (batch, n_queries, n_keys_per_query, n_heads, head_dim)
-                grad_k = grad_k.permute(0, 2, 3, 1, 4)
-                grad_k = grad_k.reshape(
-                    batch_size, n_queries, n_keys_per_query, embed_dim
-                )
+                # (n_queries, n_keys_per_query, n_heads, head_dim)
+                grad_k = grad_k.permute(1, 2, 0, 3)
+                grad_k = grad_k.reshape(n_queries, n_keys_per_query, embed_dim)
 
-                # Flatten to multiply with selected
+                # Flatten for grad calcs
                 grad_k_flat = grad_k.view(-1, embed_dim)
             del grad_attn_scores
             del q
@@ -885,28 +848,26 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             if needs_grad_sparse_values or needs_grad_Wv or needs_grad_bias_v:
                 # fmt: off
                 grad_v = torch.matmul(
-                    attn_weights.unsqueeze(-1), # (batch, n_heads, n_queries, n_keys_per_query, 1)
-                    grad_output.unsqueeze(-2)   # (batch, n_heads, n_queries, 1, head_dim)
-                )                               # (batch, n_heads, n_queries, n_keys_per_query, head_dim)
+                    attn_weights.unsqueeze(-1), # (n_heads, n_queries, n_keys_per_query, 1)
+                    grad_output.unsqueeze(-2)   # (n_heads, n_queries, 1, head_dim)
+                )                               # (n_heads, n_queries, n_keys_per_query, head_dim)
                 # fmt: on
 
-                # (batch, n_queries, n_keys_per_query, n_heads, head_dim)
-                grad_v = grad_v.permute(0, 2, 3, 1, 4)
-                grad_v = grad_v.reshape(
-                    batch_size, n_queries, n_keys_per_query, embed_dim
-                )
+                # (n_queries, n_keys_per_query, n_heads, head_dim)
+                grad_v = grad_v.permute(1, 2, 0, 3)
+                grad_v = grad_v.reshape(n_queries, n_keys_per_query, embed_dim)
 
-                # Flatten to multiply with selected
+                # Flatten for grad calcs
                 grad_v_flat = grad_v.view(-1, embed_dim)
 
             if needs_grad_Wk or needs_grad_Wv:
-                selected_t = selected.t().contiguous()
+                selected_flat = selected.view(-1, embed_dim)
 
                 if needs_grad_Wk:
-                    grad_Wk = torch.matmul(selected_t, grad_k_flat)
+                    grad_Wk = torch.mm(grad_k_flat.t(), selected_flat)
                 if needs_grad_Wv:
-                    grad_Wv = torch.matmul(selected_t, grad_v_flat)
-                del selected_t
+                    grad_Wv = torch.mm(grad_v_flat.t(), selected_flat)
+                del selected_flat
             del selected
 
             if needs_grad_bias_k:
@@ -918,19 +879,23 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             if needs_grad_sparse_values:
                 # two matrix multiplies - faster if we batch them
                 grad_k_v_stacked = torch.stack([grad_k_flat, grad_v_flat])
-                W_t_stacked = torch.stack([Wk, Wv]).transpose(-1, -2)
-                grad_selected = torch.bmm(grad_k_v_stacked, W_t_stacked).sum(0)
+                W_stacked = torch.stack([Wk, Wv])
+                grad_selected = torch.bmm(grad_k_v_stacked, W_stacked).sum(0)
+                grad_selected = grad_selected.view(
+                    n_queries, n_keys_per_query, embed_dim
+                )
 
                 # Zero out grads for masked selecteds
                 grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1), 0)
 
                 # Scatter grads back into the sparse values
                 grad_sparse_values = torch.zeros_like(sparse_tensor_values)
-                grad_sparse_values.index_add_(0, index_search, grad_selected)
+                grad_sparse_values.index_add_(
+                    0, index_search.view(-1), grad_selected.view(-1, embed_dim)
+                )
 
         return (
             grad_query,  # query_tensor
-            None,  # n_keys_per_query
             None,  # n_heads
             grad_sparse_values,  # sparse_tensor_values
             None,  # index_search
@@ -939,8 +904,69 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             grad_Wv,  # Wv
             grad_bias_k,  # bias_k
             grad_bias_v,  # bias_v
-            None,
+            None,  # scale_factor
         )
+
+
+@torch.jit.script
+def batch_sparse_index_subset_attn(
+    sparse_tensor: Tensor,
+    index_tensor: Tensor,
+    query_tensor: Tensor,
+    n_heads: int,
+    key_weight: Tensor,
+    value_weight: Tensor,
+    key_bias: Optional[Tensor] = None,
+    value_bias: Optional[Tensor] = None,
+    scale_factor: Optional[float] = None,
+    check_all_specified: bool = False,
+):
+    if index_tensor.is_nested:
+        raise ValueError("Nested index tensor not supported")
+        # return __gather_nested_index(sparse_tensor, index_tensor, check_all_specified)
+
+    if query_tensor.shape[:-1] != index_tensor.shape[:-2]:
+        error_str = "Expected the first n-1 dims of query_tensor and the first"
+        error_str += "n-2 dims of index_tensor to match, got "
+        error_str += str(query_tensor.shape)
+        error_str += " and "
+        error_str += str(index_tensor.shape)
+        raise ValueError(error_str)
+
+    sparse_tensor = sparse_tensor.coalesce()
+    sparse_tensor_values = sparse_tensor.values()
+
+    index_search, is_specified_mask = get_sparse_index_mapping(
+        sparse_tensor, index_tensor
+    )
+    if check_all_specified and not is_specified_mask.all():
+        raise ValueError(
+            "`check_all_specified` was set to True but not all gathered values "
+            "were specified"
+        )
+
+    # Call into custom grad function
+    attended = GatherAndSubsetAttentionFunction.apply(
+        query_tensor,
+        n_heads,
+        sparse_tensor_values,
+        index_search,
+        is_specified_mask,
+        key_weight,
+        value_weight,
+        key_bias,
+        value_bias,
+        scale_factor,
+    )
+
+    out_shape = list(query_tensor.shape[:-1])
+    out_shape.append(value_weight.size(0))
+    assert list(attended.shape) == out_shape
+    assert is_specified_mask.shape == index_tensor.shape[:-1]
+    # attended = attended.view(out_shape)
+    # is_specified_mask = is_specified_mask.view(out_shape[:-1])
+
+    return attended, is_specified_mask
 
 
 def scatter_to_sparse_tensor(

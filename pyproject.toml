@@ -1,0 +1,10 @@
+[tool.pytest.ini_options]
+env = [
+    "PYTORCH_JIT=0",  # Disabled by default
+    "OMP_NUM_THREADS=16",  # MinkowskiEngine issues a warning on import if this is unset
+]
+markers = [
+    "torchscript: mark test to run ONLY with Torchscript enabled",
+    "no_torchscript: mark test to run ONLY with Torchscript disabled",
+    "cuda: mark test to run on both CPU and CUDA devices"
+]

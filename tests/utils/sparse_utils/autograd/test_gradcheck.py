@@ -75,7 +75,7 @@ def test_gather_and_subset_attention_function(
     value_bias = torch.randn(
         EMBED_DIM, dtype=torch.double, requires_grad=True, device=device
     )
-    scale_factor = 0.5
+    scale_factor = None
 
     # Run gradcheck
     inputs = (
@@ -130,7 +130,7 @@ def test_gradients_per_parameter(
     value_weight = torch.randn(EMBED_DIM, EMBED_DIM, dtype=torch.double, device=device)
     key_bias = torch.randn(EMBED_DIM, dtype=torch.double, device=device)
     value_bias = torch.randn(EMBED_DIM, dtype=torch.double, device=device)
-    scale_factor = 0.5
+    scale_factor = None
 
     # Base inputs
     inputs = [

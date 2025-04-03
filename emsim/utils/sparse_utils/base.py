@@ -615,11 +615,11 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         v = F.linear(selected, Wv, bias_v)
 
         # split heads
+        # (n_queries, embed_dim) -> (n_queries, n_heads, head_dim)
         k = k.view(n_queries, n_keys_per_query, n_heads, head_dim)
         v = v.view(n_queries, n_keys_per_query, n_heads, head_dim)
         q = query_tensor.view(n_queries, n_heads, head_dim)
 
-        # (n_queries, embed_dim) -> (n_queries, n_heads, head_dim)
         # Move n_head dim forward
         q = q.transpose(-2, -3).contiguous()  # (n_heads, n_queries, head_dim)
 

@@ -17,8 +17,8 @@ def test_end_to_end_gather_linear(
     setup_sparse_tensor, setup_linear_index_tensor, include_bias, device
 ):
     """Test end-to-end gather and linear mapping."""
-    sparse_tensor = setup_sparse_tensor.to(device)
-    index_tensor = setup_linear_index_tensor.to(device)
+    sparse_tensor = setup_sparse_tensor
+    index_tensor = setup_linear_index_tensor
 
     # Initialize parameters
     weight = torch.randn(
@@ -65,8 +65,8 @@ def test_end_to_end_subset_attn(
     device,
 ):
     """Test end-to-end gather and subset attention."""
-    sparse_tensor = setup_sparse_tensor.to(device)
-    index_tensor = setup_attention_index_tensor.to(device)
+    sparse_tensor = setup_sparse_tensor
+    index_tensor = setup_attention_index_tensor
 
     # Create query vectors
     query_tensor = torch.randn(

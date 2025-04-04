@@ -14,22 +14,22 @@ from .constants import (
 
 
 @pytest.fixture
-def setup_sparse_tensor():
+def setup_sparse_tensor(device):
     """Create a 4D sparse tensor with vectorized operations."""
     # Create coordinates spanning all dimensions
     grid = torch.meshgrid(
-        torch.arange(BATCH_SIZE),
-        torch.arange(SPARSE_DIM_1),
-        torch.arange(SPARSE_DIM_2),
-        torch.arange(SPARSE_DIM_3),
+        torch.arange(BATCH_SIZE, device=device),
+        torch.arange(SPARSE_DIM_1, device=device),
+        torch.arange(SPARSE_DIM_2, device=device),
+        torch.arange(SPARSE_DIM_3, device=device),
         indexing="ij",
     )
     coords = torch.stack(grid, dim=-1).reshape(-1, 4)
 
     # Filter out unspecified points with vectorized operations
-    mask_per_unspecified = (coords.unsqueeze(1) == ALWAYS_UNSPECIFIED.unsqueeze(0)).all(
-        dim=2
-    )
+    mask_per_unspecified = (
+        coords.unsqueeze(1) == ALWAYS_UNSPECIFIED.to(device).unsqueeze(0)
+    ).all(dim=2)
     match_any_unspecified = mask_per_unspecified.any(dim=1)
     valid_coords = coords[~match_any_unspecified]
 
@@ -39,11 +39,15 @@ def setup_sparse_tensor():
     sampled_coords = valid_coords[indices]
 
     # Add specified test points
-    final_coords = torch.cat([sampled_coords, ALWAYS_SPECIFIED], dim=0)
+    final_coords = torch.cat([sampled_coords, ALWAYS_SPECIFIED.to(device)], dim=0)
 
     # Create sparse tensor
     values = torch.randn(
-        final_coords.shape[0], EMBED_DIM, dtype=torch.double, requires_grad=True
+        final_coords.shape[0],
+        EMBED_DIM,
+        dtype=torch.double,
+        requires_grad=True,
+        device=device,
     )
     return torch.sparse_coo_tensor(
         final_coords.t(),
@@ -53,7 +57,7 @@ def setup_sparse_tensor():
 
 
 @pytest.fixture
-def setup_linear_index_tensor(setup_sparse_tensor):
+def setup_linear_index_tensor(setup_sparse_tensor, device):
     """Create index tensor for linear mapping tests with each index having a 50% chance
     of being from specified indices and 50% chance of being random."""
     # Get indices from the sparse tensor
@@ -73,13 +77,13 @@ def setup_linear_index_tensor(setup_sparse_tensor):
     }
 
     # Generate indices with 50% probability of being specified vs random
-    random_indices = torch.zeros(num_random_indices, 4, dtype=torch.long)
+    random_indices = torch.zeros(num_random_indices, 4, dtype=torch.long, device=device)
 
     # First assign random batch indices
     random_indices[:, 0].random_(0, BATCH_SIZE)
 
     # For each index, decide whether to use specified or random values
-    use_specified = torch.rand(num_random_indices) < 0.5
+    use_specified = torch.rand(num_random_indices, device=device) < 0.5
 
     # Default all spatial dimensions to random values
     random_indices[:, 1].random_(0, SPARSE_DIM_1)
@@ -107,8 +111,8 @@ def setup_linear_index_tensor(setup_sparse_tensor):
     combined_indices = torch.cat(
         [
             random_indices,
-            ALWAYS_SPECIFIED,  # Test points known to be in the sparse tensor
-            ALWAYS_UNSPECIFIED,  # Test points known to be absent from the sparse tensor
+            ALWAYS_SPECIFIED.to(device),  # Test points known to be in the sparse tensor
+            ALWAYS_UNSPECIFIED.to(device),  # Test points known to be unspecified
         ],
         dim=0,
     )
@@ -119,17 +123,19 @@ def setup_linear_index_tensor(setup_sparse_tensor):
 
 
 @pytest.fixture
-def setup_attention_index_tensor(setup_sparse_tensor):
+def setup_attention_index_tensor(setup_sparse_tensor, device):
     """Create attention index tensor with a mixture of specified and random indices."""
     # Get indices from the sparse tensor and ensure contiguous memory layout
     sparse_indices = setup_sparse_tensor.indices().t().contiguous()
 
     # Create random regular queries
     n_queries = 2
-    index_tensor = torch.zeros(n_queries, N_KEYS_PER_QUERY, 4, dtype=torch.long)
+    index_tensor = torch.zeros(
+        n_queries, N_KEYS_PER_QUERY, 4, dtype=torch.long, device=device
+    )
 
     # Assign random batch indices and spatial dimensions
-    query_batch_indices = torch.randint(0, BATCH_SIZE, (n_queries,))
+    query_batch_indices = torch.randint(0, BATCH_SIZE, (n_queries,), device=device)
     index_tensor[:, :, 0] = query_batch_indices.unsqueeze(1)
     index_tensor[:, :, 1].random_(0, SPARSE_DIM_1)
     index_tensor[:, :, 2].random_(0, SPARSE_DIM_2)
@@ -168,15 +174,19 @@ def setup_attention_index_tensor(setup_sparse_tensor):
     # For each batch, create two special test queries
     for b in range(BATCH_SIZE):
         # Query 1: First key is a known specified index, rest are random
-        q1 = torch.zeros(N_KEYS_PER_QUERY, 4, dtype=torch.long)
+        q1 = torch.zeros(N_KEYS_PER_QUERY, 4, dtype=torch.long, device=device)
         q1[:, 0] = b  # Set batch index
         q1[:, 1:].random_(0, max(SPARSE_DIM_1, SPARSE_DIM_2, SPARSE_DIM_3))
-        q1[0, 1:] = ALWAYS_SPECIFIED[b, 1:]  # First key is the specified point
+        q1[0, 1:] = ALWAYS_SPECIFIED[b, 1:].to(
+            device
+        )  # First key is the specified point
 
         # Query 2: All keys point to a known unspecified location
-        q2 = torch.zeros(N_KEYS_PER_QUERY, 4, dtype=torch.long)
+        q2 = torch.zeros(N_KEYS_PER_QUERY, 4, dtype=torch.long, device=device)
         q2[:, 0] = b  # Set batch index
-        q2[:, 1:] = ALWAYS_UNSPECIFIED[b, 1:].unsqueeze(0)  # All keys are unspecified
+        q2[:, 1:] = (
+            ALWAYS_UNSPECIFIED[b, 1:].to(device).unsqueeze(0)
+        )  # All keys are unspecified
 
         test_queries.extend([q1, q2])
 

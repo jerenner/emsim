@@ -745,7 +745,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         needs_grad_bias_k = bias_k is not None and ctx.needs_input_grad[7]
         needs_grad_bias_v = bias_v is not None and ctx.needs_input_grad[8]
 
-        # initalize grad vars
+        # initialize grad vars
         grad_query = None
         grad_sparse_values = None
         grad_Wk = None

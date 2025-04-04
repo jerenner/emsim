@@ -13,7 +13,6 @@ from .constants import EMBED_DIM, N_HEADS
 
 
 @pytest.mark.cuda
-@pytest.mark.no_torchscript
 def test_gather_and_linear_function(
     setup_sparse_tensor, setup_linear_index_tensor, device
 ):
@@ -40,7 +39,6 @@ def test_gather_and_linear_function(
 
 
 @pytest.mark.cuda
-@pytest.mark.no_torchscript
 def test_gather_and_subset_attention_function(
     setup_sparse_tensor, setup_attention_index_tensor, device
 ):
@@ -94,7 +92,6 @@ def test_gather_and_subset_attention_function(
 
 
 @pytest.mark.cuda
-@pytest.mark.no_torchscript
 @pytest.mark.parametrize(
     "param_name, param_index",
     [

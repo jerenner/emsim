@@ -641,6 +641,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         Wv: Tensor,
         bias_k: Optional[Tensor] = None,
         bias_v: Optional[Tensor] = None,
+        key_pos_encoding: Optional[Tensor] = None,
         scale_factor: float = None,  # scaling for attn, default 1/sqrt(d)
     ) -> Tensor:
         """Performs sparse neighborhood attention with minimal memory use"""
@@ -648,17 +649,27 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         assert query_tensor.ndim == 2  # (n_queries, embed_dim)
         assert index_search.ndim == 2  # (n_queries, n_keys_per_query)
-        assert query_tensor.size(0) == index_search.size(0)  # n_queries
-        assert index_search.shape == is_specified_mask.shape
-        assert Wk.ndim == 2
-        assert Wv.ndim == 2
-        assert Wk.size(1) == Wv.size(1) == sparse_tensor_values.size(-1)
-        assert Wk.size(0) == query_tensor.size(-1)
 
         n_queries = query_tensor.size(0)
         embed_dim = query_tensor.size(1)
         n_keys_per_query = index_search.size(1)
         head_dim = embed_dim // n_heads
+
+        assert query_tensor.size(0) == index_search.size(0) == n_queries
+        assert index_search.shape == is_specified_mask.shape
+        assert Wk.ndim == 2
+        assert Wv.ndim == 2
+
+        # embed_dim
+        # kv projection
+        assert Wk.size(1) == Wv.size(1) == sparse_tensor_values.size(-1) == embed_dim
+        # attn calculation
+        assert Wk.size(0) == query_tensor.size(1) == embed_dim
+
+        if key_pos_encoding is not None:
+            assert key_pos_encoding.shape == (n_queries, n_keys_per_query, embed_dim)
+            assert embed_dim % 2 == 0, "embed_dim must be even to use RoPE"
+            assert head_dim % 2 == 0, "head_dim must be even to use RoPE"
 
         # save shape info
         ctx.n_queries = n_queries
@@ -680,6 +691,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             Wv,
             bias_k,
             bias_v,
+            key_pos_encoding,
         )
         ctx.index_search = index_search
         ctx.is_specified_mask = is_specified_mask
@@ -689,6 +701,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             query_tensor, sparse_tensor_values, index_search, is_specified_mask,
             Wk, Wv, bias_k, bias_v, n_heads, head_dim,
         )
+
+        if key_pos_encoding is not None:
+            k, _, _ = GatherAndSubsetAttentionFunction._rotate_k(k, key_pos_encoding)
 
         attn_scores = torch.matmul(
             q.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
@@ -712,6 +727,31 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         ctx.attn_weights = attn_weights
 
         return output
+
+    @staticmethod
+    def _rotate_k(k: Tensor, key_pos_encoding: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Apply rotary position encoding (RoPE) to the key tensor"""
+        assert k.ndim == 4
+        n_heads, n_queries, n_keys_per_query, head_dim = k.shape
+        key_pos_encoding = key_pos_encoding.reshape(
+            n_queries, n_keys_per_query, n_heads, head_dim
+        )
+
+        # (n_heads, n_queries, n_keys_per_query, head_dim)
+        key_pos_encoding = key_pos_encoding.permute(2, 0, 1, 3).contiguous()
+
+        # Convert to complex and apply rotation
+        k_complex = torch.view_as_complex(k.view(*k.shape[:-1], head_dim // 2, 2))
+        key_pos_complex = torch.view_as_complex(
+            key_pos_encoding.view(*key_pos_encoding.shape[:-1], head_dim // 2, 2)
+        )
+
+        # multiply and convert back to real
+        k_rotated = k_complex * key_pos_complex
+        k_rotated = torch.view_as_real(k_rotated).reshape_as(k)
+
+        # complex tensors are used later in the backward pass
+        return k_rotated, k_complex, key_pos_complex
 
     @staticmethod
     def _linear_grads(
@@ -739,6 +779,47 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         return None, None
 
     @staticmethod
+    def _rotate_k_backward(
+        grad_k_rotated: Tensor,
+        k_complex: Tensor,
+        key_pos_complex: Tensor,
+        needs_grad_key_pos: bool,
+    ) -> tuple[Tensor, Optional[Tensor]]:
+        """Perform the backward pass of applying rotary positional encoding (RoPE)"""
+        n_heads, n_queries, n_keys_per_query, head_dim = grad_k_rotated.shape
+
+        grad_k_rotated = grad_k_rotated.reshape(
+            n_heads, n_queries, n_keys_per_query, head_dim // 2, 2
+        )
+        grad_k_rotated_complex = torch.view_as_complex(grad_k_rotated)
+
+        # Complex multiplication gradient
+        # For z = x * y, we have dL/dx = dL/dz * conj(y) and dL/dy = dL/dz * conj(x)
+        grad_k_complex = grad_k_rotated_complex * key_pos_complex.conj()
+
+        grad_k = torch.view_as_real(grad_k_complex).reshape(
+            n_heads, n_queries, n_keys_per_query, head_dim
+        )
+
+        if needs_grad_key_pos:
+            grad_key_pos_complex = grad_k_rotated_complex * k_complex.conj()
+
+            # Convert back to real and reshape
+            grad_key_pos = torch.view_as_real(grad_key_pos_complex)
+            grad_key_pos = grad_key_pos.reshape(
+                n_heads, n_queries, n_keys_per_query, head_dim
+            )
+
+            # (n_queries, n_keys_per_query, n_heads, head_dim)
+            grad_key_pos = grad_key_pos.permute(1, 2, 0, 3).contiguous()
+            grad_key_pos = grad_key_pos.view(
+                n_queries, n_keys_per_query, head_dim * n_heads
+            )
+
+            return grad_k, grad_key_pos
+        return grad_k, None
+
+    @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(
         ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor
@@ -746,7 +827,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         """Implements the backward pass for sparse neighborhood attn"""
 
         # retrieve tensors
-        query_tensor, sparse_tensor_values, Wk, Wv, bias_k, bias_v = ctx.saved_tensors
+        query_tensor, sparse_tensor_values, Wk, Wv, bias_k, bias_v, key_pos_encoding = (
+            ctx.saved_tensors
+        )
         index_search: Tensor = ctx.index_search
         is_specified_mask: Tensor = ctx.is_specified_mask
 
@@ -769,6 +852,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         needs_grad_Wv = ctx.needs_input_grad[6]
         needs_grad_bias_k = bias_k is not None and ctx.needs_input_grad[7]
         needs_grad_bias_v = bias_v is not None and ctx.needs_input_grad[8]
+        needs_grad_key_pos = key_pos_encoding is not None and ctx.needs_input_grad[9]
 
         # initialize grad vars
         grad_query = None
@@ -777,6 +861,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         grad_Wv = None
         grad_bias_k = None
         grad_bias_v = None
+        grad_key_pos_encoding = None
 
         # initialize flattened grad vars
         grad_k_flat = None
@@ -793,6 +878,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 grad_Wv,  # Wv
                 grad_bias_k,  # bias_k
                 grad_bias_v,  # bias_v
+                grad_key_pos_encoding,  # key_pos_encoding
                 None,  # scale_factor
             )
 
@@ -803,6 +889,11 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             Wk, Wv, bias_k, bias_v, n_heads, head_dim,
         )
         # fmt: on
+
+        if key_pos_encoding is not None:
+            k, k_complex, key_pos_complex = GatherAndSubsetAttentionFunction._rotate_k(
+                k, key_pos_encoding
+            )
 
         # split heads on the grad tensor
         grad_output = grad_output.reshape(n_queries, n_heads, head_dim)
@@ -817,6 +908,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             or needs_grad_Wv
             or needs_grad_bias_k
             or needs_grad_bias_v
+            or needs_grad_key_pos
         ):
             # fmt: off
             grad_attn_weights = torch.matmul(
@@ -857,14 +949,24 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             or needs_grad_Wv
             or needs_grad_bias_k
             or needs_grad_bias_v
+            or needs_grad_key_pos
         ):
-            if needs_grad_sparse_values or needs_grad_Wk or needs_grad_bias_k:
+            if needs_grad_sparse_values or needs_grad_Wk or needs_grad_bias_k or needs_grad_key_pos:  # fmt: skip
                 # fmt: off
                 grad_k = torch.matmul(
                     grad_attn_scores.unsqueeze(-1), # (n_heads, n_queries, n_keys_per_query, 1)
                     q.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
                 )                                   # (n_heads, n_queries, n_keys_per_query, head_dim)
                 # fmt: on
+
+                if key_pos_encoding is not None:
+                    # Handle backpropagation through RoPE
+                    grad_k, grad_key_pos_encoding = (
+                        GatherAndSubsetAttentionFunction._rotate_k_backward(
+                            grad_k, k_complex, key_pos_complex, needs_grad_key_pos
+                        )
+                    )
+                    del k_complex, key_pos_complex
 
                 # (n_queries, n_keys_per_query, n_heads, head_dim)
                 grad_k = grad_k.permute(1, 2, 0, 3)
@@ -893,10 +995,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             if needs_grad_Wk or needs_grad_Wv or needs_grad_bias_k or needs_grad_bias_v:
                 selected_flat = selected.view(-1, embed_dim)
 
-                grad_Wk, grad_bias_k = (
-                    GatherAndSubsetAttentionFunction._linear_grads(
-                        grad_k_flat, selected_flat, needs_grad_Wk, needs_grad_bias_k
-                    )
+                grad_Wk, grad_bias_k = GatherAndSubsetAttentionFunction._linear_grads(
+                    grad_k_flat, selected_flat, needs_grad_Wk, needs_grad_bias_k
                 )
 
                 grad_Wv, grad_bias_v = GatherAndSubsetAttentionFunction._linear_grads(
@@ -934,6 +1034,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             grad_Wv,  # Wv
             grad_bias_k,  # bias_k
             grad_bias_v,  # bias_v
+            grad_key_pos_encoding,  # key_pos_encoding
             None,  # scale_factor
         )
 
@@ -948,6 +1049,7 @@ def batch_sparse_index_subset_attn(
     value_weight: Tensor,
     key_bias: Optional[Tensor] = None,
     value_bias: Optional[Tensor] = None,
+    key_pos_encoding: Optional[Tensor] = None,
     scale_factor: Optional[float] = None,
     check_all_specified: bool = False,
 ):
@@ -986,6 +1088,7 @@ def batch_sparse_index_subset_attn(
         value_weight,
         key_bias,
         value_bias,
+        key_pos_encoding,
         scale_factor,
     )
 

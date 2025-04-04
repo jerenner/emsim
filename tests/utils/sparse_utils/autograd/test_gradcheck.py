@@ -9,7 +9,7 @@ from emsim.utils.sparse_utils.base import (
     get_sparse_index_mapping,
 )
 
-from .constants import EMBED_DIM, N_HEADS
+from .constants import EMBED_DIM, N_HEADS, N_KEYS_PER_QUERY
 
 
 @pytest.mark.cuda
@@ -73,6 +73,14 @@ def test_gather_and_subset_attention_function(
     value_bias = torch.randn(
         EMBED_DIM, dtype=torch.double, requires_grad=True, device=device
     )
+    key_pos_encoding = torch.randn(
+        index_tensor.shape[0],
+        N_KEYS_PER_QUERY,
+        EMBED_DIM,
+        dtype=torch.double,
+        requires_grad=True,
+        device=device,
+    )
     scale_factor = None
 
     # Run gradcheck
@@ -86,6 +94,7 @@ def test_gather_and_subset_attention_function(
         value_weight,
         key_bias,
         value_bias,
+        key_pos_encoding,
         scale_factor,
     )
     assert gradcheck(GatherAndSubsetAttentionFunction.apply, inputs)
@@ -101,6 +110,7 @@ def test_gather_and_subset_attention_function(
         ("value_weight", 6),
         ("key_bias", 7),
         ("value_bias", 8),
+        ("key_pos_encoding", 9),
     ],
 )
 def test_gradients_per_parameter(
@@ -127,6 +137,13 @@ def test_gradients_per_parameter(
     value_weight = torch.randn(EMBED_DIM, EMBED_DIM, dtype=torch.double, device=device)
     key_bias = torch.randn(EMBED_DIM, dtype=torch.double, device=device)
     value_bias = torch.randn(EMBED_DIM, dtype=torch.double, device=device)
+    key_pos_encoding = torch.randn(
+        query_tensor.shape[0],
+        N_KEYS_PER_QUERY,
+        EMBED_DIM,
+        dtype=torch.double,
+        device=device,
+    )
     scale_factor = None
 
     # Base inputs
@@ -140,6 +157,7 @@ def test_gradients_per_parameter(
         value_weight,
         key_bias,
         value_bias,
+        key_pos_encoding,
         scale_factor,
     ]
 
@@ -151,6 +169,7 @@ def test_gradients_per_parameter(
         6,
         7,
         8,
+        9,
     ]  # Indices of tensors that could require gradients
     for idx in tensor_indices:
         if idx == param_index:

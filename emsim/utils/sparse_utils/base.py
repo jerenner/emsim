@@ -571,17 +571,21 @@ def batch_sparse_index_linear(
         sparse_tensor_values, index_search, is_specified_mask, weight, bias
     )
 
-    out_shape = list(index_tensor.shape[:-1])
-    out_shape.append(weight.size(0))
-    assert list(transformed.shape) == out_shape
-    assert list(is_specified_mask.shape) == out_shape[:-1]
-    # transformed = transformed.view(out_shape)
-    # is_specified_mask = is_specified_mask.view(out_shape[:-1])
+    out_shape = index_tensor.shape[:-1] + (weight.size(0),)
+    assert transformed.shape == out_shape
+    assert is_specified_mask.shape == out_shape[:-1]
 
     return transformed, is_specified_mask
 
 
 class GatherAndSubsetAttentionFunction(torch.autograd.Function):
+    """Custom autograd function that implements memory-efficient attention
+    where each query attends to its own local subset of keys. This implementation
+    avoids keeping large intermediate tensors in memory by recalculating them
+    during the backward pass, saving significant memory for only a minor increase
+    in time to run the backward.
+    """
+
     @staticmethod
     def _prep_qkv(
         query_tensor: Tensor,
@@ -595,10 +599,37 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         n_heads: int,
         head_dim: int,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """
-        Computes the key and value tensor and reshapes them and the query tensor
+        """Computes the key and value tensors and reshapes them and the query tensor
+        for multi-head attention computation.
 
-        Returns: (q, k, v, selected (pre-q/v features))
+        Args:
+            query_tensor (Tensor): Query features of shape [n_queries, embed_dim]
+            sparse_tensor_values (Tensor): Values from sparse tensor of shape
+                [num_sparse_values, embed_dim]
+            index_search (Tensor): Long tensor of shape [n_queries, n_keys_per_query]
+                with elements corresponding to the indices of each key along
+                sparse_tensor_values's first dimension. If created by
+                get_sparse_index_mapping, indices of unspecified keys will be
+                masked to 0 to potentially speed up lookup.
+            is_specified_mask (Tensor): Boolean mask of shape
+                [n_queries, n_keys_per_query] indicating which indices are
+                specified in the sparse tensor
+            Wk (Tensor): Key projection matrix of shape [embed_dim, embed_dim]
+            Wv (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
+            bias_k (Optional[Tensor]): Key projection bias of shape [embed_dim]
+            bias_v (Optional[Tensor]): Value projection bias of shape [embed_dim]
+            n_heads (int): Number of attention heads
+            head_dim (int): Dimension of each attention head
+
+        Returns:
+            tuple[Tensor, Tensor, Tensor, Tensor]:
+            - q (Tensor): Query tensor of shape [n_heads, n_queries, head_dim]
+            - k (Tensor): Key tensor of shape
+                [n_heads, n_queries, n_keys_per_query, head_dim]
+            - v (Tensor): Value tensor of shape
+                [n_heads, n_queries, n_keys_per_query, head_dim]
+            - selected (Tensor): Selected features from sparse tensor before k and v
+                projections, of shape [n_queries, n_keys_per_query, embed_dim]
         """
         assert query_tensor.ndim == 2
         assert index_search.ndim == 2
@@ -644,7 +675,40 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         key_pos_encoding: Optional[Tensor] = None,
         scale_factor: float = None,  # scaling for attn, default 1/sqrt(d)
     ) -> Tensor:
-        """Performs sparse neighborhood attention with minimal memory use"""
+        """Performs sparse neighborhood attention with minimal memory usage.
+
+        This function computes attention where each query attends only to its
+        local neighborhood of keys, without materializing the full attention matrix
+        or storing intermediate tensors.
+
+        Args:
+            ctx (torch.autograd.function.FunctionCtx): Context to save tensors for backward
+            query_tensor (Tensor): Query features of shape [n_queries, embed_dim]
+            n_heads (int): Number of attention heads
+            sparse_tensor_values (Tensor): Values from sparse tensor of shape
+                [num_sparse_values, embed_dim]
+            index_search (Tensor): Long tensor of shape [n_queries, n_keys_per_query]
+                with elements corresponding to the indices of each key along
+                sparse_tensor_values's first dimension. If created by
+                get_sparse_index_mapping, indices of unspecified keys will be
+                masked to 0 to potentially speed up lookup.
+            is_specified_mask (Tensor): Boolean mask of shape
+                [n_queries, n_keys_per_query] indicating which indices are
+                specified in the sparse tensor
+            Wk (Tensor): Key projection matrix of shape [embed_dim, embed_dim]
+            Wv (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
+            bias_k (Optional[Tensor]): Key projection bias of shape [embed_dim]
+            bias_v (Optional[Tensor]): Value projection bias of shape [embed_dim]
+            key_pos_encoding (Optional[Tensor]): Positional encoding for keys of shape
+                [n_queries, n_keys_per_query, embed_dim]. Used for rotary position
+                embedding (RoPE). If specified, both embed_dim and the head dim must be
+                divisible by 2.
+            scale_factor (Optional[float]): Scaling factor for attention scores.
+                Default is 1/sqrt(embed_dim).
+
+        Returns:
+            Tensor: Output tensor after attention of shape [n_queries, embed_dim]
+        """
         ctx.set_materialize_grads(False)
 
         assert query_tensor.ndim == 2  # (n_queries, embed_dim)
@@ -730,7 +794,26 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
     @staticmethod
     def _rotate_k(k: Tensor, key_pos_encoding: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Apply rotary position encoding (RoPE) to the key tensor"""
+        """Applies rotary position encoding (RoPE) to the key tensor via
+        complex multiplication.
+
+        Args:
+            k (Tensor): Post-input projection key tensor of shape
+                [n_heads, n_queries, n_keys_per_query, head_dim], i.e. as returned
+                from GatherAndSubsetAttentionFunction._prep_qkv
+            key_pos_encoding (Tensor): Position encoding of shape
+                [n_queries, n_keys_per_query, embed_dim]
+
+        Returns:
+            - k_rotated (Tensor): Key tensor after rotation, of shape
+                [n_heads, n_queries, n_keys_per_query, head_dim]
+            - k_complex (Tensor): Complex representation of key tensor of shape
+                [n_heads, n_queries, n_keys_per_query, head_dim/2].
+                Used later in backward pass.
+            - key_pos_complex: Complex representation of position encoding of shape
+                [n_heads, n_queries, n_keys_per_query, head_dim/2].
+                Used later in backward pass.
+        """
         assert k.ndim == 4
         n_heads, n_queries, n_keys_per_query, head_dim = k.shape
         key_pos_encoding = key_pos_encoding.reshape(
@@ -760,7 +843,25 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         need_weight_grad: bool,
         need_bias_grad: bool,
     ) -> tuple[Optional[Tensor], Optional[Tensor]]:
-        """Efficiently compute gradients for weights and biases of a linear layer."""
+        """Efficiently computes gradients for weights and biases of a linear layer.
+        Computes only the gradients required. If both the weight and bias gradient
+        are required, computes them efficiently with the bias trick by concatenating
+        a column of 1s onto the weight matrix before matmuling. The product of matmuling
+        this augmented matrix with the gradient is then the weight and bias gradients
+        stacked together.
+
+        Args:
+            grad_output (Tensor): Gradient of output, of shape [batch_size, out_features]
+            inputs (Tensor): Input tensor, of shape [batch_size, in_features]
+            need_weight_grad (bool): Whether weight gradients are needed
+            need_bias_grad (bool): Whether bias gradients are needed
+
+        Returns:
+            - weight_grad (Optional[Tensor]): Gradient for weights, of shape
+                [out_features, in_features], or None if need_weight_grad is False
+            - bias_grad (Optional[Tensor]): Gradient for bias, shape [out_features],
+                or None if need_bias_grad is False
+        """
         if grad_output is None:
             return None, None
 
@@ -785,7 +886,31 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         key_pos_complex: Tensor,
         needs_grad_key_pos: bool,
     ) -> tuple[Tensor, Optional[Tensor]]:
-        """Perform the backward pass of applying rotary positional encoding (RoPE)"""
+        """Perform the backward pass of applying rotary positional encoding (RoPE)
+
+        Computes gradients through complex number operations used in the RoPE
+        forward pass. For complex multiplication z = x * y, the gradients are:
+        dL/dx = dL/dz * conj(y) and dL/dy = dL/dz * conj(x).
+
+        Args:
+            grad_k_rotated (Tensor): Gradient of loss with respect to rotated keys,
+                of shape [n_heads, n_queries, n_keys_per_query, head_dim]
+            k_complex (Tensor): Complex representation of the keys from forward pass
+                of shape [n_heads, n_queries, n_keys_per_query, head_dim/2],
+                as returned from _rotate_k.
+            key_pos_complex (Tensor): Complex representation of positional encodings
+                of shape [n_heads, n_queries, n_keys_per_query, head_dim/2],
+                as returned from _rotate_k.
+            needs_grad_key_pos (bool): Whether gradients for positional encodings
+                are needed
+
+        Returns:
+            grad_k (Tensor): Gradient tensor for the unrotated keys,
+                of shape [n_heads, n_queries, n_keys_per_query, head_dim]
+            grad_key_pos (Tensor): Gradient tensor for the positional encodings
+                of shape [n_queries, n_keys_per_query, embed_dim],
+                or None if not needed
+        """
         n_heads, n_queries, n_keys_per_query, head_dim = grad_k_rotated.shape
 
         grad_k_rotated = grad_k_rotated.reshape(
@@ -824,7 +949,32 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
     def backward(
         ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor
     ) -> tuple[Optional[Tensor], ...]:
-        """Implements the backward pass for sparse neighborhood attn"""
+        """Implements the backward pass for sparse neighborhood attention.
+
+        This custom backward operation recalculates intermediate values that were
+        not stored during the forward pass to save memory, then calculates gradients
+        for only the input tensors that require gradients.
+
+        Args:
+            ctx (torch.autograd.function.FunctionCtx): Context containing saved tensors
+            grad_output (Tensor): Gradient of the loss with respect to the output,
+                shape [n_queries, embed_dim]
+
+        Returns:
+            tuple[Optional[Tensor], ...]: Gradients for all inputs in the same order as
+            the forward method:
+                - grad_query: [n_queries, embed_dim] or None
+                - None (for n_heads)
+                - grad_sparse_values: [num_sparse_values, embed_dim] or None
+                - None (for index_search)
+                - None (for is_specified_mask)
+                - grad_Wk: [embed_dim, embed_dim] or None
+                - grad_Wv: [embed_dim, embed_dim] or None
+                - grad_bias_k: [embed_dim] or None
+                - grad_bias_v: [embed_dim] or None
+                - grad_key_pos_encoding: [n_queries, n_keys_per_query, embed_dim] or None
+                - None (for scale_factor)
+        """
 
         # retrieve tensors
         query_tensor, sparse_tensor_values, Wk, Wv, bias_k, bias_v, key_pos_encoding = (
@@ -1042,7 +1192,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 @torch.jit.script
 def batch_sparse_index_subset_attn(
     sparse_tensor: Tensor,
-    index_tensor: Tensor,
+    key_index_tensor: Tensor,
     query_tensor: Tensor,
     n_heads: int,
     key_weight: Tensor,
@@ -1053,23 +1203,68 @@ def batch_sparse_index_subset_attn(
     scale_factor: Optional[float] = None,
     check_all_specified: bool = False,
 ):
-    if index_tensor.is_nested:
-        raise ValueError("Nested index tensor not supported")
-        # return __gather_nested_index(sparse_tensor, index_tensor, check_all_specified)
+    """Performs batch selection of elements from a torch sparse tensor followed by
+    multi-head attention. Each query attends only to its own specified subset of keys
+    (representing that query's local neighborhood, for example).
 
-    if query_tensor.shape[:-1] != index_tensor.shape[:-2]:
+    The implementation uses a custom autograd function to avoid storing large
+    intermediate tensors, recalculating them during the backward pass as needed.
+
+    Notes:
+        - Key indices in key_index_tensor pointing to spatial locations in sparse_tensor
+            that do not have specified values will be masked out in the attention
+            calculation similar to masking out padding in standard attention.
+        - Queries whose keys are all unspecified will get an output vector of all 0.
+
+    Args:
+        sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
+            S leading sparse dimensions and M is the dense feature dimension.
+        key_index_tensor (Tensor): Long tensor of dimension ..., L, S; where ... are
+            leading batch dimensions, L is the number of keys per query, and S is
+            the number of sparse dimensions. Negative indices and indices outside
+            the spatial dimension of the sparse tensor are not supported and will
+            be considered unspecified.
+        query_tensor (Tensor): Query features of shape ..., M; where ... matches
+            the batch dimensions from key_index_tensor, and M is the feature dimension.
+        n_heads (int): Number of attention heads to use.
+        key_weight (Tensor): Key projection matrix of shape [M, M].
+        value_weight (Tensor): Value projection matrix of shape [M, M].
+        key_bias (Optional[Tensor]): Optional bias vector for key projection of shape [M].
+        value_bias (Optional[Tensor]): Optional bias vector for value projection of shape [M].
+        key_pos_encoding (Optional[Tensor]): Optional positional encoding for keys
+            of shape [..., L, M], where ... matches the batch dimensions from key_index_tensor.
+            Used for rotary position embedding (RoPE). If specified, M and the
+            head dim must both be divisible by 2.
+        scale_factor (Optional[float]): Optional scaling factor for attention scores.
+            If None, will default is 1/sqrt(M).
+        check_all_specified (bool): If True, this function will raise a ValueError
+            if any of the indices in `key_index_tensor` are not specified in `sparse_tensor`.
+            If False, unspecified indices will be masked out in the attention calculation.
+            Defaults to False.
+
+    Returns:
+        - Tensor: Output tensor after attention of shape [..., M], where ... are the
+            batch dimensions from key_index_tensor and query_tensor.
+        - Tensor: Boolean mask of shape [..., L], indicating which keys were actually
+            specified in the sparse tensor.
+    """
+    if key_index_tensor.is_nested:
+        raise ValueError("Nested key index tensor not supported")
+        # return __gather_nested_index(sparse_tensor, key_index_tensor, check_all_specified)
+
+    if query_tensor.shape[:-1] != key_index_tensor.shape[:-2]:
         error_str = "Expected the first n-1 dims of query_tensor and the first"
         error_str += "n-2 dims of index_tensor to match, got "
         error_str += str(query_tensor.shape)
         error_str += " and "
-        error_str += str(index_tensor.shape)
+        error_str += str(key_index_tensor.shape)
         raise ValueError(error_str)
 
     sparse_tensor = sparse_tensor.coalesce()
     sparse_tensor_values = sparse_tensor.values()
 
     index_search, is_specified_mask = get_sparse_index_mapping(
-        sparse_tensor, index_tensor
+        sparse_tensor, key_index_tensor
     )
     if check_all_specified and not is_specified_mask.all():
         raise ValueError(
@@ -1092,12 +1287,9 @@ def batch_sparse_index_subset_attn(
         scale_factor,
     )
 
-    out_shape = list(query_tensor.shape[:-1])
-    out_shape.append(value_weight.size(0))
-    assert list(attended.shape) == out_shape
-    assert is_specified_mask.shape == index_tensor.shape[:-1]
-    # attended = attended.view(out_shape)
-    # is_specified_mask = is_specified_mask.view(out_shape[:-1])
+    out_shape = query_tensor.shape[:-1] + (value_weight.size(0),)
+    assert attended.shape == out_shape
+    assert is_specified_mask.shape == key_index_tensor.shape[:-1]
 
     return attended, is_specified_mask
 

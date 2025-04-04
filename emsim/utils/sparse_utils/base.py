@@ -714,6 +714,31 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         return output
 
     @staticmethod
+    def _linear_grads(
+        grad_output: Tensor,
+        inputs: Tensor,
+        need_weight_grad: bool,
+        need_bias_grad: bool,
+    ) -> tuple[Optional[Tensor], Optional[Tensor]]:
+        """Efficiently compute gradients for weights and biases of a linear layer."""
+        if grad_output is None:
+            return None, None
+
+        if need_weight_grad and need_bias_grad:
+            # Use bias trick
+            ones = inputs.new_ones(inputs.size(0), 1)
+            augmented_input = torch.cat([inputs, ones], dim=1)
+            combined_grad = torch.mm(grad_output.t(), augmented_input)
+            return combined_grad[:, :-1], combined_grad[:, -1]
+        elif need_weight_grad:
+            weight_grad = torch.mm(grad_output.t(), inputs)
+            return weight_grad, None
+        elif need_bias_grad:
+            bias_grad = grad_output.sum(0)
+            return None, bias_grad
+        return None, None
+
+    @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(
         ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor
@@ -753,6 +778,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         grad_bias_k = None
         grad_bias_v = None
 
+        # initialize flattened grad vars
+        grad_k_flat = None
+        grad_v_flat = None
+
         if grad_output is None:
             return (
                 grad_query,  # query_tensor
@@ -777,6 +806,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         # split heads on the grad tensor
         grad_output = grad_output.reshape(n_queries, n_heads, head_dim)
+
         # (n_heads, n_queries, head_dim)
         grad_output = grad_output.transpose(-2, -3).contiguous()
 
@@ -860,21 +890,21 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 # Flatten for grad calcs
                 grad_v_flat = grad_v.view(-1, embed_dim)
 
-            if needs_grad_Wk or needs_grad_Wv:
+            if needs_grad_Wk or needs_grad_Wv or needs_grad_bias_k or needs_grad_bias_v:
                 selected_flat = selected.view(-1, embed_dim)
 
-                if needs_grad_Wk:
-                    grad_Wk = torch.mm(grad_k_flat.t(), selected_flat)
-                if needs_grad_Wv:
-                    grad_Wv = torch.mm(grad_v_flat.t(), selected_flat)
+                grad_Wk, grad_bias_k = (
+                    GatherAndSubsetAttentionFunction._linear_grads(
+                        grad_k_flat, selected_flat, needs_grad_Wk, needs_grad_bias_k
+                    )
+                )
+
+                grad_Wv, grad_bias_v = GatherAndSubsetAttentionFunction._linear_grads(
+                    grad_v_flat, selected_flat, needs_grad_Wv, needs_grad_bias_v
+                )
+
                 del selected_flat
             del selected
-
-            if needs_grad_bias_k:
-                grad_bias_k = grad_k_flat.sum(0)
-
-            if needs_grad_bias_v:
-                grad_bias_v = grad_v_flat.sum(0)
 
             if needs_grad_sparse_values:
                 # two matrix multiplies - faster if we batch them

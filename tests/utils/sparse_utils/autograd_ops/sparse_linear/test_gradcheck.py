@@ -16,8 +16,8 @@ def test_gather_and_linear_function(
     setup_sparse_tensor, setup_linear_index_tensor, device
 ):
     """Test gradient computation for gather and linear function."""
-    sparse_tensor = setup_sparse_tensor.to(device)
-    index_tensor = setup_linear_index_tensor.to(device)
+    sparse_tensor = setup_sparse_tensor
+    index_tensor = setup_linear_index_tensor
 
     # Get index mapping
     sparse_tensor = sparse_tensor.coalesce()

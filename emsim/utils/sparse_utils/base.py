@@ -666,6 +666,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         q = q.transpose(-2, -3).contiguous()  # (n_heads, n_queries, head_dim)
 
         # (n_heads, n_queries, n_keys_per_query, head_dim)
+        # standard batched-heads approach for multiplication with q and attn_weights
+        # but with added n_keys_per_query dim that k broadcasts over q and v
+        # contracts with attn_weights
         k = k.permute(2, 0, 1, 3).contiguous()
         v = v.permute(2, 0, 1, 3).contiguous()
 
@@ -820,20 +823,24 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             query_tensor, sparse_tensor_values, index_search, is_specified_mask,
             Wk, Wv, bias_k, bias_v, n_heads, head_dim,
         )
+        # fmt: on
 
         if key_pos_encoding is not None:
             k, _, _ = GatherAndSubsetAttentionFunction._rotate_k(k, key_pos_encoding)
 
+        # fmt: off
         attn_scores = torch.matmul(
             q.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
             k.transpose(-1, -2)             # (n_heads, n_queries, head_dim, n_keys_per_query)
         ).squeeze(-2)                       # (n_heads, n_queries, n_keys_per_query)
+        # fmt: on
 
         attn_scores.masked_fill_(~is_specified_mask, -torch.inf)
         attn_weights = attn_scores.softmax(-1)
         # nans expected if all of the keys a query tried to attend to were unspecified
         attn_weights.nan_to_num_(0.0)
 
+        # fmt: off
         output = torch.matmul(
             attn_weights.unsqueeze(-2), # (n_heads, n_queries, 1, n_keys_per_query)
             v,                          # (n_heads, n_queries, n_keys_per_query, head_dim)
@@ -884,6 +891,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         if grad_output is None:
             return None, None
 
+        assert grad_output.ndim in (2, 3)
         is_stacked_mode = grad_output.ndim == 3
 
         if need_weight_grad and need_bias_grad:
@@ -1072,6 +1080,59 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         return grad_v
 
     @staticmethod
+    def _compute_grads_k_v_projections(
+        grad_k_flat: Tensor,
+        grad_v_flat: Tensor,
+        selected: Tensor,
+        needs_grad_Wk: bool,
+        needs_grad_Wv: bool,
+        needs_grad_bias_k: bool,
+        needs_grad_bias_v: bool,
+    ) -> tuple[Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor]]:
+        selected_flat = selected.view(-1, selected.size(-1))
+
+        if (needs_grad_Wk or needs_grad_bias_k) and (
+            needs_grad_Wv and needs_grad_bias_v
+        ):
+            # need grads from both projections - batch the two gradient
+            # calculations to save a matmul call (bmm vs 2x mm)
+
+            # stack gradients for batched k and v backward (adding leading dim)
+            grad_kv_flat = torch.stack([grad_k_flat, grad_v_flat])
+
+            grad_W_stacked, grad_bias_stacked = (
+                GatherAndSubsetAttentionFunction._linear_grads(
+                    grad_kv_flat,
+                    selected_flat,
+                    needs_grad_Wk or needs_grad_Wv,
+                    needs_grad_bias_k or needs_grad_bias_v,
+                )
+            )
+
+            if grad_W_stacked is not None:
+                grad_Wk, grad_Wv = grad_W_stacked
+                grad_Wk = grad_Wk if needs_grad_Wk else None
+                grad_Wv = grad_Wv if needs_grad_Wv else None
+
+            if grad_bias_stacked is not None:
+                grad_bias_k, grad_bias_v = grad_bias_stacked
+                grad_bias_k = grad_bias_k if needs_grad_bias_k else None
+                grad_bias_v = grad_bias_v if needs_grad_bias_v else None
+
+        else:
+            # only need one projection's grad. call _linear_grads twice
+            # since it will safely return None, None for the one where
+            # needs_grads bools are False
+            grad_Wk, grad_bias_k = GatherAndSubsetAttentionFunction._linear_grads(
+                grad_k_flat, selected_flat, needs_grad_Wk, needs_grad_bias_k
+            )
+
+            grad_Wv, grad_bias_v = GatherAndSubsetAttentionFunction._linear_grads(
+                grad_v_flat, selected_flat, needs_grad_Wv, needs_grad_bias_v
+            )
+        return grad_Wk, grad_Wv, grad_bias_k, grad_bias_v
+
+    @staticmethod
     def _compute_grad_sparse_values(
         grad_k_flat: Tensor,
         grad_v_flat: Tensor,
@@ -1088,7 +1149,13 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # two matrix multiplies - faster if we batch them
         grad_k_v_stacked = torch.stack([grad_k_flat, grad_v_flat])
         W_stacked = torch.stack([Wk, Wv])
-        grad_selected = torch.bmm(grad_k_v_stacked, W_stacked).sum(0)
+        # fmt: off
+        grad_selected = torch.bmm(
+            grad_k_v_stacked,  # (2, n_queries * n_keys_per_query, embed_dim)
+            W_stacked,         # (2, embed_dim, embed_dim)
+        )                      # (2, n_queries * n_keys_per_query, embed_dim)
+        # fmt: on
+        grad_selected = grad_selected.sum(0)  # = elementwise add of k, v contributions
         grad_selected = grad_selected.view(n_queries, n_keys_per_query, embed_dim)
 
         # Zero out grads for masked selecteds
@@ -1269,47 +1336,18 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 grad_v_flat = grad_v.view(-1, embed_dim)
 
             if needs_grad_Wk or needs_grad_Wv or needs_grad_bias_k or needs_grad_bias_v:
-                selected_flat = selected.view(-1, embed_dim)
-
-                if (needs_grad_Wk and needs_grad_Wv) or (
-                    needs_grad_bias_k and needs_grad_bias_v
-                ):
-                    # stack gradients along feature dim for batched k and v backward
-                    grad_kv_flat = torch.stack([grad_k_flat, grad_v_flat])
-
-                    grad_W_stacked, grad_bias_stacked = (
-                        GatherAndSubsetAttentionFunction._linear_grads(
-                            grad_kv_flat,
-                            selected_flat,
-                            needs_grad_Wk or needs_grad_Wv,
-                            needs_grad_bias_k or needs_grad_bias_v,
-                        )
+                # need to get at least one of the projection gradients
+                grad_Wk, grad_Wv, grad_bias_k, grad_bias_v = (
+                    GatherAndSubsetAttentionFunction._compute_grads_k_v_projections(
+                        grad_k_flat,
+                        grad_v_flat,
+                        selected,
+                        needs_grad_Wk,
+                        needs_grad_Wv,
+                        needs_grad_bias_k,
+                        needs_grad_bias_v,
                     )
-
-                    if grad_W_stacked is not None:
-                        grad_Wk, grad_Wv = grad_W_stacked
-                        grad_Wk = grad_Wk if needs_grad_Wk else None
-                        grad_Wv = grad_Wv if needs_grad_Wv else None
-
-                    if grad_bias_stacked is not None:
-                        grad_bias_k, grad_bias_v = grad_bias_stacked
-                        grad_bias_k = grad_bias_k if needs_grad_bias_k else None
-                        grad_bias_v = grad_bias_v if needs_grad_bias_v else None
-
-                else:
-                    grad_Wk, grad_bias_k = (
-                        GatherAndSubsetAttentionFunction._linear_grads(
-                            grad_k_flat, selected_flat, needs_grad_Wk, needs_grad_bias_k
-                        )
-                    )
-
-                    grad_Wv, grad_bias_v = (
-                        GatherAndSubsetAttentionFunction._linear_grads(
-                            grad_v_flat, selected_flat, needs_grad_Wv, needs_grad_bias_v
-                        )
-                    )
-
-                del selected_flat
+                )
             del selected
 
             if needs_grad_sparse_values:

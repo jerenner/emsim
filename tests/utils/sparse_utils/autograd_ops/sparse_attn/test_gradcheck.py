@@ -6,16 +6,31 @@ from emsim.utils.sparse_utils.base import (
     GatherAndSubsetAttentionFunction,
 )
 
-from ..constants import EMBED_DIM, N_KEYS_PER_QUERY, N_HEADS
+from ..constants import (
+    EMBED_DIM,
+    N_KEYS_PER_QUERY,
+    N_HEADS,
+    POSITION_DIM,
+    N_FREQ_GROUPS,
+)
 
 
+@pytest.mark.parametrize(
+    "key_pos_encoding_type",
+    ["given", "computed", None],
+    ids=[
+        "key_pos_encoding_type=given",
+        "key_pos_encoding_type=computed",
+        "key_pos_encoding_type=None",
+    ],
+)
 @pytest.mark.cuda
 def test_gather_and_subset_attention_function(
-    setup_sparse_tensor, setup_attention_index_tensor, device
+    setup_sparse_tensor, setup_attention_index_tensor, device, key_pos_encoding_type
 ):
     """Test gradient computation for gather and subset attention function."""
-    sparse_tensor = setup_sparse_tensor.to(device)
-    index_tensor = setup_attention_index_tensor.to(device)
+    sparse_tensor = setup_sparse_tensor
+    index_tensor = setup_attention_index_tensor
 
     # Get index mapping
     sparse_tensor = sparse_tensor.coalesce()
@@ -44,14 +59,43 @@ def test_gather_and_subset_attention_function(
     value_bias = torch.randn(
         EMBED_DIM, dtype=torch.double, requires_grad=True, device=device
     )
-    key_pos_encoding = torch.randn(
-        index_tensor.shape[0],
-        N_KEYS_PER_QUERY,
-        EMBED_DIM,
-        dtype=torch.double,
-        requires_grad=True,
-        device=device,
+    key_pos_encoding = (
+        torch.randn(
+            index_tensor.shape[0],
+            N_KEYS_PER_QUERY,
+            EMBED_DIM,
+            dtype=torch.double,
+            requires_grad=True,
+            device=device,
+        )
+        if key_pos_encoding_type == "given"
+        else None
     )
+    key_positions = (
+        torch.randn(
+            index_tensor.shape[0],
+            N_KEYS_PER_QUERY,
+            POSITION_DIM,
+            dtype=torch.double,
+            requires_grad=True,
+            device=device,
+        )
+        if key_pos_encoding_type == "computed"
+        else None
+    )
+    rope_freqs = (
+        torch.randn(
+            POSITION_DIM,
+            N_FREQ_GROUPS,
+            EMBED_DIM,
+            dtype=torch.double,
+            requires_grad=True,
+            device=device,
+        )
+        if key_pos_encoding_type == "computed"
+        else None
+    )
+
     scale_factor = None
 
     # Run gradcheck
@@ -66,6 +110,8 @@ def test_gather_and_subset_attention_function(
         key_bias,
         value_bias,
         key_pos_encoding,
+        key_positions,
+        rope_freqs,
         scale_factor,
     )
     assert torch.autograd.gradcheck(GatherAndSubsetAttentionFunction.apply, inputs)
@@ -82,14 +128,47 @@ def test_gather_and_subset_attention_function(
         ("key_bias", 7),
         ("value_bias", 8),
         ("key_pos_encoding", 9),
+        ("key_positions", 10),
+        ("rope_freqs", 11),
+    ],
+)
+@pytest.mark.parametrize(
+    "key_pos_encoding_type",
+    ["given", "computed", None],
+    ids=[
+        "key_pos_encoding_type=given",
+        "key_pos_encoding_type=computed",
+        "key_pos_encoding_type=None",
     ],
 )
 def test_gradients_per_parameter(
-    setup_sparse_tensor, setup_attention_index_tensor, param_name, param_index, device
+    setup_sparse_tensor,
+    setup_attention_index_tensor,
+    device,
+    key_pos_encoding_type,
+    param_name,
+    param_index,
 ):
     """Test gradients individually for each parameter."""
     sparse_tensor = setup_sparse_tensor
     index_tensor = setup_attention_index_tensor
+
+    if (
+        (
+            key_pos_encoding_type == "given"
+            and param_name
+            in (
+                "key_positions",
+                "rope_freqs",
+            )
+        )
+        or (key_pos_encoding_type == "computed" and param_name == "key_pos_encoding")
+        or (
+            key_pos_encoding_type is None
+            and param_name in ("key_pos_encoding", "key_positions", "rope_freqs")
+        )
+    ):
+        pytest.skip("Invalid param combination")
 
     # Get index mapping
     sparse_tensor = sparse_tensor.coalesce()
@@ -108,12 +187,38 @@ def test_gradients_per_parameter(
     value_weight = torch.randn(EMBED_DIM, EMBED_DIM, dtype=torch.double, device=device)
     key_bias = torch.randn(EMBED_DIM, dtype=torch.double, device=device)
     value_bias = torch.randn(EMBED_DIM, dtype=torch.double, device=device)
-    key_pos_encoding = torch.randn(
-        query_tensor.shape[0],
-        N_KEYS_PER_QUERY,
-        EMBED_DIM,
-        dtype=torch.double,
-        device=device,
+    key_pos_encoding = (
+        torch.randn(
+            index_tensor.shape[0],
+            N_KEYS_PER_QUERY,
+            EMBED_DIM,
+            dtype=torch.double,
+            device=device,
+        )
+        if key_pos_encoding_type == "given"
+        else None
+    )
+    key_positions = (
+        torch.randn(
+            index_tensor.shape[0],
+            N_KEYS_PER_QUERY,
+            POSITION_DIM,
+            dtype=torch.double,
+            device=device,
+        )
+        if key_pos_encoding_type == "computed"
+        else None
+    )
+    rope_freqs = (
+        torch.randn(
+            POSITION_DIM,
+            N_FREQ_GROUPS,
+            EMBED_DIM,
+            dtype=torch.double,
+            device=device,
+        )
+        if key_pos_encoding_type == "computed"
+        else None
     )
     scale_factor = None
 
@@ -129,6 +234,8 @@ def test_gradients_per_parameter(
         key_bias,
         value_bias,
         key_pos_encoding,
+        key_positions,
+        rope_freqs,
         scale_factor,
     ]
 
@@ -141,9 +248,11 @@ def test_gradients_per_parameter(
         7,
         8,
         9,
+        10,
+        11,
     ]  # Indices of tensors that could require gradients
     for idx in tensor_indices:
-        if idx == param_index:
+        if idx == param_index and inputs[idx] is not None:
             inputs[idx] = inputs[idx].clone().requires_grad_(True)
 
     # The parameter we're testing

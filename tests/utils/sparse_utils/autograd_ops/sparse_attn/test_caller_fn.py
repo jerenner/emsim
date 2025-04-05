@@ -5,14 +5,18 @@ from emsim.utils.sparse_utils.base import (
     batch_sparse_index_subset_attn,
 )
 
-from ..constants import EMBED_DIM, N_HEADS, N_KEYS_PER_QUERY
+from ..constants import EMBED_DIM, N_HEADS, N_KEYS_PER_QUERY, POSITION_DIM, N_FREQ_GROUPS
 
 
 @pytest.mark.cuda
 @pytest.mark.parametrize(
-    "with_key_pos_encoding",
-    [True, False],
-    ids=["key_pos_encoding=True", "key_pos_encoding=False"],
+    "key_pos_encoding_type",
+    ["given", "computed", None],
+    ids=[
+        "key_pos_encoding_type=given",
+        "key_pos_encoding_type=computed",
+        "key_pos_encoding_type=None",
+    ],
 )
 @pytest.mark.parametrize(
     "scale_factor", [None, 0.5], ids=["scale_factor=None", "scale_factor=0.5"]
@@ -20,9 +24,9 @@ from ..constants import EMBED_DIM, N_HEADS, N_KEYS_PER_QUERY
 def test_end_to_end_subset_attn(
     setup_sparse_tensor,
     setup_attention_index_tensor,
-    with_key_pos_encoding,
-    scale_factor,
     device,
+    key_pos_encoding_type,
+    scale_factor,
 ):
     """Test end-to-end gather and subset attention."""
     sparse_tensor = setup_sparse_tensor
@@ -59,7 +63,31 @@ def test_end_to_end_subset_attn(
             requires_grad=True,
             device=device,
         )
-        if with_key_pos_encoding
+        if key_pos_encoding_type == "given"
+        else None
+    )
+    key_positions = (
+        torch.randn(
+            index_tensor.shape[0],
+            N_KEYS_PER_QUERY,
+            POSITION_DIM,
+            dtype=torch.double,
+            requires_grad=True,
+            device=device,
+        )
+        if key_pos_encoding_type == "computed"
+        else None
+    )
+    rope_freqs = (
+        torch.randn(
+            POSITION_DIM,
+            N_FREQ_GROUPS,
+            EMBED_DIM,
+            dtype=torch.double,
+            requires_grad=True,
+            device=device,
+        )
+        if key_pos_encoding_type == "computed"
         else None
     )
 
@@ -74,6 +102,8 @@ def test_end_to_end_subset_attn(
         key_bias,
         value_bias,
         key_pos_encoding,
+        key_positions,
+        rope_freqs,
         scale_factor,
     )
 

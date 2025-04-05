@@ -7,11 +7,23 @@ from emsim.utils.sparse_utils.base import (
 )
 
 from .traceable_sparse_attn import traceable_sparse_attention
-from ..constants import EMBED_DIM, N_HEADS, N_KEYS_PER_QUERY
+from ..constants import (
+    EMBED_DIM,
+    N_HEADS,
+    N_KEYS_PER_QUERY,
+    POSITION_DIM,
+    N_FREQ_GROUPS,
+)
 
 
 @pytest.mark.parametrize(
-    "use_pos_encoding", [True, False], ids=["pos_encoding=True", "pos_encoding=False"]
+    "key_pos_encoding_type",
+    ["given", "computed", None],
+    ids=[
+        "key_pos_encoding_type=given",
+        "key_pos_encoding_type=computed",
+        "key_pos_encoding_type=None",
+    ],
 )
 @pytest.mark.parametrize(
     "use_bias", [True, False], ids=["use_bias=True", "use_bias=False"]
@@ -23,10 +35,10 @@ from ..constants import EMBED_DIM, N_HEADS, N_KEYS_PER_QUERY
 def test_subset_attn_against_traceable(
     setup_sparse_tensor,
     setup_attention_index_tensor,
-    use_pos_encoding,
-    use_bias,
-    scale_factor,
     device,
+    use_bias,
+    key_pos_encoding_type,
+    scale_factor,
 ):
     """Test that the custom attention operator produces the same results
     as a traceable implementation using standard PyTorch ops."""
@@ -63,18 +75,42 @@ def test_subset_attn_against_traceable(
         else None
     )
 
-    # RoPE requires even head_dim
-    if use_pos_encoding:
-        key_pos_encoding = torch.randn(
-            n_queries,
+    key_pos_encoding = (
+        torch.randn(
+            index_tensor.shape[0],
             N_KEYS_PER_QUERY,
             EMBED_DIM,
             dtype=torch.double,
-            device=device,
             requires_grad=True,
+            device=device,
         )
-    else:
-        key_pos_encoding = None
+        if key_pos_encoding_type == "given"
+        else None
+    )
+    key_positions = (
+        torch.randn(
+            index_tensor.shape[0],
+            N_KEYS_PER_QUERY,
+            POSITION_DIM,
+            dtype=torch.double,
+            requires_grad=True,
+            device=device,
+        )
+        if key_pos_encoding_type == "computed"
+        else None
+    )
+    rope_freqs = (
+        torch.randn(
+            POSITION_DIM,
+            N_FREQ_GROUPS,
+            EMBED_DIM,
+            dtype=torch.double,
+            requires_grad=True,
+            device=device,
+        )
+        if key_pos_encoding_type == "computed"
+        else None
+    )
 
     # Prepare sparse tensor and index mapping
     sparse_tensor_values = sparse_tensor.values().clone().detach().requires_grad_(True)
@@ -94,6 +130,8 @@ def test_subset_attn_against_traceable(
         key_bias,
         value_bias,
         key_pos_encoding,
+        key_positions,
+        rope_freqs,
         scale_factor,  # scale_factor
     )
 
@@ -109,6 +147,8 @@ def test_subset_attn_against_traceable(
         key_bias,
         value_bias,
         key_pos_encoding,
+        key_positions,
+        rope_freqs,
         scale_factor,  # scale_factor
     )
 
@@ -132,7 +172,11 @@ def test_subset_attn_against_traceable(
     if value_bias is not None:
         custom_grads["value_bias"] = value_bias.grad.clone()
     if key_pos_encoding is not None:
-        custom_grads["key_pos"] = key_pos_encoding.grad.clone()
+        custom_grads["key_pos_encoding"] = key_pos_encoding.grad.clone()
+    if key_positions is not None and key_positions.grad is not None:
+        custom_grads["key_positions"] = key_positions.grad.clone()
+    if rope_freqs is not None and rope_freqs.grad is not None:
+        custom_grads["rope_freqs"] = rope_freqs.grad.clone()
 
     # Zero out gradients
     query_tensor.grad = None
@@ -145,6 +189,10 @@ def test_subset_attn_against_traceable(
         value_bias.grad = None
     if key_pos_encoding is not None:
         key_pos_encoding.grad = None
+    if key_positions is not None:
+        key_positions.grad = None
+    if rope_freqs is not None:
+        rope_freqs.grad = None
 
     # Backward through traceable implementation
     loss = traceable_output.sum()
@@ -161,4 +209,8 @@ def test_subset_attn_against_traceable(
     if value_bias is not None:
         assert torch.allclose(custom_grads["value_bias"], value_bias.grad)
     if key_pos_encoding is not None:
-        assert torch.allclose(custom_grads["key_pos"], key_pos_encoding.grad)
+        assert torch.allclose(custom_grads["key_pos_encoding"], key_pos_encoding.grad)
+    if key_positions is not None:
+        assert torch.allclose(custom_grads["key_positions"], key_positions.grad)
+    if rope_freqs is not None:
+        assert torch.allclose(custom_grads["rope_freqs"], rope_freqs.grad)

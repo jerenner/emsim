@@ -8,6 +8,9 @@ EMBED_DIM = 16
 N_HEADS = 2
 N_KEYS_PER_QUERY = 5
 
+POSITION_DIM = 3
+N_FREQ_GROUPS = 2
+
 
 ALWAYS_SPECIFIED = torch.tensor(
     [

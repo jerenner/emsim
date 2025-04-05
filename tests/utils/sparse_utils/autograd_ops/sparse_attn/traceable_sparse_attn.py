@@ -18,6 +18,8 @@ def traceable_sparse_attention(
     bias_k: Optional[Tensor] = None,
     bias_v: Optional[Tensor] = None,
     key_pos_encoding: Optional[Tensor] = None,
+    key_positions: Optional[Tensor] = None,
+    rope_freqs: Optional[Tensor] = None,
     scale_factor: Optional[float] = None,
 ):
     """Traceable implementation of sparse attention using standard PyTorch ops.
@@ -51,6 +53,19 @@ def traceable_sparse_attention(
     q = q.transpose(-2, -3).contiguous()  # (n_heads, n_queries, head_dim)
     k = k.permute(2, 0, 1, 3).contiguous()  # (n_heads, n_queries, n_keys_per_query, head_dim)
     v = v.permute(2, 0, 1, 3).contiguous()  # (n_heads, n_queries, n_keys_per_query, head_dim)
+
+    if key_positions is not None:
+        assert rope_freqs is not None
+        assert key_pos_encoding is None
+        position_dim = key_positions.size(-1)
+        n_freq_groups = rope_freqs.size(1)
+        # fmt: off
+        key_pos_encoding = torch.mm(
+            key_positions.reshape(-1, position_dim),  # (n_queries*n_keys_per_query, position_dim)
+            rope_freqs.reshape(position_dim, -1),  # (position_dim, n_freq_groups*embed_dim)
+        ).view(n_queries, n_keys_per_query, n_freq_groups, embed_dim)
+        key_pos_encoding = key_pos_encoding.sum(-2)
+        # fmt: on
 
     # Apply rotary position encoding if provided
     if key_pos_encoding is not None:

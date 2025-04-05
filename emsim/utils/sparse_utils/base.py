@@ -676,6 +676,24 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
     @staticmethod
     def _calc_key_pos_encoding(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
+        """Computes the positional encoding for keys using the provided positions and frequency values.
+
+        This function calculates the position encoding by matrix-multiplying key
+        positions with  rotary frequency embeddings, then summing over frequency
+        groups.
+
+        Args:
+            key_positions (Tensor): Position information for each key of shape
+                [n_queries, n_keys_per_query, position_dim], where position_dim is the
+                dimensionality of the position representation.
+            rope_freqs (Tensor): Frequency values for rotary embeddings of shape
+                [position_dim, n_freq_groups, embed_dim] or [position_dim, embed_dim],
+                which will be reshaped to [position_dim, 1, embed_dim] if needed.
+
+        Returns:
+            Tensor: Computed positional encoding of shape
+                [n_queries, n_keys_per_query, embed_dim]
+        """
         assert key_positions.ndim == 3
         assert rope_freqs.ndim == 3
         n_queries, n_keys_per_query, position_dim = key_positions.shape
@@ -780,7 +798,17 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             key_pos_encoding (Optional[Tensor]): Positional encoding for keys of shape
                 [n_queries, n_keys_per_query, embed_dim]. Used for rotary position
                 embedding (RoPE). If specified, both embed_dim and the head dim must be
-                divisible by 2.
+                divisible by 2. Cannot be used together with key_positions
+                and rope_freqs.
+            key_positions (Optional[Tensor]): Position information for each key of
+                shape [n_queries, n_keys_per_query, position_dim]. Used together with
+                rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
+                Cannot be used together with key_pos_encoding.
+            rope_freqs (Optional[Tensor]): Frequency values for rotary embeddings of
+                shape [position_dim, n_freq_groups, embed_dim] or
+                [position_dim, embed_dim]. Used together with key_positions to
+                compute rotary position embedding (RoPE) on-the-fly. Cannot be used
+                together with key_pos_encoding.
             scale_factor (Optional[float]): Scaling factor for attention scores.
                 Default is 1/sqrt(embed_dim).
 
@@ -1560,6 +1588,9 @@ def batch_sparse_index_subset_attn(
             that do not have specified values will be masked out in the attention
             calculation similar to masking out padding in standard attention.
         - Queries whose keys are all unspecified will get an output vector of all 0.
+        - For rotary position embeddings, either provide key_pos_encoding OR both
+          key_positions and rope_freqs. Providing both options simultaneously is
+          not supported.
 
     Args:
         sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
@@ -1579,7 +1610,18 @@ def batch_sparse_index_subset_attn(
         key_pos_encoding (Optional[Tensor]): Optional positional encoding for keys
             of shape [..., L, M], where ... matches the batch dimensions from key_index_tensor.
             Used for rotary position embedding (RoPE). If specified, M and the
-            head dim must both be divisible by 2.
+            head dim must both be divisible by 2. Cannot be used together with
+            key_positions and rope_freqs.
+        key_positions (Optional[Tensor]): Position information for each key of shape
+            [..., L, P], where ... matches the batch dimensions from key_index_tensor
+            and P is the dimensionality of the position representation. Used together
+            with rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
+            Cannot be used together with key_pos_encoding.
+        rope_freqs (Optional[Tensor]): Frequency values for rotary embeddings of shape
+            [P, G, M] or [P, M], where P matches the position dimension from key_positions,
+            G is the number of frequency groups, and M is the feature dimension.
+            Used together with key_positions to compute rotary position embedding (RoPE)
+            on-the-fly. Cannot be used together with key_pos_encoding.
         scale_factor (Optional[float]): Optional scaling factor for attention scores.
             If None, will default is 1/sqrt(M).
         check_all_specified (bool): If True, this function will raise a ValueError

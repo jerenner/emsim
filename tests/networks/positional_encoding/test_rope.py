@@ -94,12 +94,12 @@ def test_rope_encoding_nd_forward(device, dtype):
     batch_size = 2
     seq_len = 10
 
-    rope = RoPEEncodingND(position_dim, d_model, n_heads, dtype=dtype)
+    rope = RoPEEncodingND(position_dim, d_model, n_heads, dtype=dtype).to(device)
 
     # Test with query only
     query = torch.randn(batch_size, seq_len, d_model, dtype=dtype, device=device)
     query_pos = (
-        torch.randn(batch_size, seq_len, position_dim, dtype=dtype, device=device) * 10
+        torch.rand(batch_size, seq_len, position_dim, dtype=dtype, device=device) * 10
     )
 
     query_rotated = rope(query, query_pos)
@@ -108,7 +108,7 @@ def test_rope_encoding_nd_forward(device, dtype):
     # Test with query and key
     key = torch.randn(batch_size, seq_len, d_model, dtype=dtype, device=device)
     key_pos = (
-        torch.randn(batch_size, seq_len, position_dim, dtype=dtype, device=device) * 10
+        torch.rand(batch_size, seq_len, position_dim, dtype=dtype, device=device) * 10
     )
 
     query_rotated, key_rotated = rope(query, query_pos, key, key_pos)
@@ -116,18 +116,21 @@ def test_rope_encoding_nd_forward(device, dtype):
     assert key_rotated.shape == key.shape
 
 
-def test_rope_encoding_nd_normalized_warning():
+@pytest.mark.cuda
+def test_rope_encoding_nd_normalized_warning(device):
     position_dim = 2
     d_model = 256
     n_heads = 8
     batch_size = 2
     seq_len = 10
 
-    rope = RoPEEncodingND(position_dim, d_model, n_heads)
+    rope = RoPEEncodingND(position_dim, d_model, n_heads).to(device)
 
     # Create normalized positions (between 0 and 1)
-    query = torch.randn(batch_size, seq_len, d_model)
-    query_pos = torch.rand(batch_size, seq_len, position_dim)  # Values between 0 and 1
+    query = torch.randn(batch_size, seq_len, d_model, device=device)
+
+    # Values between 0 and 1
+    query_pos = torch.rand(batch_size, seq_len, position_dim, device=device)
 
     # Verify warning is raised
     with pytest.warns(UserWarning, match="potentially normalized coordinates"):
@@ -204,7 +207,7 @@ def test_rope_encoding_nd_grouped_freqs_forward(device, dtype):
 
     rope = RoPEEncodingNDGroupedFreqs(
         position_dim, d_model, n_heads, pos_dim_to_rope_group, dtype=dtype
-    )
+    ).to(device)
 
     query = torch.randn(batch_size, seq_len, d_model, dtype=dtype, device=device)
     query_pos = (

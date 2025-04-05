@@ -27,7 +27,7 @@ class MultilevelIndependentRoPE(nn.Module):
         self.ropes = nn.ModuleList(
             RoPEEncodingND(
                 position_dim=2,
-                d_model=d_model,
+                embed_dim=d_model,
                 n_heads=n_heads,
                 rope_base_theta=rope_base_theta,
                 dtype=dtype,

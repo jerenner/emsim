@@ -87,24 +87,25 @@ class RoPEEncodingND(nn.Module):
     def __init__(
         self,
         position_dim: int,
-        d_model: int,
+        embed_dim: int,
         n_heads: int,
         rope_base_theta: float = 10.0,
         dtype=torch.float,
     ):
         super().__init__()
-        if d_model % n_heads != 0:
+        self.embed_dim = embed_dim
+        if embed_dim % n_heads != 0:
             raise ValueError(
                 "Expected d_model to be divisible by n_heads, got "
-                f"{d_model} and {n_heads}"
+                f"{embed_dim} and {n_heads}"
             )
-        self.head_dim = d_model // n_heads
+        self.head_dim = embed_dim // n_heads
         if self.head_dim % 2 != 0:
             raise ValueError(
                 f"Expected head dim to be divisible by 2, got {self.head_dim}"
             )
         self.pos_dim = position_dim
-        self.d_model = d_model
+        self.d_model = embed_dim
         self.n_heads = n_heads
         self._base_theta = torch.as_tensor(rope_base_theta)
         self.dtype = dtype
@@ -120,6 +121,23 @@ class RoPEEncodingND(nn.Module):
         )
         assert freqs.shape == (self.n_heads, self.head_dim // 2, self.pos_dim)
         self.freqs = nn.Parameter(freqs)
+
+    @staticmethod
+    def real_to_complex(tensor: Tensor):
+        assert not tensor.is_complex()
+        if not tensor.size(-1) == 2:
+            assert tensor.size(-1) % 2 == 0, "Last dim must be divisible by 2"
+            new_shape = tensor.shape[:-1] + (tensor.size(-1) // 2, 2)
+            tensor = tensor.reshape(new_shape)
+        return torch.view_as_complex(tensor)
+
+    @staticmethod
+    def complex_to_real(tensor: Tensor):
+        assert tensor.is_complex()
+        tensor_real = torch.view_as_real(tensor)
+        tensor_real = tensor_real.flatten(-2, -1)  # flatten out new trailing dim of 2
+        assert tensor_real.ndim == tensor.ndim
+        return tensor_real
 
     @torch.amp.autocast("cuda", enabled=False)
     def forward(
@@ -139,39 +157,41 @@ class RoPEEncodingND(nn.Module):
             )
         if key_pos is not None:
             self.shape_check(key, key_pos)
-        query_rot_vec = self._make_rot_vec(query_pos)
-        query_rotated = self._apply_rot_vec(query, query_rot_vec)
+        query_rot_vec = self.make_complex_rotation_vector(query_pos)
+        query_rotated = self.apply_rotation(query, query_rot_vec)
 
         if key is None:
             return query_rotated
 
         if key_pos is not None:
-            key_rot_vec = self._make_rot_vec(key_pos)
+            key_rot_vec = self.make_complex_rotation_vector(key_pos)
         else:
             key_rot_vec = query_rot_vec
-        key_rotated = self._apply_rot_vec(key, key_rot_vec)
+        key_rotated = self.apply_rotation(key, key_rot_vec)
 
         return query_rotated, key_rotated
 
-    def _make_rot_vec(self, positions: Tensor) -> Tensor:
+    def make_complex_rotation_vector(self, positions: Tensor) -> Tensor:
         leading_dims = positions.shape[:-1]
         rot_vec = torch.mm(
             positions.view(-1, self.pos_dim).to(self.freqs),
-            self.freqs.view(-1, self.pos_dim).T,
-            # ).view([bsz, tgt_len, self.n_heads, self.head_dim // self.pos_dim])
-        ).view(leading_dims + (self.n_heads, self.head_dim // 2))
+            self.freqs.view(-1, self.pos_dim).t(),
+        )
+        rot_vec = rot_vec.view(leading_dims + (self.embed_dim // 2,))
         out = torch.polar(torch.ones_like(rot_vec), rot_vec)
-        assert out.shape == leading_dims + (self.n_heads, self.head_dim // 2)
         assert out.is_complex()
         return out
 
-    def _apply_rot_vec(self, query_or_key: Tensor, rot_vec: Tensor) -> Tensor:
-        leading_dims = query_or_key.shape[:-1]
-        query_or_key = query_or_key.view(
-            leading_dims + (self.n_heads, self.head_dim // 2, 2)
-        )
-        query_or_key = torch.view_as_complex(query_or_key)
-        return torch.view_as_real(query_or_key * rot_vec).flatten(-2)
+    @staticmethod
+    def apply_rotation(query_or_key: Tensor, rot_vec: Tensor) -> Tensor:
+        if not query_or_key.is_complex():
+            query_or_key = RoPEEncodingND.real_to_complex(query_or_key)
+        if not rot_vec.is_complex():
+            rot_vec = RoPEEncodingND.real_to_complex(rot_vec)
+
+        query_or_key_rotated = query_or_key * rot_vec
+
+        return RoPEEncodingND.complex_to_real(query_or_key_rotated)
 
     def shape_check(self, query_or_key: Tensor, query_or_key_pos: Tensor):
         if query_or_key.ndim != query_or_key_pos.ndim:  # ..., seq_len, d_model
@@ -251,7 +271,7 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
         )
         self.freqs = nn.Parameter(freqs)
 
-    def _make_rot_vec(self, positions: Tensor):
+    def make_complex_rotation_vector(self, positions: Tensor):
         leading_dims = positions.shape[:-1]
         assert positions.shape[-1] == self.pos_dim
         unique_indices, index_counts = torch.unique(
@@ -259,21 +279,23 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
         )
         split_positions = [
             positions[..., self.pos_dim_to_rope_group == i] for i in unique_indices
-        ]
+        ]  # (batch_dims, pos_dim_of_group) x n_groups
         split_freqs = [
             self.freqs[..., self.pos_dim_to_rope_group == i] for i in unique_indices
-        ]
+        ]  # (n_heads, head_dim/(2 * n_groups), pos_dim_of_group) x n_groups
         rot_subvecs = [
-            torch.mm(pos.view(-1, count).to(freq), freq.view(-1, count).T).view(
-                leading_dims + (self.n_heads, self.head_dim // 2 // self.n_freq_groups)
-            )
-            for pos, freq, count in zip(split_positions, split_freqs, index_counts)
+            # (batch_dims, pos_dim_of_group)
+            # x (n_heads, head_dim/(2 * n_groups), pos_dim_of_group)
+            # = (batch_dims, n_heads, head_dim/(2 * n_groups))
+            torch.einsum("...x,hdx->...hd", pos, freq)
+            for pos, freq in zip(split_positions, split_freqs)
         ]
         rot_subvecs = [
             torch.polar(torch.ones_like(subvec), subvec) for subvec in rot_subvecs
         ]
         out = torch.cat(rot_subvecs, -1)
-        assert out.shape == leading_dims + (self.n_heads, self.head_dim // 2)
+        out_shape = leading_dims + (self.embed_dim // 2,)
+        out = out.view(out_shape)
         assert out.is_complex()
         return out
 
@@ -291,7 +313,21 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
 
 
 def prep_multilevel_positions(bijl_indices: Tensor, spatial_shapes: Tensor):
-    assert bijl_indices.ndim == 2
+    """
+    Converts indices or positions of form (batch, i, j, level) to standardized
+    spatial coordinates across levels. This function rescales each (i, j) position
+    to the maximum (finest) spatial scale across levels.
+
+    """
+    if bijl_indices.ndim != 2:
+        raise ValueError(
+            "Expected bijl_indices to have 2 dimensions, got " f"{bijl_indices.ndim}"
+        )
+    if bijl_indices.shape[-1] != 4:
+        raise ValueError(
+            "Expected bijl_indices to have last dimension of 4 (batch, i, j, level),"
+            f" got {bijl_indices.shape[-1]}"
+        )
     ij = bijl_indices[:, 1:-1]
     if not torch.is_floating_point(ij):
         # convert from indices to coordinates of pixel centers
@@ -308,7 +344,7 @@ def prep_multilevel_positions(bijl_indices: Tensor, spatial_shapes: Tensor):
     max_spatial_shape = spatial_shapes.max(-2)[0][batch_level[:, 0]]
     spatial_shapes = spatial_shapes[batch_level.unbind(-1)]
 
-    rescaled_positions = ij * spatial_shapes / max_spatial_shape
+    rescaled_positions = ij / (spatial_shapes / max_spatial_shape)
 
     positions = bijl_indices.clone().to(rescaled_positions)
     positions[:, 1:3] = rescaled_positions

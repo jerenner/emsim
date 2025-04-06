@@ -5,12 +5,10 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from emsim.networks.transformer.blocks import MultilevelIndependentRoPE
 from emsim.networks.positional_encoding.rope import (
-    prep_multilevel_positions,
     RoPEEncodingNDGroupedFreqs,
 )
-from emsim.utils.batching_utils import (
+from emsim.utils.sparse_utils.batching.batching import (
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
 )

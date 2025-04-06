@@ -1,15 +1,11 @@
-from emsim.utils.batching_utils import (
-    split_batch_concatted_tensor,
-)
-from emsim.utils.sparse_utils import (
-    batch_offsets_from_sparse_tensor_indices,
-    batch_sparse_index,
-    sparse_select,
-)
-
-
 import torch
 from torch import Tensor, nn
+
+from emsim.utils.sparse_utils.batching.batching import (
+    batch_offsets_from_sparse_tensor_indices,
+    split_batch_concatted_tensor,
+)
+from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index, sparse_select
 
 
 class SegmentationMapPredictor(nn.Module):
@@ -28,7 +24,7 @@ class SegmentationMapPredictor(nn.Module):
 
     def forward(
         self, stacked_feature_map: Tensor, queries: Tensor, query_batch_offsets: Tensor
-    ):
+    ) -> Tensor:
         queries = self.mask_embed(queries)
         # unbind over the level dimension
         fullscale_feature_map = sparse_select(stacked_feature_map, 3, 3)
@@ -92,7 +88,7 @@ class PatchedSegmentationMapPredictor(SegmentationMapPredictor):
         queries: Tensor,
         query_batch_offsets: Tensor,
         query_positions: Tensor,
-    ):
+    ) -> Tensor:
         queries = self.mask_embed(queries)
         # unbind over the level dimension
         fullscale_feature_map = sparse_select(stacked_feature_map, 3, 3)

@@ -5,11 +5,12 @@ import torch
 from torch import Tensor, nn
 
 from ..utils.sparse_utils import (
-    batch_offsets_from_sparse_tensor_indices,
-    batch_sparse_index,
     spconv_to_torch_sparse,
 )
-
+from ..utils.sparse_utils.batching.batching import (
+    batch_offsets_from_sparse_tensor_indices,
+)
+from ..utils.sparse_utils.indexing.indexing import batch_sparse_index
 
 # arbitrarily high value, will likely OOM if this many queries are actually generated
 MAX_QUERIES_PER_BATCH = int(1e7)

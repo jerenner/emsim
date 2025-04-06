@@ -6,9 +6,8 @@ from scipy.optimize import linear_sum_assignment
 from torch import Tensor, nn
 from torchvision.ops.boxes import generalized_box_iou
 
-from emsim.utils.sparse_utils import (
+from emsim.utils.sparse_utils.shape_ops import (
     sparse_flatten_hw,
-    sparse_index_select,
 )
 
 _logger = logging.getLogger(__name__)
@@ -39,7 +38,7 @@ class HungarianMatcher(nn.Module):
     @torch.no_grad()
     def forward(
         self, predicted_dict: dict[str, Tensor], target_dict: dict[str, Tensor]
-    ):
+    ) -> list[Tensor]:
         n_queries = torch.cat(
             [
                 predicted_dict["query_batch_offsets"],

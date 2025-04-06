@@ -1,16 +1,16 @@
 # Based on https://github.com/xiuqhou/Salience-DETR/blob/main/models/detectors/salience_detr.py
 from typing import Union
-import torch
-from torch import nn, Tensor
 
-from torchvision.ops import sigmoid_focal_loss
 import MinkowskiEngine as ME
+import torch
+from torch import Tensor, nn
+from torchvision.ops import sigmoid_focal_loss
 
-from emsim.utils.sparse_utils import (
+from emsim.utils.sparse_utils.conversion import minkowski_to_torch_sparse
+from emsim.utils.sparse_utils.indexing.indexing import (
     union_sparse_indices,
-    sparse_squeeze_dense_dim,
-    minkowski_to_torch_sparse,
 )
+from emsim.utils.sparse_utils.shape_ops import sparse_squeeze_dense_dim
 
 
 def pixel_coord_grid(height: int, width: int, stride: Tensor, device: torch.device):

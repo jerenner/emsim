@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from emsim.utils.sparse_utils.base import batch_sparse_index_linear
+from emsim.utils.sparse_utils.ops.linear.linear import batch_sparse_index_linear
 
 from ..constants import EMBED_DIM
 

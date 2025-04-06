@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from emsim.utils.sparse_utils.base import _gather_and_mask
+from emsim.utils.sparse_utils.indexing.script_funcs import gather_and_mask
 
 
 def traceable_sparse_attention(
@@ -36,8 +36,8 @@ def traceable_sparse_attention(
         scale_factor = embed_dim ** (-1/2)
 
     # Gather values using the same helper as the custom op
-    selected = _gather_and_mask(
-        sparse_tensor_values, index_search, ~is_specified_mask, mask_inplace=False
+    selected = gather_and_mask(
+        sparse_tensor_values, index_search, is_specified_mask, mask_inplace=False
     )
 
     # Project keys and values separately (no batching)

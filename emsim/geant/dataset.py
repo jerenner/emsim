@@ -27,7 +27,7 @@ from emsim.geant.io import (
 from emsim.utils.misc_utils import (
     random_chunks,
 )
-from emsim.utils.sparse_utils import pydata_sparse_to_torch_sparse
+from emsim.utils.sparse_utils.conversion import pydata_sparse_to_torch_sparse
 
 # keys in here will not be batched in the collate fn
 _KEYS_TO_NOT_BATCH = ("local_trajectories_pixels", "hybrid_sparse_tensors")

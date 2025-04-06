@@ -5,7 +5,6 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torchvision.ops.boxes import generalized_box_iou
 from torchmetrics import MeanMetric, MetricCollection
 from torchmetrics.aggregation import MaxMetric, MinMetric
 from torchmetrics.classification import (
@@ -14,18 +13,13 @@ from torchmetrics.classification import (
     BinaryPrecision,
     BinaryRecall,
 )
-from torchmetrics.detection import MeanAveragePrecision
-from torchmetrics.wrappers import MultitaskWrapper
+from torchvision.ops.boxes import generalized_box_iou
 
 from ...utils.batching_utils import (
-    split_batch_concatted_tensor,
     unstack_batch,
     unstack_model_output,
 )
-from ...utils.sparse_utils import (
-    batch_sparse_index,
-    minkowski_to_torch_sparse,
-    sparse_squeeze_dense_dim,
+from ...utils.sparse_utils.indexing.indexing import (
     union_sparse_indices,
 )
 from .matcher import HungarianMatcher
@@ -34,7 +28,6 @@ from .utils import (
     _flatten_metrics,
     _sort_predicted_true_maps,
     _sort_tensor,
-    find_matches,
     prep_detection_inputs,
     recursive_reset,
 )

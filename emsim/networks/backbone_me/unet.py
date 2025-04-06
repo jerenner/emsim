@@ -1,11 +1,11 @@
 from typing import Union
 
 import MinkowskiEngine as ME
-from torch import nn, Tensor
+from torch import Tensor, nn
 
-from .encoder.model import MinkowskiSparseResnetV2
+from ...utils.sparse_utils.conversion import torch_sparse_to_minkowski
 from .decoder.model import MinkowskiSparseUnetDecoder
-from ...utils.sparse_utils import torch_sparse_to_minkowski
+from .encoder.model import MinkowskiSparseResnetV2
 
 
 class MinkowskiSparseResnetUnet(ME.MinkowskiNetwork):

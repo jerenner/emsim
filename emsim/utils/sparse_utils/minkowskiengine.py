@@ -1,134 +1,9 @@
-from typing import Union, Optional, Any
+from typing import Any, Union
 
-from torch import Tensor, nn
-import torch
-import MinkowskiEngine as ME
-from MinkowskiEngine.MinkowskiNonlinearity import MinkowskiNonlinearityBase
+from torch import nn
 
-
-@torch.compiler.disable
-def torch_sparse_to_minkowski(tensor: Tensor):
-    assert isinstance(tensor, Tensor)
-    assert tensor.is_sparse
-    features = tensor.values()
-    coordinates = tensor.indices()
-    if features.ndim == 1:
-        features = features.unsqueeze(-1)
-        coordinates = coordinates[:-1]
-    coordinates = coordinates.transpose(0, 1).contiguous().int()
-    return ME.SparseTensor(
-        features, coordinates, requires_grad=tensor.requires_grad, device=tensor.device
-    )
-
-
-def minkowski_to_torch_sparse(
-    tensor: ME.SparseTensor,
-    full_scale_spatial_shape: Optional[Union[Tensor, list[int]]] = None,
-):
-    if isinstance(tensor, Tensor):
-        assert tensor.is_sparse
-        return tensor
-    assert isinstance(tensor, ME.SparseTensor)
-    min_coords = torch.zeros([tensor.dimension], dtype=torch.int, device=tensor.device)
-    if full_scale_spatial_shape is not None:
-        if isinstance(full_scale_spatial_shape, list):
-            max_coords = torch.tensor(
-                full_scale_spatial_shape, dtype=torch.int, device=tensor.device
-            )
-        else:
-            assert isinstance(full_scale_spatial_shape, Tensor)
-            max_coords = full_scale_spatial_shape.to(tensor.C)
-    else:
-        max_coords = None
-    out = __me_sparse(tensor, min_coords, max_coords)[0].coalesce()
-    return out
-
-
-def __me_sparse(
-    tensor: ME.SparseTensor,
-    min_coords: Optional[Tensor] = None,
-    max_coords: Optional[Tensor] = None,
-    contract_coords=True,
-):
-    r"""Copied from MinkowskiEngine's SparseTensor.sparse() method to fix
-    device placement bugs.
-    """
-    if min_coords is not None:
-        assert min_coords.dtype == torch.int
-        assert min_coords.numel() == tensor._D
-    if max_coords is not None:
-        assert max_coords.dtype == torch.int
-        assert min_coords.numel() == tensor._D
-
-    def torch_sparse_Tensor(coords, feats, size=None):
-        if size is None:
-            if feats.dtype == torch.float64 or feats.dtype == torch.float32:
-                return torch.sparse_coo_tensor(coords, feats, dtype=feats.dtype)
-            else:
-                raise ValueError("Feature type not supported.")
-        else:
-            if feats.dtype == torch.float64 or feats.dtype == torch.float32:
-                return torch.sparse_coo_tensor(coords, feats, size, dtype=feats.dtype)
-            else:
-                raise ValueError("Feature type not supported.")
-
-    # Use int tensor for all operations
-    tensor_stride = torch.tensor(
-        tensor.tensor_stride, dtype=torch.int, device=tensor.device
-    )
-
-    # New coordinates
-    coords = tensor.C
-    coords, batch_indices = coords[:, 1:], coords[:, 0]
-
-    if min_coords is None:
-        min_coords, _ = coords.min(0, keepdim=True)
-    elif min_coords.ndim == 1:
-        min_coords = min_coords.unsqueeze(0)
-
-    assert (
-        min_coords % tensor_stride
-    ).sum() == 0, "The minimum coordinates must be divisible by the tensor stride."
-
-    if max_coords is not None:
-        if max_coords.ndim == 1:
-            max_coords = max_coords.unsqueeze(0)
-        assert (
-            max_coords % tensor_stride
-        ).sum() == 0, "The maximum coordinates must be divisible by the tensor stride."
-
-    coords -= min_coords
-
-    if coords.ndim == 1:
-        coords = coords.unsqueeze(1)
-    if batch_indices.ndim == 1:
-        batch_indices = batch_indices.unsqueeze(1)
-
-    # return the contracted tensor
-    if contract_coords:
-        coords = coords // tensor_stride
-        if max_coords is not None:
-            max_coords = max_coords // tensor_stride
-        min_coords = min_coords // tensor_stride
-
-    new_coords = torch.cat((batch_indices, coords), dim=1).long()
-
-    size = None
-    if max_coords is not None:
-        size = max_coords - min_coords
-        # Squeeze to make the size one-dimensional
-        size = size.squeeze()
-
-        max_batch = tensor._manager.number_of_unique_batch_indices()
-        size = torch.Size([max_batch, *size, tensor.F.size(1)])
-
-    sparse_tensor = torch_sparse_Tensor(
-        new_coords.t().to(tensor.F.device), tensor.F, size
-    )
-    tensor_stride = torch.tensor(
-        tensor.tensor_stride, dtype=torch.int, device=tensor.device
-    )
-    return sparse_tensor, min_coords, tensor_stride
+from . import utils
+from .utils import ME, MinkowskiNonlinearityBase
 
 
 class MinkowskiLayerNorm(nn.Module):
@@ -168,11 +43,20 @@ class MinkowskiLayerNorm(nn.Module):
             )
 
 
-class MinkowskiGELU(MinkowskiNonlinearityBase):
-    MODULE = nn.GELU
+# fmt: off
+class _DummyBaseclass:
+    pass
+if MinkowskiNonlinearityBase is not None:  # successfully imported in utils
+    class MinkowskiGELU(MinkowskiNonlinearityBase):
+        MODULE = nn.GELU
+else:
+    class MinkowskiGELU(_DummyBaseclass):
+        pass
+# fmt: on
 
 
-def _get_me_layer(layer: Union[str, nn.Module]):
+@utils.requires_minkowskiengine
+def get_me_layer(layer: Union[str, nn.Module]):
     if isinstance(layer, nn.Module):
         return layer
     if layer.lower() == "relu":

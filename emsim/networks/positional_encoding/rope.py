@@ -1,9 +1,8 @@
-from typing import Optional, Union
 import warnings
+from typing import Optional, Union
 
 import torch
 from torch import Tensor, nn
-
 
 # Based on code from
 # https://github.com/naver-ai/rope-vit/blob/main/self-attn/rope_self_attn.py
@@ -50,7 +49,7 @@ def init_nd_freqs(
     rotate: bool = True,
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
-):
+) -> Tensor:
     thetas: Tensor = torch.as_tensor(thetas, dtype=dtype, device=device)
     if thetas.numel() == 1:
         thetas = thetas.expand(position_dim)
@@ -123,7 +122,7 @@ class RoPEEncodingND(nn.Module):
         self.freqs = nn.Parameter(freqs)
 
     @staticmethod
-    def real_to_complex(tensor: Tensor):
+    def real_to_complex(tensor: Tensor) -> Tensor:
         assert not tensor.is_complex()
         if not tensor.size(-1) == 2:
             assert tensor.size(-1) % 2 == 0, "Last dim must be divisible by 2"
@@ -132,7 +131,7 @@ class RoPEEncodingND(nn.Module):
         return torch.view_as_complex(tensor)
 
     @staticmethod
-    def complex_to_real(tensor: Tensor):
+    def complex_to_real(tensor: Tensor) -> Tensor:
         assert tensor.is_complex()
         tensor_real = torch.view_as_real(tensor)
         tensor_real = tensor_real.flatten(-2, -1)  # flatten out new trailing dim of 2

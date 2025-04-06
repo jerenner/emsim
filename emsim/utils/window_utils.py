@@ -1,4 +1,4 @@
-from emsim.utils.sparse_utils import batch_sparse_index
+from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index
 
 
 import torch

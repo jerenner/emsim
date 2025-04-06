@@ -1,12 +1,12 @@
-import torch
-import torch.nn.functional as F
-from torch import Tensor, nn
 from math import log
 
-from ..utils.window_utils import windowed_keys_for_queries
-from ..utils.sparse_utils import spconv_to_torch_sparse, batch_sparse_index
-
 import spconv.pytorch as spconv
+import torch
+from torch import Tensor, nn
+
+from ..utils.sparse_utils import spconv_to_torch_sparse
+from ..utils.sparse_utils.indexing.indexing import batch_sparse_index
+from ..utils.window_utils import windowed_keys_for_queries
 
 
 class PredictionHead(nn.Module):
@@ -147,7 +147,10 @@ class PredictionHead(nn.Module):
         return binary_mask_logits, portion_logits, key_indices, is_specified_mask
 
     def predict_position_std_dev_cholesky(
-        self, decoded_query_dict: dict[str, Tensor], epsilon: float = 1e-6, max_cov: float = 1e5,
+        self,
+        decoded_query_dict: dict[str, Tensor],
+        epsilon: float = 1e-6,
+        max_cov: float = 1e5,
     ):
         logdiag, offdiag = self.position_std_dev_head(
             decoded_query_dict["queries"]

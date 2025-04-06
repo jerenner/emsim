@@ -1,4 +1,4 @@
-from emsim.utils.sparse_utils import union_sparse_indices
+from emsim.utils.sparse_utils.indexing.indexing import union_sparse_indices
 import spconv.pytorch as spconv
 import torch
 import torch.nn.functional as F

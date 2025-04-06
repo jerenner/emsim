@@ -1,35 +1,25 @@
-import torch
-import torch.nn.functional as F
-from torch import Tensor, nn
 import copy
-from timm.models.layers import DropPath
-
 from typing import Optional, Union
 
-from ...utils.misc_utils import inverse_sigmoid
+import torch
+from torch import Tensor, nn
 
-from ...utils.batching_utils import deconcat_add_batch_dim, remove_batch_dim_and_concat
-from ...utils.sparse_utils import (
-    batch_offsets_from_sparse_tensor_indices,
-    sparse_tensor_to_batched,
-    multilevel_normalized_xy,
+from ...utils.misc_utils import (
+    inverse_sigmoid,
 )
 from ..positional_encoding import (
-    PixelPositionalEncoding,
-    RelativePositionalEncodingTableInterpolate2D,
-    SubpixelPositionalEncoding,
     FourierEncoding,
 )
-from .std_dev_head import StdDevHead
+from ..segmentation_map import PatchedSegmentationMapPredictor
 from .blocks import (
-    SelfAttentionBlock,
-    SparseDeformableAttentionBlock,
     FFNBlock,
     MultilevelCrossAttentionBlockWithRoPE,
     MultilevelSelfAttentionBlockWithRoPE,
+    SelfAttentionBlock,
+    SparseDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
-from ..segmentation_map import PatchedSegmentationMapPredictor
+from .std_dev_head import StdDevHead
 
 
 class TransformerDecoderLayer(nn.Module):

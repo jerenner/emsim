@@ -1,11 +1,17 @@
 import pytest
 import torch
 
-from emsim.utils.sparse_utils.base import (
+from emsim.utils.sparse_utils.ops.subset_attn.subset_attn import (
     batch_sparse_index_subset_attn,
 )
 
-from ..constants import EMBED_DIM, N_HEADS, N_KEYS_PER_QUERY, POSITION_DIM, N_FREQ_GROUPS
+from ..constants import (
+    EMBED_DIM,
+    N_FREQ_GROUPS,
+    N_HEADS,
+    N_KEYS_PER_QUERY,
+    POSITION_DIM,
+)
 
 
 @pytest.mark.cuda

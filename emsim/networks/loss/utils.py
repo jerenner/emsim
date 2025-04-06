@@ -2,12 +2,11 @@ from typing import Union
 
 import torch
 from torch import Tensor, nn
-
+from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import BinaryAveragePrecision
-from torchmetrics import MetricCollection, Metric
 
-from emsim.utils.batching_utils import unstack_batch, unstack_model_output
-from emsim.utils.sparse_utils import sparse_index_select, sparse_resize
+from emsim.utils.sparse_utils.indexing import sparse_index_select
+from emsim.utils.sparse_utils.shape_ops import sparse_resize
 
 
 def sort_detections_by_score(
@@ -201,7 +200,9 @@ def _flatten_metrics(metric_dict):
     return out
 
 
-def recursive_reset(metric_or_moduledict: Union[nn.ModuleDict, Metric, MetricCollection]):
+def recursive_reset(
+    metric_or_moduledict: Union[nn.ModuleDict, Metric, MetricCollection],
+):
     if not hasattr(metric_or_moduledict, "reset"):
         for metric in metric_or_moduledict.values():
             recursive_reset(metric)

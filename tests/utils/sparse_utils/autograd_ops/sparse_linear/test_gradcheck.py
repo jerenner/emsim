@@ -2,10 +2,11 @@ import pytest
 import torch
 from torch.autograd import gradcheck
 
+from emsim.utils.sparse_utils.indexing.script_funcs import get_sparse_index_mapping
+
 # Import module functions
-from emsim.utils.sparse_utils.base import (
+from emsim.utils.sparse_utils.ops.linear.autograd import (
     GatherAndLinearFunction,
-    get_sparse_index_mapping,
 )
 
 from ..constants import EMBED_DIM

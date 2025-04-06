@@ -2,8 +2,10 @@ import spconv.pytorch as spconv
 import torch
 from torch import Tensor, nn
 
-from emsim.utils.batching_utils import split_batch_concatted_tensor
-from emsim.utils.sparse_utils import batch_offsets_from_sparse_tensor_indices
+from emsim.utils.sparse_utils.batching.batching import (
+    batch_offsets_from_sparse_tensor_indices,
+    split_batch_concatted_tensor,
+)
 
 
 class MaskPredictor(nn.Module):
@@ -30,7 +32,7 @@ class MaskPredictor(nn.Module):
         return out
 
 
-def global_mean_second_half_features(z, half_dim):
+def global_mean_second_half_features(z, half_dim) -> Tensor:
     z_local, z_global = torch.split(z, half_dim, -1)
     z_global = z_global.mean(dim=0, keepdim=True).expand(z_local.shape[0], -1)
     return torch.cat([z_local, z_global], dim=-1)
@@ -62,7 +64,7 @@ class SparseMaskPredictor(nn.Module):
         out = self.layer2(z)
         return out
 
-    def forward_sparse_tensor(self, x: Tensor):
+    def forward_sparse_tensor(self, x: Tensor) -> Tensor:
         assert x.is_sparse
         assert x.is_coalesced()
 
@@ -73,7 +75,7 @@ class SparseMaskPredictor(nn.Module):
         ).coalesce()
         return out
 
-    def forward_sparse_tensor_list(self, x: list[Tensor]):
+    def forward_sparse_tensor_list(self, x: list[Tensor]) -> list[Tensor]:
         assert not isinstance(x, Tensor)
         assert all([isinstance(x_, Tensor) for x_ in x])
         return [self.forward_sparse_tensor(x_) for x_ in x]

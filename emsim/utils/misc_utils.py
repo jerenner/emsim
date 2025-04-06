@@ -1,8 +1,9 @@
 import numpy as np
 from typing import Any, List, Union, Optional
 
+import sparse
 import torch
-from torch import nn
+from torch import Tensor, nn
 
 
 def random_chunks(
@@ -49,3 +50,42 @@ def _get_layer(layer: Union[str, type]):
         return nn.BatchNorm1d
     else:
         raise ValueError(f"Unexpected layer {layer}")
+
+
+@torch.jit.script
+def multilevel_normalized_xy(sparse_tensor: Tensor, spatial_shapes: Tensor) -> Tensor:
+    assert sparse_tensor.ndim == 5  # batch, i, j, level, feature
+    assert spatial_shapes.ndim == 2  # i, j
+    spatial_shapes_per_token = spatial_shapes[sparse_tensor.indices()[3]]
+    normalized_shapes = (
+        sparse_tensor.indices()[1:3].T / spatial_shapes_per_token
+    ).flip(-1)
+    return normalized_shapes
+
+
+def _trim(subtensor: Tensor) -> Tensor:
+    subtensor = subtensor.coalesce()
+    indices, values = subtensor.indices(), subtensor.values()
+    shape = subtensor.shape
+    n_electrons = indices[0].max().item() + 1
+    new_shape = (n_electrons, *shape[1:])
+    return torch.sparse_coo_tensor(indices, values, new_shape).coalesce()
+
+
+def bhwn_to_nhw_iterator_over_batches_torch(tensor: Tensor) -> list[Tensor]:
+    assert tensor.is_sparse
+    tensor = tensor.permute(0, 3, 1, 2).coalesce()
+
+    return [_trim(t) for t in tensor.unbind()]
+
+
+def bhwn_to_nhw_iterator_over_batches_pydata_sparse(array: sparse.SparseArray):
+    assert isinstance(array, sparse.SparseArray)
+
+    array = array.transpose([0, 3, 1, 2])
+
+    def trim(subarray: sparse.SparseArray):
+        max_electron_index = subarray.coords[0].max() + 1
+        return subarray[:max_electron_index]
+
+    return [trim(subarray) for subarray in array]

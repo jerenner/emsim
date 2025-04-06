@@ -1,10 +1,10 @@
 from typing import Optional
 
-import torch
-from torch import nn, Tensor
 import MinkowskiEngine as ME
+import torch
+from torch import Tensor, nn
 
-from emsim.utils.sparse_utils import MinkowskiGELU, MinkowskiLayerNorm
+from emsim.utils.sparse_utils.minkowskiengine import MinkowskiGELU, MinkowskiLayerNorm
 
 
 @torch.compiler.disable

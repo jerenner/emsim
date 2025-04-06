@@ -1,18 +1,15 @@
-from typing import Optional, Union
+from typing import Union
 
 import torch
 from torch import Tensor, nn
 
-from .rope import RoPEEncodingNDGroupedFreqs, prep_multilevel_positions
-from emsim.utils.sparse_utils import (
-    batch_sparse_index,
-    batch_sparse_index_linear,
-    batch_offsets_from_sparse_tensor_indices,
-)
-from emsim.utils.batching_utils import (
+from emsim.utils.sparse_utils.batching.batching import (
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
 )
+from emsim.utils.sparse_utils.ops.linear.linear import batch_sparse_index_linear
+
+from .rope import RoPEEncodingNDGroupedFreqs, prep_multilevel_positions
 
 
 class SparseNeighborhoodAttentionBlock(nn.Module):
@@ -60,7 +57,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
-    ):
+    ) -> Tensor:
         assert query.ndim == 2
         assert query_positions_bijl.shape == (query.shape[0], 4)
         n_queries = query.shape[0]
@@ -169,7 +166,7 @@ def get_multilevel_neighborhood(
     bijl_positions: Tensor,
     level_spatial_shapes: Tensor,
     neighborhood_sizes: Union[Tensor, list[int]] = [3, 5, 7, 9],
-):
+) -> Tensor:
     assert bijl_positions.ndim == 2
     assert level_spatial_shapes.ndim == 2
     assert bijl_positions.shape[-1] == 4

@@ -1,14 +1,12 @@
 from typing import Optional
 import logging
 
-import torch
 from omegaconf import DictConfig
 from torch import Tensor, nn
 
 from ..utils.misc_utils import _get_layer
-from ..utils.sparse_utils.minkowskiengine import _get_me_layer
+from ..utils.sparse_utils.minkowskiengine import get_me_layer
 from .loss.criterion import EMCriterion
-from .loss.salience_criterion import ElectronSalienceCriterion
 from .backbone_me.unet import MinkowskiSparseResnetUnet
 from .transformer.model import EMTransformer
 from .me_value_encoder import ValueEncoder
@@ -210,8 +208,8 @@ class EMModel(nn.Module):
             encoder_channels=cfg.unet.encoder.channels,
             decoder_channels=cfg.unet.decoder.channels,
             stem_channels=cfg.unet.stem_channels,
-            act_layer=_get_me_layer(cfg.unet.act_layer),
-            norm_layer=_get_me_layer(cfg.unet.norm_layer),
+            act_layer=get_me_layer(cfg.unet.act_layer),
+            norm_layer=get_me_layer(cfg.unet.norm_layer),
         )
         channel_uniformizer = ValueEncoder(
             [info["num_chs"] for info in backbone.feature_info], cfg.transformer.d_model

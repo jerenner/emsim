@@ -1,8 +1,7 @@
 import pytest
 import torch
 
-# Assuming the class is imported like this:
-from emsim.utils.sparse_utils.base import GatherAndSubsetAttentionFunction
+from emsim.utils.sparse_utils.ops.subset_attn.autograd_helpers import linear_grads
 
 
 @pytest.fixture
@@ -44,9 +43,7 @@ def test_none_grad_output(setup_tensors):
     tensors = setup_tensors
     inputs = tensors["inputs"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        None, inputs, True, True
-    )
+    weight_grad, bias_grad = linear_grads(None, inputs, True, True)
 
     assert weight_grad is None
     assert bias_grad is None
@@ -63,9 +60,7 @@ def test_non_stacked_both_grads(setup_tensors):
     grad_output = tensors["grad_output"]
     shapes = tensors["shapes"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        grad_output, inputs, True, True
-    )
+    weight_grad, bias_grad = linear_grads(grad_output, inputs, True, True)
 
     # Check shapes
     assert weight_grad.shape == (shapes["out_features"], shapes["in_features"])
@@ -90,9 +85,7 @@ def test_non_stacked_weight_only(setup_tensors):
     grad_output = tensors["grad_output"]
     shapes = tensors["shapes"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        grad_output, inputs, True, False
-    )
+    weight_grad, bias_grad = linear_grads(grad_output, inputs, True, False)
 
     # Check results
     assert weight_grad.shape == (shapes["out_features"], shapes["in_features"])
@@ -111,9 +104,7 @@ def test_non_stacked_bias_only(setup_tensors):
     grad_output = tensors["grad_output"]
     shapes = tensors["shapes"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        grad_output, inputs, False, True
-    )
+    weight_grad, bias_grad = linear_grads(grad_output, inputs, False, True)
 
     # Check results
     assert weight_grad is None
@@ -131,9 +122,7 @@ def test_non_stacked_no_grads(setup_tensors):
     inputs = tensors["inputs"]
     grad_output = tensors["grad_output"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        grad_output, inputs, False, False
-    )
+    weight_grad, bias_grad = linear_grads(grad_output, inputs, False, False)
 
     assert weight_grad is None
     assert bias_grad is None
@@ -150,9 +139,7 @@ def test_stacked_both_grads(setup_tensors):
     stacked_grad_output = tensors["stacked_grad_output"]
     shapes = tensors["shapes"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        stacked_grad_output, inputs, True, True
-    )
+    weight_grad, bias_grad = linear_grads(stacked_grad_output, inputs, True, True)
 
     # Check shapes
     assert weight_grad.shape == (
@@ -188,9 +175,7 @@ def test_stacked_weight_only(setup_tensors):
     stacked_grad_output = tensors["stacked_grad_output"]
     shapes = tensors["shapes"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        stacked_grad_output, inputs, True, False
-    )
+    weight_grad, bias_grad = linear_grads(stacked_grad_output, inputs, True, False)
 
     # Check results
     assert weight_grad.shape == (
@@ -219,9 +204,7 @@ def test_stacked_bias_only(setup_tensors):
     stacked_grad_output = tensors["stacked_grad_output"]
     shapes = tensors["shapes"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        stacked_grad_output, inputs, False, True
-    )
+    weight_grad, bias_grad = linear_grads(stacked_grad_output, inputs, False, True)
 
     # Check results
     assert weight_grad is None
@@ -239,9 +222,7 @@ def test_stacked_no_grads(setup_tensors):
     inputs = tensors["inputs"]
     stacked_grad_output = tensors["stacked_grad_output"]
 
-    weight_grad, bias_grad = GatherAndSubsetAttentionFunction._linear_grads(
-        stacked_grad_output, inputs, False, False
-    )
+    weight_grad, bias_grad = linear_grads(stacked_grad_output, inputs, False, False)
 
     assert weight_grad is None
     assert bias_grad is None
@@ -255,17 +236,13 @@ def test_bias_trick_consistency(setup_tensors):
     grad_output = tensors["grad_output"]
 
     # Using bias trick (combined computation)
-    weight_grad_combined, bias_grad_combined = (
-        GatherAndSubsetAttentionFunction._linear_grads(grad_output, inputs, True, True)
+    weight_grad_combined, bias_grad_combined = linear_grads(
+        grad_output, inputs, True, True
     )
 
     # Separate computations
-    weight_grad_separate, _ = GatherAndSubsetAttentionFunction._linear_grads(
-        grad_output, inputs, True, False
-    )
-    _, bias_grad_separate = GatherAndSubsetAttentionFunction._linear_grads(
-        grad_output, inputs, False, True
-    )
+    weight_grad_separate, _ = linear_grads(grad_output, inputs, True, False)
+    _, bias_grad_separate = linear_grads(grad_output, inputs, False, True)
 
     # They should produce the same results
     assert torch.allclose(weight_grad_combined, weight_grad_separate)
@@ -274,16 +251,12 @@ def test_bias_trick_consistency(setup_tensors):
     # Same test for stacked mode
     stacked_grad = tensors["stacked_grad_output"]
 
-    weight_grad_combined, bias_grad_combined = (
-        GatherAndSubsetAttentionFunction._linear_grads(stacked_grad, inputs, True, True)
+    weight_grad_combined, bias_grad_combined = linear_grads(
+        stacked_grad, inputs, True, True
     )
 
-    weight_grad_separate, _ = GatherAndSubsetAttentionFunction._linear_grads(
-        stacked_grad, inputs, True, False
-    )
-    _, bias_grad_separate = GatherAndSubsetAttentionFunction._linear_grads(
-        stacked_grad, inputs, False, True
-    )
+    weight_grad_separate, _ = linear_grads(stacked_grad, inputs, True, False)
+    _, bias_grad_separate = linear_grads(stacked_grad, inputs, False, True)
 
     assert torch.allclose(weight_grad_combined, weight_grad_separate)
     assert torch.allclose(bias_grad_combined, bias_grad_separate)

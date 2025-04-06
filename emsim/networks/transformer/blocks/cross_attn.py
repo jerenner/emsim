@@ -5,20 +5,13 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from emsim.networks.positional_encoding.rope import (
-    prep_multilevel_positions,
     RoPEEncodingNDGroupedFreqs,
+    prep_multilevel_positions,
 )
-from emsim.networks.transformer.blocks.rope import (
-    MultilevelIndependentRoPE,
-)
-from emsim.utils.batching_utils import (
+from emsim.utils.sparse_utils.batching.batching import (
+    batch_offsets_from_sparse_tensor_indices,
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
-)
-from emsim.utils.sparse_utils import (
-    batch_offsets_from_sparse_tensor_indices,
-    multilevel_normalized_xy,
-    sparse_tensor_to_batched,
 )
 
 

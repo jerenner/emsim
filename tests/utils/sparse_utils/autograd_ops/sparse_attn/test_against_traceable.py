@@ -1,19 +1,19 @@
 import pytest
 import torch
 
-from emsim.utils.sparse_utils.base import (
+from emsim.utils.sparse_utils.indexing.script_funcs import get_sparse_index_mapping
+from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
     GatherAndSubsetAttentionFunction,
-    get_sparse_index_mapping,
 )
 
-from .traceable_sparse_attn import traceable_sparse_attention
 from ..constants import (
     EMBED_DIM,
+    N_FREQ_GROUPS,
     N_HEADS,
     N_KEYS_PER_QUERY,
     POSITION_DIM,
-    N_FREQ_GROUPS,
 )
+from .traceable_sparse_attn import traceable_sparse_attention
 
 
 @pytest.mark.parametrize(

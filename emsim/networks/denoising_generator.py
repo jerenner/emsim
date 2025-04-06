@@ -1,13 +1,8 @@
-from typing import Union
 
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 
-from emsim.utils.batching_utils import (
-    split_batch_concatted_tensor,
-    deconcat_add_batch_dim,
-    remove_batch_dim_and_concat,
-)
+from emsim.utils.sparse_utils.batching.batching import split_batch_concatted_tensor
 
 
 class DenoisingGenerator(nn.Module):

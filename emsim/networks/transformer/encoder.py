@@ -1,5 +1,5 @@
 import copy
-from typing import Optional, Union
+from typing import Union
 
 import MinkowskiEngine as ME
 import numpy as np
@@ -18,15 +18,14 @@ from emsim.networks.transformer.blocks import (
     SparseDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
-from emsim.utils.batching_utils import (
-    deconcat_add_batch_dim,
-    remove_batch_dim_and_concat,
-)
-from emsim.utils.sparse_utils import (
-    batch_sparse_index,
-    linearize_sparse_and_index_tensors,
-    minkowski_to_torch_sparse,
+from emsim.utils.sparse_utils.batching.batching import deconcat_add_batch_dim
+from emsim.utils.sparse_utils.conversion import minkowski_to_torch_sparse
+from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index
+from emsim.utils.sparse_utils.indexing.scatter import (
     scatter_to_sparse_tensor,
+)
+from emsim.utils.sparse_utils.indexing.script_funcs import (
+    linearize_sparse_and_index_tensors,
 )
 
 

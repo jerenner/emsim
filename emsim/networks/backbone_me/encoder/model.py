@@ -1,10 +1,10 @@
-import torch
-from torch import nn, Tensor
-import MinkowskiEngine as ME
 from typing import Optional, Union
 
+import MinkowskiEngine as ME
+from torch import Tensor, nn
+
+from ....utils.sparse_utils.conversion import torch_sparse_to_minkowski
 from .blocks import MinkowskiSparseResnetV2Stage, MinkowskiStem
-from ....utils.sparse_utils import torch_sparse_to_minkowski
 
 
 # @torch.compiler.disable

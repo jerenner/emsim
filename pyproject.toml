@@ -5,3 +5,8 @@ env = [
 markers = [
     "cuda: mark test to run on both CPU and CUDA devices"
 ]
+filterwarnings = [
+    "ignore:.*custom_[fb]wd.*:FutureWarning:spconv.pytorch.functional",  # spconv import
+    "ignore:.*Importing from timm\\.models\\.layers.*:FutureWarning:timm.models.layers", 
+    "ignore:.*locale.getdefaultlocale.*:DeprecationWarning",
+]

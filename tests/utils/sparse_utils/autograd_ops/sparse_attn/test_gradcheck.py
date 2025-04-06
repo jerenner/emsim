@@ -1,17 +1,17 @@
 import pytest
 import torch
 
-from emsim.utils.sparse_utils.base import (
-    get_sparse_index_mapping,
+from emsim.utils.sparse_utils.indexing.script_funcs import get_sparse_index_mapping
+from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
     GatherAndSubsetAttentionFunction,
 )
 
 from ..constants import (
     EMBED_DIM,
-    N_KEYS_PER_QUERY,
-    N_HEADS,
-    POSITION_DIM,
     N_FREQ_GROUPS,
+    N_HEADS,
+    N_KEYS_PER_QUERY,
+    POSITION_DIM,
 )
 
 

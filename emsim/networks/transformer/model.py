@@ -1,34 +1,34 @@
-from typing import Union, Optional
+from typing import Optional, Union
 
+import MinkowskiEngine as ME
 import torch
 import torchvision
 from torch import Tensor, nn
-import MinkowskiEngine as ME
 
 from emsim.networks.positional_encoding import (
     ij_indices_to_normalized_xy,
     normalized_xy_of_stacked_feature_maps,
 )
-from emsim.networks.transformer.std_dev_head import StdDevHead
 from emsim.networks.transformer.position_head import PositionOffsetHead
-from ...utils.batching_utils import split_batch_concatted_tensor
+from emsim.networks.transformer.std_dev_head import StdDevHead
+
 from ...utils.misc_utils import inverse_sigmoid
-from ...utils.sparse_utils import (
+from ...utils.sparse_utils.batching.batching import (
     batch_offsets_from_sparse_tensor_indices,
-    sparse_index_select,
-    sparse_resize,
-    minkowski_to_torch_sparse,
+    split_batch_concatted_tensor,
 )
+from ...utils.sparse_utils.indexing.indexing import sparse_index_select
+from ...utils.sparse_utils.shape_ops import sparse_resize
+from ..denoising_generator import DenoisingGenerator
+from ..me_salience_mask_predictor import MESparseMaskPredictor
 from ..positional_encoding import FourierEncoding
 from ..positional_encoding.rope import (
     RoPEEncodingNDGroupedFreqs,
     prep_multilevel_positions,
 )
+from ..segmentation_map import PatchedSegmentationMapPredictor
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
-from ..segmentation_map import SegmentationMapPredictor, PatchedSegmentationMapPredictor
-from ..me_salience_mask_predictor import MESparseMaskPredictor
-from ..denoising_generator import DenoisingGenerator
 
 
 class EMTransformer(nn.Module):

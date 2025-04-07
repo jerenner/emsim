@@ -127,7 +127,7 @@ def rotate_k_backward(
     grad_k_rotated: Tensor,
     k_complex: Tensor,
     rope_encoding_complex: Tensor,
-    needs_grad_keys: bool = True,
+    needs_grad_k: bool = True,
     needs_grad_rope_encoding: bool = True,
 ) -> tuple[Optional[Tensor], Optional[Tensor]]:
     """Perform the backward pass of applying rotary positional encoding (RoPE)
@@ -148,12 +148,12 @@ def rotate_k_backward(
             [n_queries, n_keys_per_query, n_heads, head_dim/2] or
             [n_queries, n_keys_per_query, 1,       head_dim/2], as returned from
             rotate_k.
-        needs_grad_keys (bool): Whether gradients for keys are needed. Default: True
+        needs_grad_k (bool): Whether gradients for keys are needed. Default: True
         needs_grad_rope_encoding (bool): Whether gradients for positional encodings
             are needed. Default: True
 
     Returns:
-        grad_keys (Tensor): Gradient tensor for the unrotated keys,
+        grad_k (Tensor): Gradient tensor for the unrotated keys,
             of shape [n_queries, n_keys_per_query, n_heads, head_dim] and real dtype,
             or None if not needed
         grad_rope_encoding (Tensor): Gradient tensor for the positional encodings
@@ -182,7 +182,7 @@ def rotate_k_backward(
         )
 
     # Check for no grads needed
-    if not needs_grad_keys and not needs_grad_rope_encoding:
+    if not needs_grad_k and not needs_grad_rope_encoding:
         # Early return
         return None, None
 
@@ -194,11 +194,11 @@ def rotate_k_backward(
 
     # Complex multiplication gradient
     # For z = x * y, we have dL/dx = dL/dz * conj(y) and dL/dy = dL/dz * conj(x)
-    if needs_grad_keys:
+    if needs_grad_k:
         grad_k_complex = grad_k_rotated_complex * rope_encoding_complex.conj()
-        grad_keys = torch.view_as_real(grad_k_complex).reshape_as(grad_k_rotated)
+        grad_k = torch.view_as_real(grad_k_complex).reshape_as(grad_k_rotated)
     else:
-        grad_keys = None
+        grad_k = None
 
     if needs_grad_rope_encoding:
         grad_key_pos_complex = grad_k_rotated_complex * k_complex.conj()
@@ -208,7 +208,7 @@ def rotate_k_backward(
     else:
         grad_rope_encoding = None
 
-    return grad_keys, grad_rope_encoding
+    return grad_k, grad_rope_encoding
 
 
 @torch.jit.script

@@ -437,9 +437,9 @@ class TestRotateKBackward:
         grad_k_rotated_complex = torch.complex(
             grad_k_rotated[..., 0], grad_k_rotated[..., 1]
         )
-        expected_grad_keys_complex = grad_k_rotated_complex * key_pos_complex.conj()
-        expected_grad_keys = torch.cat(
-            [expected_grad_keys_complex.real, expected_grad_keys_complex.imag], dim=-1
+        expected_grad_k_complex = grad_k_rotated_complex * key_pos_complex.conj()
+        expected_grad_k = torch.cat(
+            [expected_grad_k_complex.real, expected_grad_k_complex.imag], dim=-1
         ).reshape_as(grad_k_rotated)
 
         expected_grad_rope_complex = grad_k_rotated_complex * k_complex.conj()
@@ -447,11 +447,11 @@ class TestRotateKBackward:
             [expected_grad_rope_complex.real, expected_grad_rope_complex.imag]
         ).reshape_as(grad_k_rotated)
 
-        grad_keys, grad_rope = rotate_k_backward(
+        grad_k, grad_rope = rotate_k_backward(
             grad_k_rotated, k_complex, key_pos_complex, True
         )
 
-        assert_close(grad_keys, expected_grad_keys, msg="Gradients for keys incorrect")
+        assert_close(grad_k, expected_grad_k, msg="Gradients for keys incorrect")
         assert_close(grad_rope, expected_grad_rope, msg="Gradients for rope incorrect")
 
     def test_no_grad_rope_encoding(self, device):
@@ -460,24 +460,24 @@ class TestRotateKBackward:
         k_complex = torch.randn(2, 3, 4, 3, dtype=torch.complex64, device=device)
         key_pos_complex = torch.randn(2, 3, 4, 3, dtype=torch.complex64, device=device)
 
-        grad_keys, grad_rope = rotate_k_backward(
+        grad_k, grad_rope = rotate_k_backward(
             grad_k_rotated, k_complex, key_pos_complex, True, False
         )
 
-        assert grad_keys is not None
+        assert grad_k is not None
         assert grad_rope is None
 
-    def test_no_grad_keys(self, device):
-        """Test with needs_grad_keys=False."""
+    def test_no_grad_k(self, device):
+        """Test with needs_grad_k=False."""
         grad_k_rotated = torch.randn(2, 3, 4, 6, device=device)
         k_complex = torch.randn(2, 3, 4, 3, dtype=torch.complex64, device=device)
         key_pos_complex = torch.randn(2, 3, 4, 3, dtype=torch.complex64, device=device)
 
-        grad_keys, grad_rope = rotate_k_backward(
+        grad_k, grad_rope = rotate_k_backward(
             grad_k_rotated, k_complex, key_pos_complex, False, True
         )
 
-        assert grad_keys is None
+        assert grad_k is None
         assert grad_rope is not None
 
     def test_no_grad_both(self, device):
@@ -486,11 +486,11 @@ class TestRotateKBackward:
         k_complex = torch.randn(2, 3, 4, 3, dtype=torch.complex64, device=device)
         key_pos_complex = torch.randn(2, 3, 4, 3, dtype=torch.complex64, device=device)
 
-        grad_keys, grad_rope = rotate_k_backward(
+        grad_k, grad_rope = rotate_k_backward(
             grad_k_rotated, k_complex, key_pos_complex, False, False
         )
 
-        assert grad_keys is None
+        assert grad_k is None
         assert grad_rope is None
 
     def test_error_conditions(self, device):

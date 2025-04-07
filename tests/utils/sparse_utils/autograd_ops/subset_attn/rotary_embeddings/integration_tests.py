@@ -61,7 +61,7 @@ class TestEndToEnd:
         grad_k_rotated = torch.ones_like(k_rotated)  # Gradient from sum() is 1
 
         # First backward through rotate_k
-        grad_keys, grad_rope_encoding = rotate_k_backward(
+        grad_k, grad_rope_encoding = rotate_k_backward(
             grad_k_rotated, keys_complex, rope_encoding_complex, True
         )
 
@@ -72,7 +72,7 @@ class TestEndToEnd:
 
         # Check gradients match autograd
         assert_close(
-            grad_keys, keys.grad, msg="Manual grad_keys doesn't match autograd"
+            grad_k, keys.grad, msg="Manual grad_k doesn't match autograd"
         )
         assert_close(
             grad_key_positions,
@@ -161,12 +161,12 @@ class TestEndToEnd:
 
         # Test gradient broadcasting - create dummy gradients
         grad_k_rotated = torch.ones_like(k_rotated)
-        grad_keys, grad_rope_encoding = rotate_k_backward(
+        grad_k, grad_rope_encoding = rotate_k_backward(
             grad_k_rotated, keys_complex, rope_encoding_complex
         )
 
         # Keys gradient should maintain original shape
-        assert grad_keys.shape == keys.shape, "Keys gradient has wrong shape"
+        assert grad_k.shape == keys.shape, "Keys gradient has wrong shape"
 
         # Rope encoding gradient should maintain broadcasting shape
         assert (
@@ -336,13 +336,13 @@ class TestHypothesis:
         rope_encoding.grad = None
 
         # Manual backward pass
-        grad_keys, grad_rope_encoding = rotate_k_backward(
+        grad_k, grad_rope_encoding = rotate_k_backward(
             grad_output, keys_complex, rope_encoding_complex, True
         )
 
         # Compare gradients
         assert_close(
-            grad_keys, keys_grad_autograd, msg="Manual grad_keys doesn't match autograd"
+            grad_k, keys_grad_autograd, msg="Manual grad_k doesn't match autograd"
         )
         assert_close(
             grad_rope_encoding,

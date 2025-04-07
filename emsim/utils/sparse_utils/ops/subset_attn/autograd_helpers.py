@@ -8,8 +8,93 @@ from emsim.utils.sparse_utils.indexing.script_funcs import gather_and_mask
 
 
 @torch.jit.script
-def prep_qkv(
-    query_tensor: Tensor,
+def split_heads(tensor: Tensor, n_heads: int) -> Tensor:
+    """Splits the last dimension of a tensor into multiple attention heads.
+
+    Args:
+        tensor (Tensor): Input tensor to split, of shape
+            [n_queries, embed_dim] (for query) or
+            [n_queries, n_keys_per_query, embed_dim] (for key or value)
+        n_heads (int): Number of attention heads
+
+    Returns:
+        Tensor: Reshaped tensor with last dimension split to
+            [n_queries, n_heads, embed_dim / n_heads] (for query) or
+            [n_queries, n_keys_per_query, n_heads, embed_dim / n_heads] (for key or value)
+    """
+    if tensor.ndim not in (2, 3):
+        error_str = "Expected tensor to be 2D or 3D, got shape " + str(tensor.shape)
+        raise ValueError(error_str)
+
+    tensor_shape = tensor.size()
+    if tensor_shape[-1] % n_heads != 0:
+        error_str = "Last dimension of tensor with shape " + str(tensor_shape)
+        error_str += "cannot be evenly split into n_heads "
+        error_str += "(" + str(n_heads) + ") heads."
+        raise ValueError(error_str)
+
+    new_shape = tensor_shape[:-1] + (n_heads, tensor_shape[-1] // n_heads)
+    split_tensor = tensor.reshape(new_shape)
+
+    return split_tensor
+
+
+@torch.jit.script
+def permute_for_attention(tensor: Tensor) -> Tensor:
+    """Permutes dimensions of tensor for batched-heads attention computation.
+
+    Args:
+        tensor (Tensor): Input tensor to permute, of shape
+        [n_queries, n_heads, head_dim] (for query) or
+        [n_queries, n_keys_per_query, n_heads, head_dim] (for key or value)
+
+    Returns:
+        Tensor: Permuted tensor with n_heads dimension moved to first position, of
+            shape [n_heads, n_queries, head_dim] (for query) or
+            [n_heads, n_queries, n_keys_per_query, head_dim] (for key or value)
+    """
+    if tensor.ndim not in (3, 4):
+        raise ValueError(f"Expected tensor to be 3D or 4D, got shape {tensor.shape}")
+    if tensor.ndim == 3:
+        # For query: [n_queries, n_heads, head_dim] -> [n_heads, n_queries, head_dim]
+        return tensor.transpose(-2, -3).contiguous()
+    else:
+        # For key/value: [n_queries, n_keys_per_query, n_heads, head_dim] ->
+        # [n_heads, n_queries, n_keys_per_query, head_dim]
+        # standard batched-heads approach for multiplication with q and attn_weights
+        # but with added n_keys_per_query dim that k broadcasts over q and v
+        # contracts with attn_weights
+        return tensor.permute(2, 0, 1, 3).contiguous()
+
+
+@torch.jit.script
+def permute_for_attention_backward(tensor: Tensor) -> Tensor:
+    """Permutes dimensions of tensor that was in batched-heads format back to
+    standard format.
+
+    Args:
+        tensor (Tensor): Input tensor to permute, of shape
+        [n_heads, n_queries, head_dim] (for query) or
+        [n_heads, n_queries, n_keys_per_query, head_dim] (for key or value)
+
+    Returns:
+        Tensor: Permuted tensor with n_heads dimension moved to first position, of
+            shape [n_queries, n_heads, head_dim] (for query) or
+            [n_queries, n_keys_per_query, n_heads, head_dim] (for key or value)
+    """
+    if tensor.ndim not in (3, 4):
+        raise ValueError(f"Expected tensor to be 3D or 4D, got shape {tensor.shape}")
+    if tensor.ndim == 3:
+        # For query: [n_heads, n_queries, head_dim] -> [n_queries, n_heads, head_dim]
+        return tensor.transpose(-2, -3).contiguous()
+    else:
+        # For key/value: n_heads, n_queries, n_keys_per_query, head_dim]
+        # -> [n_queries, n_keys_per_query, n_heads, head_dim] ->
+        return tensor.permute(1, 2, 0, 3).contiguous()
+
+
+@torch.jit.script
+def project_kv(
     sparse_tensor_values: Tensor,
     index_search: Tensor,
     is_specified_mask: Tensor,
@@ -17,14 +102,11 @@ def prep_qkv(
     Wv: Tensor,
     bias_k: Optional[Tensor],
     bias_v: Optional[Tensor],
-    n_heads: int,
-    head_dim: int,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Computes the key and value tensors and reshapes them and the query tensor
-    for multi-head attention computation.
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Retrieves source sequence elements and computes the key and value tensors for
+    multi-head attention
 
     Args:
-        query_tensor (Tensor): Query features of shape [n_queries, embed_dim]
         sparse_tensor_values (Tensor): Values from sparse tensor of shape
             [num_sparse_values, embed_dim]
         index_search (Tensor): Long tensor of shape [n_queries, n_keys_per_query]
@@ -43,20 +125,15 @@ def prep_qkv(
         head_dim (int): Dimension of each attention head
 
     Returns:
-        - q (Tensor): Query tensor of shape [n_heads, n_queries, head_dim]
         - k (Tensor): Key tensor of shape
-            [n_heads, n_queries, n_keys_per_query, head_dim]
+            [n_queries, n_keys_per_query, embed_dim]
         - v (Tensor): Value tensor of shape
-            [n_heads, n_queries, n_keys_per_query, head_dim]
+            [n_queries, n_keys_per_query, embed_dim]
         - selected (Tensor): Selected features from sparse tensor before k and v
             projections, of shape [n_queries, n_keys_per_query, embed_dim]
     """
-    assert query_tensor.ndim == 2
     assert index_search.ndim == 2
     assert sparse_tensor_values.ndim == 2
-
-    n_queries = query_tensor.size(0)
-    n_keys_per_query = index_search.size(1)
 
     selected = gather_and_mask(sparse_tensor_values, index_search, is_specified_mask)
 
@@ -75,23 +152,7 @@ def prep_qkv(
     kv = F.linear(selected, W_stacked, bias_stacked)
     k, v = kv.chunk(2, -1)  # (n_queries, n_keys_per_query, embed_dim) * 2
 
-    # split heads
-    # (n_queries, embed_dim) -> (n_queries, n_heads, head_dim)
-    k = k.view(n_queries, n_keys_per_query, n_heads, head_dim)
-    v = v.view(n_queries, n_keys_per_query, n_heads, head_dim)
-    q = query_tensor.view(n_queries, n_heads, head_dim)
-
-    # Move n_head dim forward
-    q = q.transpose(-2, -3).contiguous()  # (n_heads, n_queries, head_dim)
-
-    # (n_heads, n_queries, n_keys_per_query, head_dim)
-    # standard batched-heads approach for multiplication with q and attn_weights
-    # but with added n_keys_per_query dim that k broadcasts over q and v
-    # contracts with attn_weights
-    k = k.permute(2, 0, 1, 3).contiguous()
-    v = v.permute(2, 0, 1, 3).contiguous()
-
-    return q, k, v, selected
+    return k, v, selected
 
 
 @torch.jit.script

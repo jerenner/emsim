@@ -63,7 +63,8 @@ def test_gather_and_subset_attention_function(
         torch.randn(
             index_tensor.shape[0],
             N_KEYS_PER_QUERY,
-            EMBED_DIM,
+            N_HEADS,
+            EMBED_DIM // N_HEADS,
             dtype=torch.double,
             requires_grad=True,
             device=device,
@@ -87,7 +88,8 @@ def test_gather_and_subset_attention_function(
         torch.randn(
             POSITION_DIM,
             N_FREQ_GROUPS,
-            EMBED_DIM,
+            N_HEADS,
+            EMBED_DIM // N_HEADS,
             dtype=torch.double,
             requires_grad=True,
             device=device,
@@ -191,7 +193,8 @@ def test_gradients_per_parameter(
         torch.randn(
             index_tensor.shape[0],
             N_KEYS_PER_QUERY,
-            EMBED_DIM,
+            N_HEADS,
+            EMBED_DIM // N_HEADS,
             dtype=torch.double,
             device=device,
         )
@@ -213,7 +216,8 @@ def test_gradients_per_parameter(
         torch.randn(
             POSITION_DIM,
             N_FREQ_GROUPS,
-            EMBED_DIM,
+            N_HEADS,
+            EMBED_DIM // N_HEADS,
             dtype=torch.double,
             device=device,
         )

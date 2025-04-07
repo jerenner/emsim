@@ -9,7 +9,13 @@ from .rotary_embedding import (
     rotate_k_backward,
     calculate_rope_backward,
 )
-from .autograd_helpers import prep_qkv, linear_grads
+from .autograd_helpers import (
+    project_kv,
+    linear_grads,
+    split_heads,
+    permute_for_attention,
+    permute_for_attention_backward,
+)
 
 
 class GatherAndSubsetAttentionFunction(torch.autograd.Function):
@@ -62,8 +68,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             bias_k (Optional[Tensor]): Key projection bias of shape [embed_dim]
             bias_v (Optional[Tensor]): Value projection bias of shape [embed_dim]
             key_pos_encoding (Optional[Tensor]): Positional encoding for keys of shape
-                [n_queries, n_keys_per_query, embed_dim]. Used for rotary position
-                embedding (RoPE). If specified, both embed_dim and the head dim must be
+                [n_queries, n_keys_per_query, n_heads, head_dim]. Used for rotary
+                position embedding (RoPE). If specified, both head_dim must be
                 divisible by 2. Cannot be used together with key_positions
                 and rope_freqs.
             key_positions (Optional[Tensor]): Position information for each key of
@@ -71,10 +77,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
                 Cannot be used together with key_pos_encoding.
             rope_freqs (Optional[Tensor]): Frequency values for rotary embeddings of
-                shape [position_dim, n_freq_groups, embed_dim] or
-                [position_dim, embed_dim]. Used together with key_positions to
-                compute rotary position embedding (RoPE) on-the-fly. Cannot be used
-                together with key_pos_encoding.
+                shape [position_dim, n_freq_groups, n_heads, head_dim] or
+                [position_dim, n_freq_groups, 1, head_dim]. Used together with
+                key_positions to compute rotary position embedding (RoPE) on-the-fly.
+                Cannot be used together with key_pos_encoding.
             scale_factor (Optional[float]): Scaling factor for attention scores.
                 Default is 1/sqrt(embed_dim).
 
@@ -113,27 +119,29 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             raise ValueError("Cannot provide only one of key_positions and rope_freqs")
 
         if key_pos_encoding is not None:
-            assert key_pos_encoding.shape == (n_queries, n_keys_per_query, embed_dim)
-            assert embed_dim % 2 == 0, "embed_dim must be even to use RoPE"
+            assert key_pos_encoding.shape == (
+                n_queries,
+                n_keys_per_query,
+                n_heads,
+                head_dim,
+            )
             assert head_dim % 2 == 0, "head_dim must be even to use RoPE"
 
         if key_positions is not None and rope_freqs is not None:
             # check shapes
-            assert (
-                key_positions.ndim == 3
-            )  # (n_queries, n_keys_per_query, position_dim)
 
-            # (position_dim, embed_dim) or (position_dim, n_groups, embed_dim)
-            assert rope_freqs.ndim in (2, 3)
-            if rope_freqs.ndim == 2:
-                rope_freqs = rope_freqs.unsqueeze(1)
+            # (n_queries, n_keys_per_query, position_dim)
+            assert key_positions.ndim == 3
+
+            # (position_dim, n_groups, n_heads or 1, head_dim)
+            assert rope_freqs.ndim == 4
 
             assert key_positions.shape[0] == n_queries
             assert key_positions.shape[1] == n_keys_per_query
-            assert rope_freqs.shape[-1] == embed_dim
+            assert rope_freqs.shape[-1] == head_dim
 
             position_dim = key_positions.shape[-1]
-            assert key_positions.shape[-1] == position_dim
+            assert rope_freqs.shape[0] == position_dim
 
         # save shape info
         ctx.n_queries = n_queries
@@ -167,17 +175,21 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         ctx.is_specified_mask = is_specified_mask
 
         # fmt: off
-        q, k, v, _ = prep_qkv(
-            query_tensor, sparse_tensor_values, index_search, is_specified_mask,
-            Wk, Wv, bias_k, bias_v, n_heads, head_dim,
+        k, v, _ = project_kv(
+            sparse_tensor_values, index_search, is_specified_mask,
+            Wk, Wv, bias_k, bias_v,
         )
         # fmt: on
 
         if key_positions is not None and rope_freqs is not None:
             key_pos_encoding = calculate_rope(key_positions, rope_freqs)
 
+        q, k, v = [split_heads(x, n_heads) for x in [query_tensor, k, v]]
+
         if key_pos_encoding is not None:
             k, _, _ = rotate_k(k, key_pos_encoding)
+
+        q, k, v = [permute_for_attention(x) for x in [q, k, v]]
 
         # fmt: off
         attn_scores = torch.matmul(
@@ -204,7 +216,6 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         ctx.attn_weights = attn_weights
 
         return output
-
 
     @staticmethod
     def _compute_grad_attn_scores(
@@ -239,39 +250,54 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         grad_q *= scale_factor
 
         # Flip dims back and stack heads
-        grad_q = grad_q.transpose(-2, -3)  # (n_queries, n_heads, head_dim)
+        grad_q = permute_for_attention_backward(grad_q)  # (n_queries, n_heads, head_dim)
         grad_query = grad_q.flatten(-2, -1)  # (n_queries, embed_dim)
         # fmt: on
         return grad_query
 
     @staticmethod
-    def _compute_grad_k(
+    def _compute_grads_k_and_pos_encoding(
         grad_attn_scores: Tensor,
         q: Tensor,
         scale_factor: float,
         key_pos_encoding: Union[Tensor, None],
+        needs_grad_k: bool,
         needs_grad_key_pos: bool,
         k_complex: Union[Tensor, None],
         key_pos_complex: Union[Tensor, None],
-    ) -> tuple[Tensor, Optional[Tensor]]:
+    ) -> tuple[Optional[Tensor], Optional[Tensor]]:
+        if not needs_grad_k and not needs_grad_key_pos:
+            return None, None
         # fmt: off
-        grad_k = torch.matmul(
+        grad_k_maybe_rotated = torch.matmul(
             grad_attn_scores.unsqueeze(-1), # (n_heads, n_queries, n_keys_per_query, 1)
             q.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
         )                                   # (n_heads, n_queries, n_keys_per_query, head_dim)
         # fmt: on
 
+        # (n_queries, n_keys_per_query, n_heads, head_dim)
+        grad_k_maybe_rotated = permute_for_attention_backward(grad_k_maybe_rotated)
+
         if key_pos_encoding is not None:
             # Handle backpropagation through RoPE
             grad_k, grad_key_pos_encoding = rotate_k_backward(
-                grad_k, k_complex, key_pos_complex, needs_grad_key_pos
+                grad_k_maybe_rotated,
+                k_complex,
+                key_pos_complex,
+                needs_grad_k,
+                needs_grad_key_pos,
             )
         else:
+            grad_k = grad_k_maybe_rotated
             grad_key_pos_encoding = None
 
-        # (n_queries, n_keys_per_query, n_heads, head_dim)
-        grad_k = grad_k.permute(1, 2, 0, 3)
-        grad_k = grad_k.flatten(-2, -1)  # (n_queries, n_keys_per_query, embed_dim)
+        if grad_k is None:
+            assert not needs_grad_k
+            return None, grad_key_pos_encoding
+
+        # (n_heads, n_queries, embed_dim)
+        grad_k = grad_k.flatten(-2, -1)
+
         return grad_k, grad_key_pos_encoding
 
     @staticmethod
@@ -284,7 +310,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # fmt: on
 
         # (n_queries, n_keys_per_query, n_heads, head_dim)
-        grad_v = grad_v.permute(1, 2, 0, 3)
+        grad_v = permute_for_attention_backward(grad_v)
         grad_v = grad_v.flatten(-2, -1)  # (n_queries, n_keys_per_query, embed_dim)
         return grad_v
 
@@ -309,13 +335,11 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             # stack gradients for batched k and v backward (adding leading dim)
             grad_kv_flat = torch.stack([grad_k_flat, grad_v_flat])
 
-            grad_W_stacked, grad_bias_stacked = (
-                linear_grads(
-                    grad_kv_flat,
-                    selected_flat,
-                    needs_grad_Wk or needs_grad_Wv,
-                    needs_grad_bias_k or needs_grad_bias_v,
-                )
+            grad_W_stacked, grad_bias_stacked = linear_grads(
+                grad_kv_flat,
+                selected_flat,
+                needs_grad_Wk or needs_grad_Wv,
+                needs_grad_bias_k or needs_grad_bias_v,
             )
 
             if grad_W_stacked is not None:
@@ -427,10 +451,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         attn_weights: Tensor = ctx.attn_weights
 
         # retrieve shape info
-        n_queries: int = ctx.n_queries
         embed_dim: int = ctx.embed_dim
         n_heads: int = ctx.n_heads
-        head_dim: int = ctx.head_dim
 
         # retrieve scale factor
         scale_factor: float = ctx.scale_factor
@@ -486,25 +508,32 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 None,  # scale_factor
             )
 
-        # recompute q, k, v
+        # recompute k, v
         # fmt: off
-        q, k, v, selected = prep_qkv(
-            query_tensor, sparse_tensor_values, index_search, is_specified_mask,
-            Wk, Wv, bias_k, bias_v, n_heads, head_dim,
+        k, v, selected = project_kv(
+            sparse_tensor_values, index_search, is_specified_mask,
+            Wk, Wv, bias_k, bias_v,
         )
         # fmt: on
 
         if key_positions is not None and rope_freqs is not None:
             key_pos_encoding = calculate_rope(key_positions, rope_freqs)
 
+        [grad_output, q, k, v] = [
+            split_heads(x, n_heads) for x in [grad_output, query_tensor, k, v]
+        ]
+
         if key_pos_encoding is not None:
             k, k_complex, key_pos_complex = rotate_k(k, key_pos_encoding)
 
-        # split heads on the grad tensor
-        grad_output = grad_output.reshape(n_queries, n_heads, head_dim)
-
+        # split heads and permute the grad tensor and input tensors
         # (n_heads, n_queries, head_dim)
-        grad_output = grad_output.transpose(-2, -3).contiguous()
+        grad_output = permute_for_attention(grad_output)
+        q = permute_for_attention(q)
+
+        # (n_heads, n_queries, n_keys_per_query, head_dim)
+        k = permute_for_attention(k)
+        v = permute_for_attention(v)
 
         if (
             needs_grad_query
@@ -549,18 +578,23 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 or needs_grad_rope_freqs
             ):
                 grad_k, grad_key_pos_encoding = (
-                    GatherAndSubsetAttentionFunction._compute_grad_k(
+                    GatherAndSubsetAttentionFunction._compute_grads_k_and_pos_encoding(
                         grad_attn_scores,
                         q,
                         scale_factor,
                         key_pos_encoding,
-                        (
+                        needs_grad_k=(
+                            needs_grad_Wk
+                            or needs_grad_bias_k
+                            or needs_grad_sparse_values
+                        ),
+                        needs_grad_key_pos=(
                             needs_grad_key_pos_encoding
                             or needs_grad_key_positions
                             or needs_grad_rope_freqs
                         ),
-                        k_complex,
-                        key_pos_complex,
+                        k_complex=k_complex,
+                        key_pos_complex=key_pos_complex,
                     )
                 )
                 del k_complex, key_pos_complex
@@ -577,7 +611,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                     grad_key_pos_encoding = None
 
                 # Flatten for grad calcs
-                grad_k_flat = grad_k.view(-1, embed_dim)
+                if grad_k is not None:
+                    grad_k_flat = grad_k.view(-1, embed_dim)
             del grad_attn_scores
             del q
 

@@ -64,9 +64,9 @@ def test_end_to_end_subset_attn(
         torch.randn(
             index_tensor.shape[0],
             N_KEYS_PER_QUERY,
-            EMBED_DIM,
+            N_HEADS,
+            EMBED_DIM // N_HEADS,
             dtype=torch.double,
-            requires_grad=True,
             device=device,
         )
         if key_pos_encoding_type == "given"
@@ -78,7 +78,6 @@ def test_end_to_end_subset_attn(
             N_KEYS_PER_QUERY,
             POSITION_DIM,
             dtype=torch.double,
-            requires_grad=True,
             device=device,
         )
         if key_pos_encoding_type == "computed"
@@ -88,9 +87,9 @@ def test_end_to_end_subset_attn(
         torch.randn(
             POSITION_DIM,
             N_FREQ_GROUPS,
-            EMBED_DIM,
+            N_HEADS,
+            EMBED_DIM // N_HEADS,
             dtype=torch.double,
-            requires_grad=True,
             device=device,
         )
         if key_pos_encoding_type == "computed"

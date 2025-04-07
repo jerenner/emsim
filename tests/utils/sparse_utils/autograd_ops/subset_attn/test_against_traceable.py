@@ -79,10 +79,11 @@ def test_subset_attn_against_traceable(
         torch.randn(
             index_tensor.shape[0],
             N_KEYS_PER_QUERY,
-            EMBED_DIM,
+            N_HEADS,
+            EMBED_DIM // N_HEADS,
             dtype=torch.double,
-            requires_grad=True,
             device=device,
+            requires_grad=True,
         )
         if key_pos_encoding_type == "given"
         else None
@@ -93,8 +94,8 @@ def test_subset_attn_against_traceable(
             N_KEYS_PER_QUERY,
             POSITION_DIM,
             dtype=torch.double,
-            requires_grad=True,
             device=device,
+            requires_grad=True,
         )
         if key_pos_encoding_type == "computed"
         else None
@@ -103,10 +104,11 @@ def test_subset_attn_against_traceable(
         torch.randn(
             POSITION_DIM,
             N_FREQ_GROUPS,
-            EMBED_DIM,
+            N_HEADS,
+            EMBED_DIM // N_HEADS,
             dtype=torch.double,
-            requires_grad=True,
             device=device,
+            requires_grad=True,
         )
         if key_pos_encoding_type == "computed"
         else None
@@ -171,7 +173,7 @@ def test_subset_attn_against_traceable(
         custom_grads["key_bias"] = key_bias.grad.clone()
     if value_bias is not None:
         custom_grads["value_bias"] = value_bias.grad.clone()
-    if key_pos_encoding is not None:
+    if key_pos_encoding is not None and key_pos_encoding.grad is not None:
         custom_grads["key_pos_encoding"] = key_pos_encoding.grad.clone()
     if key_positions is not None and key_positions.grad is not None:
         custom_grads["key_positions"] = key_positions.grad.clone()
@@ -208,9 +210,9 @@ def test_subset_attn_against_traceable(
         assert torch.allclose(custom_grads["key_bias"], key_bias.grad)
     if value_bias is not None:
         assert torch.allclose(custom_grads["value_bias"], value_bias.grad)
-    if key_pos_encoding is not None:
+    if key_pos_encoding_type == "given":
         assert torch.allclose(custom_grads["key_pos_encoding"], key_pos_encoding.grad)
-    if key_positions is not None:
+    if key_pos_encoding_type == "computed":
         assert torch.allclose(custom_grads["key_positions"], key_positions.grad)
-    if rope_freqs is not None:
+    if key_pos_encoding_type == "computed":
         assert torch.allclose(custom_grads["rope_freqs"], rope_freqs.grad)

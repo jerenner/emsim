@@ -56,18 +56,19 @@ def batch_sparse_index_subset_attn(
         key_bias (Optional[Tensor]): Optional bias vector for key projection of shape [M].
         value_bias (Optional[Tensor]): Optional bias vector for value projection of shape [M].
         key_pos_encoding (Optional[Tensor]): Optional positional encoding for keys
-            of shape [..., L, M], where ... matches the batch dimensions from key_index_tensor.
-            Used for rotary position embedding (RoPE). If specified, M and the
-            head dim must both be divisible by 2. Cannot be used together with
-            key_positions and rope_freqs.
+            of shape [..., L, n_heads, head_dim], where ... matches the batch dimensions
+            from key_index_tensor. Used for rotary position embedding (RoPE). The n_heads
+            dimension may also be 1, which will broadcast the encoding across heads.
+            If key_pos_encoding is specified, head_dim must be divisible by 2. Cannot be
+            used together with key_positions and rope_freqs.
         key_positions (Optional[Tensor]): Position information for each key of shape
             [..., L, P], where ... matches the batch dimensions from key_index_tensor
             and P is the dimensionality of the position representation. Used together
             with rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
             Cannot be used together with key_pos_encoding.
         rope_freqs (Optional[Tensor]): Frequency values for rotary embeddings of shape
-            [P, G, M] or [P, M], where P matches the position dimension from key_positions,
-            G is the number of frequency groups, and M is the feature dimension.
+            [P, G, n_heads, head_dim] or [P,G, 1, head_dim], where P matches the position
+            dimension from key_positions, and G is the number of frequency groups.
             Used together with key_positions to compute rotary position embedding (RoPE)
             on-the-fly. Cannot be used together with key_pos_encoding.
         scale_factor (Optional[float]): Optional scaling factor for attention scores.

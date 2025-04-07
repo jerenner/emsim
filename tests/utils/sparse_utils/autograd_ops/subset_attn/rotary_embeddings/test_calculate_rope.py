@@ -280,6 +280,162 @@ class TestCalculateRopeBackward:
             msg="Gradients for rope_freqs incorrect",
         )
 
+    def test_head_broadcasting(self, device):
+        """Test with broadcasting in the n_heads dimension."""
+        # [n_queries=1, n_keys_per_query=1, n_heads=2, head_dim=2]
+        grad_key_pos_encoding = torch.tensor(
+            [[[[0.1, 0.2], [0.3, 0.4]]]], dtype=torch.float32, device=device
+        )
+        key_positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
+
+        # [position_dim=2, n_freq_groups=1, n_heads=1, head_dim=2
+        rope_freqs = torch.tensor(
+            [
+                [  # position_dim=0
+                    [  # n_freq_groups=1
+                        [1.0, 2.0],  # head 0 (broadcast to all heads), head_dim=2
+                    ]
+                ],
+                [  # position_dim=1
+                    [  # n_freq_groups=1
+                        [5.0, 6.0],  # head 0 (broadcast to all heads), head_dim=2
+                    ]
+                ],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+
+        # Gradient for key_positions - fixed calculation
+        # Head 0: 0.1 * [1.0, 5.0] + 0.2 * [2.0, 6.0] = [0.5, 1.7]
+        # Head 1: 0.3 * [1.0, 5.0] + 0.4 * [2.0, 6.0] = [0.3 + 0.8, 1.5 + 2.4] = [1.1, 3.9]
+        # Sum over heads: [0.5 + 1.1, 1.7 + 3.9] = [1.6, 5.6]
+        expected_grad_key_positions = torch.tensor(
+            [[[1.6, 5.6]]],
+            dtype=torch.float32,
+            device=device,
+        )
+
+        # Gradient for rope_freqs - should sum across the broadcast dimension
+        # position_dim=0: (0.1 + 0.3) * 1.0, (0.2 + 0.4) * 1.0 = [0.4, 0.6]
+        # position_dim=1: (0.1 + 0.3) * 2.0, (0.2 + 0.4) * 2.0 = [0.8, 1.2]
+        expected_grad_rope_freqs = torch.tensor(
+            [
+                [  # position_dim=0
+                    [  # n_freq_groups=1
+                        [0.4, 0.6],  # head 0 (sum of both head gradients)
+                    ]
+                ],
+                [  # position_dim=1
+                    [  # n_freq_groups=1
+                        [0.8, 1.2],  # head 0 (sum of both head gradients)
+                    ]
+                ],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+
+        grad_key_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_key_pos_encoding, key_positions, rope_freqs, True, True
+        )
+
+        assert_close(
+            grad_key_positions,
+            expected_grad_key_positions,
+            msg="Gradients for key_positions with head broadcasting incorrect",
+        )
+        assert_close(
+            grad_rope_freqs,
+            expected_grad_rope_freqs,
+            msg="Gradients for rope_freqs with head broadcasting incorrect",
+        )
+
+    def test_freq_group_broadcasting(self, device):
+        """Test with broadcasting in the n_freq_groups dimension."""
+        # [n_queries=1, n_keys_per_query=1, n_heads=1, head_dim=2]
+        grad_key_pos_encoding = torch.tensor(
+            [[[[0.1, 0.2]]]], dtype=torch.float32, device=device
+        )
+        key_positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
+
+        # [position_dim=2, n_freq_groups=2, n_heads=1, head_dim=2]
+        rope_freqs = torch.tensor(
+            [
+                [  # position_dim=0
+                    [  # n_freq_groups=0
+                        [1.0, 2.0],  # n_heads=1, head_dim=2
+                    ],
+                    [  # n_freq_groups=1
+                        [3.0, 4.0],  # n_heads=1, head_dim=2
+                    ],
+                ],
+                [  # position_dim=1
+                    [  # n_freq_groups=0
+                        [5.0, 6.0],  # n_heads=1, head_dim=2
+                    ],
+                    [  # n_freq_groups=1
+                        [7.0, 8.0],  # n_heads=1, head_dim=2
+                    ],
+                ],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+
+        # Gradient for key_positions - sum of all freq groups
+        # Freq 0: 0.1 * [1.0, 5.0] + 0.2 * [2.0, 6.0] = [0.5, 1.7]
+        # Freq 1: 0.1 * [3.0, 7.0] + 0.2 * [4.0, 8.0] = [1.1, 2.3]
+        # Sum over freq groups: [0.5 + 1.1, 1.7 + 2.3] = [1.6, 4.0]
+        expected_grad_key_positions = torch.tensor(
+            [[[1.6, 4.0]]],
+            dtype=torch.float32,
+            device=device,
+        )
+
+        # Gradient for rope_freqs
+        # position_dim=0, freq_group=0: 0.1 * 1.0, 0.2 * 1.0 = [0.1, 0.2]
+        # position_dim=0, freq_group=1: 0.1 * 1.0, 0.2 * 1.0 = [0.1, 0.2]
+        # position_dim=1, freq_group=0: 0.1 * 2.0, 0.2 * 2.0 = [0.2, 0.4]
+        # position_dim=1, freq_group=1: 0.1 * 2.0, 0.2 * 2.0 = [0.2, 0.4]
+        expected_grad_rope_freqs = torch.tensor(
+            [
+                [  # position_dim=0
+                    [  # n_freq_groups=0
+                        [0.1, 0.2],  # n_heads=1, head_dim=2
+                    ],
+                    [  # n_freq_groups=1
+                        [0.1, 0.2],  # n_heads=1, head_dim=2
+                    ],
+                ],
+                [  # position_dim=1
+                    [  # n_freq_groups=0
+                        [0.2, 0.4],  # n_heads=1, head_dim=2
+                    ],
+                    [  # n_freq_groups=1
+                        [0.2, 0.4],  # n_heads=1, head_dim=2
+                    ],
+                ],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+
+        grad_key_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_key_pos_encoding, key_positions, rope_freqs, True, True
+        )
+
+        assert_close(
+            grad_key_positions,
+            expected_grad_key_positions,
+            msg="Gradients for key_positions with freq group broadcasting incorrect",
+        )
+        assert_close(
+            grad_rope_freqs,
+            expected_grad_rope_freqs,
+            msg="Gradients for rope_freqs with freq group broadcasting incorrect",
+        )
+
     def test_selective_gradient_computation(self, device):
         """Test that only requested gradients are computed."""
         # Updated shapes

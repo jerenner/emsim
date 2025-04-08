@@ -57,6 +57,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             Wk, Wv, bias_k, bias_v,
         )
         # fmt: on
+        if not is_for_backward:
+            del selected
 
         [q, k, v] = [split_heads(x, n_heads) for x in [query_tensor, k, v]]
 

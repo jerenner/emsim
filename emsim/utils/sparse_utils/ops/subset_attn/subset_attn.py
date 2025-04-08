@@ -37,8 +37,16 @@ def batch_sparse_index_subset_attn(
             calculation similar to masking out padding in standard attention.
         - Queries whose keys are all unspecified will get an output vector of all 0.
         - For rotary position embeddings, either provide key_pos_encoding OR both
-          key_positions and rope_freqs. Providing both options simultaneously is
-          not supported.
+            key_positions and rope_freqs. Providing both options simultaneously is
+            not supported.
+        - The output tensor has NOT gone through the output projection (W_o)
+            that is encapsulated within most implementations of standard
+            multi-head attention. The decision to exclude the output projection
+            from this op was driven by the motivation to remove any extra
+            complexity that would have diminishing memory performance benefits.
+            You will need to add this as an extra nn.Linear layer that gets applied
+            to this op's output before it gets passed to a transformer FFN block.
+            The residual connection and normalization are also not included.
 
     Args:
         sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
@@ -83,16 +91,6 @@ def batch_sparse_index_subset_attn(
             batch dimensions from key_index_tensor and query_tensor.
         - Tensor: Boolean mask of shape [..., L], indicating which keys were actually
             specified in the sparse tensor.
-
-    Note:
-    - The output tensor has NOT gone through the output projection (W_o)
-        that is encapsulated within most implementations of standard
-        multi-head attention. The decision to exclude the output projection
-        from this op was driven by the motivation to remove any extra
-        complexity that would have diminishing memory performance benefits.
-        You will need to add this as an extra nn.Linear layer that gets applied
-        to this op's output before it gets passed to a transformer FFN block.
-        The residual connection and normalization are also not included.
     """
     if key_index_tensor.is_nested:
         raise ValueError("Nested key index tensor not supported")

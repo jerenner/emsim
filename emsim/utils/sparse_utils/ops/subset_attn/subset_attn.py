@@ -83,18 +83,27 @@ def batch_sparse_index_subset_attn(
             batch dimensions from key_index_tensor and query_tensor.
         - Tensor: Boolean mask of shape [..., L], indicating which keys were actually
             specified in the sparse tensor.
+
+    Note:
+    - The output tensor has NOT gone through the output projection (W_o)
+        that is encapsulated within most implementations of standard
+        multi-head attention. The decision to exclude the output projection
+        from this op was driven by the motivation to remove any extra
+        complexity that would have diminishing memory performance benefits.
+        You will need to add this as an extra nn.Linear layer that gets applied
+        to this op's output before it gets passed to a transformer FFN block.
+        The residual connection and normalization are also not included.
     """
     if key_index_tensor.is_nested:
         raise ValueError("Nested key index tensor not supported")
         # return __gather_nested_index(sparse_tensor, key_index_tensor, check_all_specified)
 
     if query_tensor.shape[:-1] != key_index_tensor.shape[:-2]:
-        error_str = "Expected the first n-1 dims of query_tensor and the first"
-        error_str += "n-2 dims of index_tensor to match, got "
-        error_str += str(query_tensor.shape)
-        error_str += " and "
-        error_str += str(key_index_tensor.shape)
-        raise ValueError(error_str)
+        raise ValueError(
+            "Expected the first n-1 dims of query_tensor and the first n-2 dims of "
+            "index_tensor to match, got "
+            f"{query_tensor.shape} and {key_index_tensor.shape}"
+        )
 
     sparse_tensor = sparse_tensor.coalesce()
     sparse_tensor_values = sparse_tensor.values()

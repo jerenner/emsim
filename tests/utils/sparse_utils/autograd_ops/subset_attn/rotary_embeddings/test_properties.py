@@ -11,7 +11,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import (
     rotate_k,
     rotate_k_backward,
 )
-from tests.utils.sparse_utils.autograd_ops.subset_attn.rotary_embeddings.conftest import (
+from .conftest import (
     assert_close,
     valid_dims,
 )
@@ -134,7 +134,7 @@ class TestHypothesis:
         )
 
         # Forward pass
-        k_rotated, keys_complex, rope_encoding_complex = rotate_k(keys, rope_encoding)
+        k_rotated = rotate_k(keys, rope_encoding)
 
         # Autograd backward
         grad_output = torch.randn_like(k_rotated, device=device)
@@ -150,7 +150,7 @@ class TestHypothesis:
 
         # Manual backward pass
         grad_k, grad_rope_encoding = rotate_k_backward(
-            grad_output, keys_complex, rope_encoding_complex, True, True
+            grad_output, keys, rope_encoding, True, True
         )
 
         # Compare gradients
@@ -283,7 +283,7 @@ class TestHypothesis:
         )
 
         # Forward pass
-        k_rotated, _, _ = rotate_k(keys, rope_encoding)
+        k_rotated = rotate_k(keys, rope_encoding)
 
         # Create two different gradient outputs
         grad_output1 = torch.randn_like(k_rotated, device=device, dtype=torch.double)
@@ -435,7 +435,7 @@ class TestHypothesis:
         rope_encoding = theta  # phase angle directly
 
         # Rotation should preserve magnitude (|z| = |e^{iθ}z| = |z|)
-        k_rotated, _, _ = rotate_k(keys, rope_encoding)
+        k_rotated = rotate_k(keys, rope_encoding)
 
         # Convert keys to complex for magnitude calculation
         keys_complex_view = keys.view(keys.shape[:-1] + (head_dim_half, 2))
@@ -550,7 +550,7 @@ class TestHypothesis:
 
         # Set seed
         torch.manual_seed(seed)
-        keys1 = torch.randn(
+        keys_1 = torch.randn(
             n_queries,
             n_keys_per_query,
             n_heads,
@@ -558,7 +558,7 @@ class TestHypothesis:
             device=device,
             dtype=torch.double,
         )
-        rope_encoding1 = torch.randn(
+        rope_encoding_1 = torch.randn(
             n_queries,
             n_keys_per_query,
             n_heads,
@@ -566,11 +566,11 @@ class TestHypothesis:
             device=device,
             dtype=torch.double,
         )
-        k_rotated1, _, _ = rotate_k(keys1, rope_encoding1)
+        k_rotated_1 = rotate_k(keys_1, rope_encoding_1)
 
         # Reset seed and compute again
         torch.manual_seed(seed)
-        keys2 = torch.randn(
+        keys_2 = torch.randn(
             n_queries,
             n_keys_per_query,
             n_heads,
@@ -578,7 +578,7 @@ class TestHypothesis:
             device=device,
             dtype=torch.double,
         )
-        rope_encoding2 = torch.randn(
+        rope_encoding_2 = torch.randn(
             n_queries,
             n_keys_per_query,
             n_heads,
@@ -586,14 +586,14 @@ class TestHypothesis:
             device=device,
             dtype=torch.double,
         )
-        k_rotated2, _, _ = rotate_k(keys2, rope_encoding2)
+        k_rotated_2 = rotate_k(keys_2, rope_encoding_2)
 
         # Results should be identical
-        assert torch.all(keys1 == keys2), "Random number generation not deterministic"
+        assert torch.all(keys_1 == keys_2), "Random number generation not deterministic"
         assert torch.all(
-            rope_encoding1 == rope_encoding2
+            rope_encoding_1 == rope_encoding_2
         ), "Random number generation not deterministic"
-        assert torch.all(k_rotated1 == k_rotated2), "rotate_k is not deterministic"
+        assert torch.all(k_rotated_1 == k_rotated_2), "rotate_k is not deterministic"
 
     @given(
         n_queries=valid_dims(),
@@ -698,11 +698,11 @@ class TestHypothesis:
         ) * (2 * math.pi)
 
         # Apply rotations in sequence
-        k_rotated1, _, _ = rotate_k(keys, theta1)
-        k_rotated_sequential, _, _ = rotate_k(k_rotated1, theta2)
+        k_rotated1 = rotate_k(keys, theta1)
+        k_rotated_sequential = rotate_k(k_rotated1, theta2)
 
         # Apply combined rotation
-        k_rotated_combined, _, _ = rotate_k(keys, theta1 + theta2)
+        k_rotated_combined = rotate_k(keys, theta1 + theta2)
 
         # Results should match
         assert_close(
@@ -716,8 +716,6 @@ class TestHypothesis:
     @given(
         n_queries=valid_dims(),
         n_keys_per_query=valid_dims(),
-        position_dim=valid_dims(),
-        n_freq_groups=valid_dims(),
         n_heads=valid_dims(),
         half_head_dim=valid_dims(),
     )
@@ -731,8 +729,6 @@ class TestHypothesis:
         device,
         n_queries,
         n_keys_per_query,
-        position_dim,
-        n_freq_groups,
         n_heads,
         half_head_dim,
     ):
@@ -760,16 +756,14 @@ class TestHypothesis:
         )
 
         # Apply rotation
-        k_rotated, keys_complex, rope_encoding_complex = rotate_k(
-            keys, rope_encoding_single_head
-        )
+        k_rotated = rotate_k(keys, rope_encoding_single_head)
 
         # Create gradient for backward pass
         grad_k_rotated = torch.randn_like(k_rotated)
 
         # Run backward pass
         grad_k, grad_rope_encoding = rotate_k_backward(
-            grad_k_rotated, keys_complex, rope_encoding_complex, True, True
+            grad_k_rotated, keys, rope_encoding_single_head, True, True
         )
 
         # Verify shape of gradients
@@ -782,7 +776,7 @@ class TestHypothesis:
         rope_encoding_expanded = rope_encoding_single_head.expand(-1, -1, n_heads, -1)
 
         # Forward pass with expanded tensor
-        k_rotated_expanded, _, _ = rotate_k(keys, rope_encoding_expanded)
+        k_rotated_expanded = rotate_k(keys, rope_encoding_expanded)
 
         # Results should match
         assert_close(

@@ -56,7 +56,7 @@ def traceable_sparse_attention(
 
     # Apply rotary position encoding if provided
     if key_pos_encoding is not None:
-        k, _, _ = rotate_k(k, key_pos_encoding)
+        k = rotate_k(k, key_pos_encoding)
 
     # Move head dim forward
     q = q.transpose(-2, -3).contiguous()  # (n_heads, n_queries, head_dim)

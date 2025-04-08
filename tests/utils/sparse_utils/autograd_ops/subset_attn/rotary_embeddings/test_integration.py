@@ -57,7 +57,7 @@ class TestEndToEnd:
 
         # Forward pass
         rope_encoding = calculate_rope(key_positions, rope_freqs)
-        k_rotated, keys_complex, rope_encoding_complex = rotate_k(keys, rope_encoding)
+        k_rotated = rotate_k(keys, rope_encoding)
 
         # Loss and autograd backward
         loss = k_rotated.sum()
@@ -68,7 +68,7 @@ class TestEndToEnd:
 
         # First backward through rotate_k
         grad_k, grad_rope_encoding = rotate_k_backward(
-            grad_k_rotated, keys_complex, rope_encoding_complex, True, True
+            grad_k_rotated, keys, rope_encoding, True, True
         )
 
         # Then backward through calculate_rope
@@ -158,7 +158,7 @@ class TestEndToEnd:
         expected[0, 0, 2, 6] = 8.0 * cos_val
         expected[0, 0, 2, 7] = 8.0 * sin_val
 
-        k_rotated, keys_complex, rope_encoding_complex = rotate_k(keys, rope_encoding)
+        k_rotated = rotate_k(keys, rope_encoding)
 
         # Verify the rotation results
         assert_close(
@@ -168,19 +168,10 @@ class TestEndToEnd:
             msg="Broadcasting in rotate_k failed",
         )
 
-        # Check that complex representations have the correct shapes
-        assert keys_complex.shape == (1, 1, 3, 4), "Keys complex shape incorrect"
-        assert rope_encoding_complex.shape == (
-            1,
-            1,
-            1,
-            4,
-        ), "Rope encoding complex shape incorrect"
-
         # Test gradient broadcasting - create dummy gradients
         grad_k_rotated = torch.ones_like(k_rotated)
         grad_k, grad_rope_encoding = rotate_k_backward(
-            grad_k_rotated, keys_complex, rope_encoding_complex, True, True
+            grad_k_rotated, keys, rope_encoding, True, True
         )
 
         # Keys gradient should maintain original shape
@@ -234,7 +225,7 @@ class TestEndToEnd:
         )
 
         # Forward pass to get complex representations
-        k_rotated, keys_complex, rope_encoding_complex = rotate_k(keys, rope_encoding)
+        k_rotated = rotate_k(keys, rope_encoding)
 
         # Create arbitrary gradients for output
         grad_output = torch.randn_like(k_rotated, device=device)
@@ -248,6 +239,13 @@ class TestEndToEnd:
             grad_output.shape[:-1] + (half_head_dim, 2)
         )
         grad_output_complex = torch.view_as_complex(grad_output_complex_view)
+
+        rope_encoding_complex = torch.polar(
+            torch.ones_like(rope_encoding),
+            rope_encoding,
+        )
+        keys_complex_shape = keys.shape[:-1] + (keys.size(-1) // 2, 2)
+        keys_complex = torch.view_as_complex(keys.view(keys_complex_shape))
 
         # Compute gradients analytically
         analytical_grad_keys_complex = (
@@ -289,7 +287,7 @@ class TestEndToEnd:
         rope_encoding.grad = None
 
         grad_k, grad_rope_encoding = rotate_k_backward(
-            grad_output, keys_complex, rope_encoding_complex, True, True
+            grad_output, keys, rope_encoding, True, True, True
         )
 
         # Compare with analytical gradients
@@ -317,11 +315,13 @@ class TestEndToEnd:
                 device=device,
                 dtype=torch.double,
             )
+            rope_encoding_single_complex = torch.polar(
+                torch.ones_like(rope_encoding_single),
+                rope_encoding_single,
+            )
 
             # Forward pass with broadcasting
-            k_rotated_broadcast, keys_complex_broadcast, rope_complex_broadcast = (
-                rotate_k(keys, rope_encoding_single)
-            )
+            k_rotated_broadcast = rotate_k(keys, rope_encoding_single)
 
             # Create same gradients for both passes
             grad_output_broadcast = torch.randn_like(k_rotated_broadcast, device=device)
@@ -329,8 +329,9 @@ class TestEndToEnd:
             # Test our backward function directly with broadcasting
             grad_k_broadcast, grad_rope_broadcast = rotate_k_backward(
                 grad_output_broadcast,
-                keys_complex_broadcast,
-                rope_complex_broadcast,
+                keys,
+                rope_encoding_single,
+                True,
                 True,
                 True,
             )
@@ -361,7 +362,7 @@ class TestEndToEnd:
             # Manually calculate and sum the gradients for each head
             for h in range(n_heads):
                 # Extract this head's data
-                head_keys_complex = keys_complex_broadcast[:, :, h : h + 1, :]
+                head_keys_complex = keys_complex[:, :, h : h + 1, :]
                 head_grad_output = grad_output_complex_broadcast[:, :, h : h + 1, :]
 
                 # Calculate gradient for this head
@@ -372,7 +373,7 @@ class TestEndToEnd:
 
             # Convert to angle gradient
             expected_grad_broadcast = (
-                summed_grad_complex / rope_complex_broadcast
+                summed_grad_complex / rope_encoding_single_complex
             ).imag
 
             # Verify the summing behavior for broadcasting is correct

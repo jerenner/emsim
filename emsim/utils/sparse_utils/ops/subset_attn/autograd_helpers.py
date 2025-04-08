@@ -94,7 +94,7 @@ def permute_for_attention_backward(tensor: Tensor) -> Tensor:
 
 
 @torch.jit.script
-def project_kv(
+def select_values_and_project_kv(
     sparse_tensor_values: Tensor,
     index_search: Tensor,
     is_specified_mask: Tensor,

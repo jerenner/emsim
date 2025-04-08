@@ -11,7 +11,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import (
 from .conftest import assert_close
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestRotateK:
     """Tests for the rotate_k function."""
 
@@ -265,7 +265,7 @@ class TestRotateK:
             _ = rotate_keys(k5, encoding5, needs_autograd=False)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestRotateKProperties:
 
     @given(
@@ -472,7 +472,7 @@ class TestRotateKProperties:
         )
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestRotateKBackward:
     """Tests for the rotate_k_backward function."""
 

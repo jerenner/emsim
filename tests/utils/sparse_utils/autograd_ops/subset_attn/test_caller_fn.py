@@ -14,7 +14,7 @@ from ..constants import (
 )
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 @pytest.mark.parametrize(
     "key_pos_encoding_type",
     ["given", "computed", None],

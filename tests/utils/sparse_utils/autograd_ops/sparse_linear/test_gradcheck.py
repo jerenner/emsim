@@ -12,7 +12,7 @@ from emsim.utils.sparse_utils.ops.linear.autograd import (
 from ..constants import EMBED_DIM
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_gather_and_linear_function(
     setup_sparse_tensor, setup_linear_index_tensor, device
 ):

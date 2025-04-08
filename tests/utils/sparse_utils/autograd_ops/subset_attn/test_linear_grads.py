@@ -37,7 +37,7 @@ def setup_tensors(device):
     }
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_none_grad_output(setup_tensors):
     """Test handling of None grad_output."""
     tensors = setup_tensors
@@ -52,7 +52,7 @@ def test_none_grad_output(setup_tensors):
 # === Non-stacked mode tests ===
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_non_stacked_both_grads(setup_tensors):
     """Test non-stacked mode with both weight and bias gradients."""
     tensors = setup_tensors
@@ -77,7 +77,7 @@ def test_non_stacked_both_grads(setup_tensors):
     assert torch.allclose(bias_grad, expected_bias_grad)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_non_stacked_weight_only(setup_tensors):
     """Test non-stacked mode with only weight gradients."""
     tensors = setup_tensors
@@ -96,7 +96,7 @@ def test_non_stacked_weight_only(setup_tensors):
     assert torch.allclose(weight_grad, expected_weight_grad)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_non_stacked_bias_only(setup_tensors):
     """Test non-stacked mode with only bias gradients."""
     tensors = setup_tensors
@@ -115,7 +115,7 @@ def test_non_stacked_bias_only(setup_tensors):
     assert torch.allclose(bias_grad, expected_bias_grad)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_non_stacked_no_grads(setup_tensors):
     """Test non-stacked mode with no gradients needed."""
     tensors = setup_tensors
@@ -131,7 +131,7 @@ def test_non_stacked_no_grads(setup_tensors):
 # === Stacked mode tests ===
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_stacked_both_grads(setup_tensors):
     """Test stacked mode with both weight and bias gradients."""
     tensors = setup_tensors
@@ -167,7 +167,7 @@ def test_stacked_both_grads(setup_tensors):
     assert torch.allclose(bias_grad, expected_bias_grad)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_stacked_weight_only(setup_tensors):
     """Test stacked mode with only weight gradients."""
     tensors = setup_tensors
@@ -196,7 +196,7 @@ def test_stacked_weight_only(setup_tensors):
     assert torch.allclose(weight_grad, expected_weight_grad)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_stacked_bias_only(setup_tensors):
     """Test stacked mode with only bias gradients."""
     tensors = setup_tensors
@@ -215,7 +215,7 @@ def test_stacked_bias_only(setup_tensors):
     assert torch.allclose(bias_grad, expected_bias_grad)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_stacked_no_grads(setup_tensors):
     """Test stacked mode with no gradients needed."""
     tensors = setup_tensors
@@ -228,7 +228,7 @@ def test_stacked_no_grads(setup_tensors):
     assert bias_grad is None
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_bias_trick_consistency(setup_tensors):
     """Test that the bias trick gives the same results as computing separately."""
     tensors = setup_tensors

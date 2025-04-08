@@ -31,7 +31,7 @@ from .traceable_sparse_attn import traceable_sparse_attention
 @pytest.mark.parametrize(
     "scale_factor", [None, 0.5], ids=["scale_factor=None", "scale_factor=0.5"]
 )
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_subset_attn_against_traceable(
     setup_sparse_tensor,
     setup_attention_index_tensor,

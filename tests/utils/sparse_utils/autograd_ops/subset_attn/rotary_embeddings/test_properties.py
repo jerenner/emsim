@@ -17,7 +17,7 @@ from .conftest import (
 )
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestHypothesis:
     """Property-based tests using hypothesis."""
 

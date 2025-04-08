@@ -24,7 +24,7 @@ from ..constants import (
         "key_pos_encoding_type=None",
     ],
 )
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 def test_gather_and_subset_attention_function(
     setup_sparse_tensor, setup_attention_index_tensor, device, key_pos_encoding_type
 ):
@@ -119,7 +119,7 @@ def test_gather_and_subset_attention_function(
     assert torch.autograd.gradcheck(GatherAndSubsetAttentionFunction.apply, inputs)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 @pytest.mark.parametrize(
     "param_name, param_index",
     [

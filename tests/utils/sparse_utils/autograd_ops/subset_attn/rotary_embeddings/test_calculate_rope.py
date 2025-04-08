@@ -10,7 +10,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import (
 from .conftest import assert_close, even_dims, valid_dims
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestCalculateRope:
     """Tests for the calculate_rope function."""
 
@@ -190,7 +190,7 @@ class TestCalculateRope:
         )
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestCalculateRopeBackward:
     """Tests for the calculate_rope_backward function."""
 

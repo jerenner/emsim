@@ -15,7 +15,7 @@ def dtype():
     return torch.float32
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestInit2DFreqs:
     def test_init_2d_freqs_shape(self, device, dtype):
         head_dim = 64
@@ -42,9 +42,9 @@ class TestInit2DFreqs:
         assert not torch.allclose(freqs_rotate, freqs_no_rotate)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestInitNDFreqs:
-    @pytest.mark.cuda
+    @pytest.mark.cuda_if_available
     def test_init_nd_freqs_shape(self, device, dtype):
         position_dim = 3
         head_dim = 64
@@ -56,7 +56,7 @@ class TestInitNDFreqs:
         assert freqs.device.type == device
 
 
-    @pytest.mark.cuda
+    @pytest.mark.cuda_if_available
     def test_init_nd_freqs_multiple_thetas(self, device, dtype):
         position_dim = 3
         head_dim = 64
@@ -71,7 +71,7 @@ class TestInitNDFreqs:
         assert freqs.shape == (num_heads, head_dim // 2, position_dim)
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestRopeEncodingND:
     def test_rope_encoding_nd_init(self, device, dtype):
         position_dim = 2
@@ -175,7 +175,7 @@ class TestRopeEncodingND:
 
 
 # Tests for RoPEEncodingNDGroupedFreqs
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestRoPEEncodingNDGroupedFreqs:
     def test_rope_encoding_nd_grouped_freqs_init(self):
         position_dim = 3
@@ -197,7 +197,7 @@ class TestRoPEEncodingNDGroupedFreqs:
         assert rope.freqs.shape == expected_shape
 
 
-    @pytest.mark.cuda
+    @pytest.mark.cuda_if_available
     def test_rope_encoding_nd_grouped_freqs_forward(self, device, dtype):
         position_dim = 3
         embed_dim = 256
@@ -220,7 +220,7 @@ class TestRoPEEncodingNDGroupedFreqs:
 
 
 # Tests for prep_multilevel_positions
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestPrepMultilevelPositions:
     def test_prep_multilevel_positions(self, device):
         # Sample batch of indices (batch, i, j, level)

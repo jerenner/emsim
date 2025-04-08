@@ -12,7 +12,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import (
 from .conftest import assert_close, valid_dims
 
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 class TestEndToEnd:
     """End-to-end tests that combine multiple functions."""
 

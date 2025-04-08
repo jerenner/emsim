@@ -5,7 +5,7 @@ from emsim.utils.sparse_utils.ops.linear.linear import batch_sparse_index_linear
 
 from ..constants import EMBED_DIM
 
-@pytest.mark.cuda
+@pytest.mark.cuda_if_available
 @pytest.mark.parametrize(
     "include_bias", [True, False], ids=["include_bias=True", "include_bias=False"]
 )

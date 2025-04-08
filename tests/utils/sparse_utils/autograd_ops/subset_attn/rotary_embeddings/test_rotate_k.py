@@ -24,27 +24,31 @@ class TestRotateK:
         """Test basic operation with simple inputs."""
         # Simple case with known values
         keys = torch.tensor(
-            [1.0, 0.0, 2.0, 0.0], dtype=torch.float, device=device
-        ).view(1, 1, 1, 4)
-        rope_encoding = torch.tensor(
-            [0.5, 0.866, 0.5, 0.866], dtype=torch.float, device=device
+            [1.0, 0.0, 2.0, 0.0], dtype=torch.double, device=device
         ).view(1, 1, 1, 4)
 
-        # Complex multiplication: (1+0j)*(0.5+0.866j) = 0.5+0.866j
-        # Complex multiplication: (2+0j)*(0.5+0.866j) = 1.0+1.732j
+        # π/3 radians = 60 degrees
+        angles = torch.tensor(
+            [torch.pi / 3, torch.pi / 3], dtype=torch.double, device=device
+        ).view(1, 1, 1, 2)
+
+        # For cos(π/3) = 0.5, sin(π/3) = 0.866
+        # Complex multiplication: (1+0j)*(cos(π/3)+sin(π/3)j) = 0.5+0.866j
+        # Complex multiplication: (2+0j)*(cos(π/3)+sin(π/3)j) = 1.0+1.732j
         expected = torch.tensor(
-            [[[[0.5, 0.866, 1.0, 1.732]]]], dtype=torch.float32, device=device
+            [[[[0.5, 0.866, 1.0, 1.7321]]]], dtype=torch.double, device=device
         )
 
-        k_rotated, keys_complex, rope_encoding_complex = rotate_k(keys, rope_encoding)
+        k_rotated, keys_complex, rope_encoding_complex = rotate_k(keys, angles)
 
-        assert_close(k_rotated, expected, msg="Basic rotate_k failed")
+        assert_close(k_rotated, expected, rtol=1e-4, msg="Basic rotate_k failed")
 
         # Check complex representations are correct
         expected_keys_complex = torch.complex(keys[..., 0::2], keys[..., 1::2])
-        expected_rope_complex = torch.complex(
-            rope_encoding[..., 0::2], rope_encoding[..., 1::2]
-        )
+
+        # Now rope_encoding_complex should be exp(i*angles) = cos(angles) + i*sin(angles)
+        # For the angles [π/3, π/3], we expect complex numbers [1+0j, cos(π/3)+sin(π/3)j]
+        expected_rope_complex = torch.polar(torch.ones_like(angles), angles)
 
         assert_close(keys_complex.real, expected_keys_complex.real)
         assert_close(keys_complex.imag, expected_keys_complex.imag)
@@ -63,19 +67,22 @@ class TestRotateK:
                 # head 3
                 [5.0, 0.0, 6.0, 0.0],
             ],
-            dtype=torch.float,
+            dtype=torch.double,
             device=device,
         ).view(1, 1, 3, 4)
 
-        # Single head rope encoding to be broadcasted
-        rope_encoding = torch.tensor(
-            [0.5, 0.866, 0.5, 0.866], dtype=torch.float, device=device
-        ).view(1, 1, 1, 4)
+        # Single head rope encoding (angles) to be broadcasted
+        # π/3 radians = 60 degrees
+        # Note: last dim is head_dim/2 (2 instead of 4)
+        angles = torch.tensor(
+            [torch.pi / 3, torch.pi / 3], dtype=torch.double, device=device
+        ).view(1, 1, 1, 2)
 
         # Expected results after broadcasting and complex multiplication:
-        # For head 1: (1+0j)*(0.5+0.866j)=0.5+0.866j, (2+0j)*(0.5+0.866j)=1.0+1.732j
-        # For head 2: (3+0j)*(0.5+0.866j)=1.5+2.598j, (4+0j)*(0.5+0.866j)=2.0+3.464j
-        # For head 3: (5+0j)*(0.5+0.866j)=2.5+4.33j, (6+0j)*(0.5+0.866j)=3.0+5.196j
+        # For cos(π/3) = 0.5, sin(π/3) = 0.866
+        # For head 1: (1+0j)*(cos(π/3)+sin(π/3)j)=0.5+0.866j, (2+0j)*(cos(π/3)+sin(π/3)j)=1.0+1.732j
+        # For head 2: (3+0j)*(cos(π/3)+sin(π/3)j)=1.5+2.598j, (4+0j)*(cos(π/3)+sin(π/3)j)=2.0+3.464j
+        # For head 3: (5+0j)*(cos(π/3)+sin(π/3)j)=2.5+4.33j, (6+0j)*(cos(π/3)+sin(π/3)j)=3.0+5.196j
         expected = torch.tensor(
             [
                 [
@@ -86,16 +93,18 @@ class TestRotateK:
                     ]
                 ]
             ],
-            dtype=torch.float32,
+            dtype=torch.double,
             device=device,
         )
 
-        k_rotated, keys_complex, rope_encoding_complex = rotate_k(keys, rope_encoding)
+        k_rotated, keys_complex, rope_encoding_complex = rotate_k(keys, angles)
 
         # Verify the rotation results
         assert_close(
             k_rotated,
             expected,
+            rtol=1e-3,
+            atol=1e-3,
             msg="Broadcasting in rotate_k failed",
         )
 
@@ -110,9 +119,7 @@ class TestRotateK:
 
         # Check complex representations are correct
         expected_keys_complex = torch.complex(keys[..., 0::2], keys[..., 1::2])
-        expected_rope_complex = torch.complex(
-            rope_encoding[..., 0::2], rope_encoding[..., 1::2]
-        )
+        expected_rope_complex = torch.polar(torch.ones_like(angles), angles)
 
         assert_close(
             keys_complex,
@@ -145,11 +152,21 @@ class TestRotateK:
             )
         # Test odd head_dim
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="head_dim .* must be even"
+            (ValueError, torch.jit.Error),
+            match="Expected rope_encoding to have last dimension",
         ):
             rotate_k(
-                torch.randn(2, 3, 4, 5, device=device),
-                torch.randn(2, 3, 4, 5, device=device),
+                torch.randn(2, 3, 4, 5, device=device),  # odd head_dim
+                torch.randn(2, 3, 4, 2, device=device),  # not head_dim/2
+            )
+        # Test mismatch between head_dim and rope_encoding dimension
+        with pytest.raises(
+            (ValueError, torch.jit.Error),
+            match="Expected rope_encoding to have last dimension",
+        ):
+            rotate_k(
+                torch.randn(2, 3, 4, 8, device=device),  # head_dim = 8
+                torch.randn(2, 3, 4, 3, device=device),  # not head_dim/2 = 4
             )
         # Test complex inputs
         with pytest.raises(
@@ -158,7 +175,15 @@ class TestRotateK:
         ):
             rotate_k(
                 torch.randn(2, 3, 4, 8, dtype=torch.complex64, device=device),
-                torch.randn(2, 3, 4, 8, dtype=torch.complex64, device=device),
+                torch.randn(2, 3, 4, 4, dtype=torch.float32, device=device),
+            )
+        with pytest.raises(
+            (ValueError, torch.jit.Error),
+            match="Expected keys and rope_encoding to be real",
+        ):
+            rotate_k(
+                torch.randn(2, 3, 4, 8, dtype=torch.float32, device=device),
+                torch.randn(2, 3, 4, 4, dtype=torch.complex64, device=device),
             )
 
         # Test incompatible shapes
@@ -169,7 +194,7 @@ class TestRotateK:
             # n_queries nonmatching
             rotate_k(
                 torch.randn(2, 16, 8, 32, device=device),
-                torch.randn(3, 16, 8, 32, device=device),
+                torch.randn(3, 16, 8, 16, device=device),  # 16 = 32/2
             )
         with pytest.raises(
             RuntimeError,
@@ -178,7 +203,7 @@ class TestRotateK:
             # n_keys_per_query nonmatching
             rotate_k(
                 torch.randn(2, 16, 8, 32, device=device),
-                torch.randn(2, 132, 8, 32, device=device),
+                torch.randn(2, 132, 8, 16, device=device),  # 16 = 32/2
             )
         with pytest.raises(
             RuntimeError,
@@ -187,7 +212,7 @@ class TestRotateK:
             # n_heads for rope_encoding nonmatching and not 1
             rotate_k(
                 torch.randn(2, 16, 8, 32, device=device),
-                torch.randn(2, 16, 4, 32, device=device),
+                torch.randn(2, 16, 4, 16, device=device),  # 16 = 32/2
             )
 
 
@@ -200,11 +225,13 @@ class TestRotateKProperties:
         n_heads=st.integers(1, 8),
         head_dim=st.integers(2, 16).filter(lambda x: x % 2 == 0),
     )
-    @settings(suppress_health_check=[HealthCheck.differing_executors])
+    @settings(deadline=None, suppress_health_check=[HealthCheck.differing_executors])
     def test_shape_preservation(self, n_queries, n_keys, n_heads, head_dim, device):
         """Test that output shape matches input shape."""
         keys = torch.randn(n_queries, n_keys, n_heads, head_dim, device=device)
-        rope = torch.randn(n_queries, n_keys, n_heads, head_dim, device=device)
+        rope = torch.randn(
+            n_queries, n_keys, n_heads, head_dim // 2, device=device
+        )  # half size
 
         rotated, _, _ = rotate_k(keys, rope)
 
@@ -222,9 +249,11 @@ class TestRotateKProperties:
         keys = torch.randn(n_queries, n_keys, n_heads, head_dim, device=device)
 
         # Broadcasted version (1 head)
-        rope_broadcast = torch.randn(n_queries, n_keys, 1, head_dim, device=device)
+        rope_broadcast = torch.randn(
+            n_queries, n_keys, 1, head_dim // 2, device=device
+        )  # half size
         # Expanded version (explicit repeated across heads)
-        rope_expanded = rope_broadcast.expand(n_queries, n_keys, n_heads, head_dim)
+        rope_expanded = rope_broadcast.expand(n_queries, n_keys, n_heads, head_dim // 2)
 
         rotated_broadcast, _, _ = rotate_k(keys, rope_broadcast)
         rotated_expanded, _, _ = rotate_k(keys, rope_expanded)
@@ -232,6 +261,7 @@ class TestRotateKProperties:
         assert_close(
             rotated_broadcast,
             rotated_expanded,
+            atol=1e-6,
             msg="Broadcasting should produce same result as explicit expansion",
         )
 
@@ -248,8 +278,9 @@ class TestRotateKProperties:
         keys = torch.randn(
             n_queries, n_keys, n_heads, head_dim, dtype=torch.double, device=device
         )
+        # Use angles for rope
         rope = torch.randn(
-            n_queries, n_keys, n_heads, head_dim, dtype=torch.double, device=device
+            n_queries, n_keys, n_heads, head_dim // 2, dtype=torch.double, device=device
         )
 
         # Get output for original input
@@ -279,8 +310,9 @@ class TestRotateKProperties:
         keys2 = torch.randn(
             n_queries, n_keys, n_heads, head_dim, dtype=torch.double, device=device
         )
+        # Use angles for rope
         rope = torch.randn(
-            n_queries, n_keys, n_heads, head_dim, dtype=torch.double, device=device
+            n_queries, n_keys, n_heads, head_dim // 2, dtype=torch.double, device=device
         )
 
         # f(a + b) should equal f(a) + f(b)
@@ -305,10 +337,10 @@ class TestRotateKProperties:
         """Test that identity rotation preserves the input."""
         keys = torch.randn(n_queries, n_keys, n_heads, head_dim, device=device)
 
-        # Create identity rotation (1+0j for each complex number)
-        identity_rope = torch.zeros(n_queries, n_keys, n_heads, head_dim, device=device)
-        identity_rope[..., 0::2] = 1.0  # Real part = 1
-        # Imaginary part remains 0
+        # Create identity rotation - zero angles means no rotation
+        identity_rope = torch.zeros(
+            n_queries, n_keys, n_heads, head_dim // 2, device=device
+        )
 
         rotated, _, _ = rotate_k(keys, identity_rope)
 
@@ -345,7 +377,7 @@ class TestRotateKProperties:
             n_queries,
             n_keys,
             n_heads,
-            head_dim,
+            head_dim // 2,  # half size
             dtype=torch.double,
             requires_grad=True,
             device=device,
@@ -374,42 +406,25 @@ class TestRotateKProperties:
             n_queries, n_keys, n_heads, head_dim, dtype=torch.double, device=device
         )
 
-        # Create proper unit complex numbers for rope (normalized)
-        rope_real = torch.randn(
+        # Create random rotation angles
+        rope = torch.randn(
             n_queries, n_keys, n_heads, head_dim // 2, dtype=torch.double, device=device
         )
-        rope_imag = torch.randn(
-            n_queries, n_keys, n_heads, head_dim // 2, dtype=torch.double, device=device
-        )
-
-        # Normalize to create unit complex numbers
-        magnitude = torch.sqrt(rope_real**2 + rope_imag**2)
-        rope_real = rope_real / magnitude
-        rope_imag = rope_imag / magnitude
-
-        # Build proper rope tensor
-        rope = torch.zeros(
-            n_queries, n_keys, n_heads, head_dim, dtype=torch.double, device=device
-        )
-        rope[..., 0::2] = rope_real
-        rope[..., 1::2] = rope_imag
 
         # Apply rotation
         rotated, _, _ = rotate_k(keys, rope)
 
-        # Create conjugate rotation (correct way: keep real part, negate imaginary part)
-        rope_conj = torch.zeros_like(rope)
-        rope_conj[..., 0::2] = rope[..., 0::2]  # Same real part
-        rope_conj[..., 1::2] = -rope[..., 1::2]  # Negate imaginary part
+        # Create inverse rotation angles (negative angles)
+        rope_inv = -rope
 
-        # Apply conjugate rotation
-        rotated_back, _, _ = rotate_k(rotated, rope_conj)
+        # Apply inverse rotation
+        rotated_back, _, _ = rotate_k(rotated, rope_inv)
 
         # Should get back to original keys (with some numeric tolerance)
         assert_close(
             rotated_back,
             keys,
-            msg="Applying rotation followed by conjugate should recover original",
+            msg="Applying rotation followed by inverse should recover original",
         )
 
 
@@ -426,29 +441,35 @@ class TestRotateKBackward:
             .view(1, 1, 1, 1)
             .to(device)
         )
-        key_pos_complex = (
-            torch.complex(torch.tensor(0.5), torch.tensor(0.866))
-            .view(1, 1, 1, 1)
-            .to(device)
-        )
+
+        # Use a unit complex number (magnitude 1)
+        angle = torch.tensor(torch.pi / 6)  # 30 degrees
+        rope_encoding_complex = torch.polar(
+            torch.ones(1, device=device), torch.tensor([angle], device=device)
+        ).view(1, 1, 1, 1)
 
         # For complex multiplication z = x * y, gradients are:
         # dL/dx = dL/dz * conj(y) and dL/dy = dL/dz * conj(x)
         grad_k_rotated_complex = torch.complex(
             grad_k_rotated[..., 0], grad_k_rotated[..., 1]
         )
-        expected_grad_k_complex = grad_k_rotated_complex * key_pos_complex.conj()
+
+        # Gradient for k is straightforward: grad_z * conj(rope_encoding_complex)
+        expected_grad_k_complex = grad_k_rotated_complex * rope_encoding_complex.conj()
         expected_grad_k = torch.cat(
             [expected_grad_k_complex.real, expected_grad_k_complex.imag], dim=-1
         ).reshape_as(grad_k_rotated)
 
-        expected_grad_rope_complex = grad_k_rotated_complex * k_complex.conj()
-        expected_grad_rope = torch.cat(
-            [expected_grad_rope_complex.real, expected_grad_rope_complex.imag]
-        ).reshape_as(grad_k_rotated)
+        # Gradient for rope_encoding (the angle) is now different:
+        # For z = x * e^(iθ), dz/dθ = ix * e^(iθ) = iz
+        # So dL/dθ = Im(dL/dz * z* / |z|^2) = Im(dL/dz / e^(iθ))
+        grad_rope_encoding_complex = grad_k_rotated_complex * k_complex.conj()
+        expected_grad_rope = (
+            grad_rope_encoding_complex / rope_encoding_complex
+        ).imag.view_as(grad_k_rotated[..., :1])
 
         grad_k, grad_rope = rotate_k_backward(
-            grad_k_rotated, k_complex, key_pos_complex, True
+            grad_k_rotated, k_complex, rope_encoding_complex, True, True
         )
 
         assert_close(grad_k, expected_grad_k, msg="Gradients for keys incorrect")
@@ -502,8 +523,12 @@ class TestRotateKBackward:
         ):
             rotate_k_backward(
                 torch.randn(2, 4, 6, device=device),  # Not 4D
-                torch.randn(2, 4, 6, 8, dtype=torch.complex64, device=device),
-                torch.randn(2, 4, 6, 8, dtype=torch.complex64, device=device),
+                torch.randn(
+                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                ),  # head_dim/2 = 4
+                torch.randn(
+                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                ),  # head_dim/2 = 4
             )
 
         # Test bad grad_k_rotated - wrong dtype (complex)
@@ -515,8 +540,12 @@ class TestRotateKBackward:
                 torch.randn(
                     2, 4, 6, 8, dtype=torch.complex64, device=device
                 ),  # Not real
-                torch.randn(2, 4, 6, 8, dtype=torch.complex64, device=device),
-                torch.randn(2, 4, 6, 8, dtype=torch.complex64, device=device),
+                torch.randn(
+                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                ),  # head_dim/2 = 4
+                torch.randn(
+                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                ),  # head_dim/2 = 4
             )
 
         # Test bad k_complex - wrong dimensions
@@ -525,9 +554,11 @@ class TestRotateKBackward:
             match="Expected k_complex to be a 4D complex tensor",
         ):
             rotate_k_backward(
-                torch.randn(2, 4, 6, 8, device=device),
+                torch.randn(2, 4, 6, 8, device=device),  # head_dim = 8
                 torch.randn(2, 4, 6, dtype=torch.complex64, device=device),  # Not 4D
-                torch.randn(2, 4, 6, 8, dtype=torch.complex64, device=device),
+                torch.randn(
+                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                ),  # head_dim/2 = 4
             )
 
         # Test bad k_complex - wrong dtype (not complex)
@@ -536,9 +567,11 @@ class TestRotateKBackward:
             match="Expected k_complex to be a 4D complex tensor",
         ):
             rotate_k_backward(
-                torch.randn(2, 4, 6, 8, device=device),
-                torch.randn(2, 4, 6, 8, device=device),  # Not complex
-                torch.randn(2, 4, 6, 8, dtype=torch.complex64, device=device),
+                torch.randn(2, 4, 6, 8, device=device),  # head_dim = 8
+                torch.randn(2, 4, 6, 4, device=device),  # Not complex
+                torch.randn(
+                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                ),  # head_dim/2 = 4
             )
 
         # Test bad rope_encoding_complex - wrong dimensions
@@ -547,8 +580,10 @@ class TestRotateKBackward:
             match="Expected rope_encoding_complex to be a 4D complex tensor",
         ):
             rotate_k_backward(
-                torch.randn(2, 4, 6, 8, device=device),
-                torch.randn(2, 4, 6, 8, dtype=torch.complex64, device=device),
+                torch.randn(2, 4, 6, 8, device=device),  # head_dim = 8
+                torch.randn(
+                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                ),  # head_dim/2 = 4
                 torch.randn(2, 4, 6, dtype=torch.complex64, device=device),  # Not 4D
             )
 
@@ -558,18 +593,23 @@ class TestRotateKBackward:
             match="Expected rope_encoding_complex to be a 4D complex tensor",
         ):
             rotate_k_backward(
-                torch.randn(2, 4, 6, 8, device=device),
-                torch.randn(2, 4, 6, 8, dtype=torch.complex64, device=device),
-                torch.randn(2, 4, 6, 8, device=device),  # Not complex
+                torch.randn(2, 4, 6, 8, device=device),  # head_dim = 8
+                torch.randn(
+                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                ),  # head_dim/2 = 4
+                torch.randn(2, 4, 6, 4, device=device),  # Not complex
             )
 
         # Test odd head_dim
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="head_dim .* must be even"
+            (ValueError, torch.jit.Error), match="k_complex's last dimension"
         ):
             rotate_k_backward(
                 torch.randn(2, 3, 4, 5, device=device),  # Odd head_dim
-                torch.randn(2, 3, 4, 2, dtype=torch.complex64, device=device),
-                torch.randn(2, 3, 4, 2, dtype=torch.complex64, device=device),
-                True,
+                torch.randn(
+                    2, 3, 4, 2, dtype=torch.complex64, device=device
+                ),  # head_dim/2
+                torch.randn(
+                    2, 3, 4, 2, dtype=torch.complex64, device=device
+                ),  # head_dim/2
             )

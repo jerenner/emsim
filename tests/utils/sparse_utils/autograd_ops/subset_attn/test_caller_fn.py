@@ -65,7 +65,7 @@ def test_end_to_end_subset_attn(
             index_tensor.shape[0],
             N_KEYS_PER_QUERY,
             N_HEADS,
-            EMBED_DIM // N_HEADS,
+            EMBED_DIM // N_HEADS // 2,
             dtype=torch.double,
             device=device,
         )
@@ -88,7 +88,7 @@ def test_end_to_end_subset_attn(
             POSITION_DIM,
             N_FREQ_GROUPS,
             N_HEADS,
-            EMBED_DIM // N_HEADS,
+            EMBED_DIM // N_HEADS // 2,
             dtype=torch.double,
             device=device,
         )

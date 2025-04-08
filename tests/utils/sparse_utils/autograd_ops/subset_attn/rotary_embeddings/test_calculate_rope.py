@@ -25,7 +25,7 @@ class TestCalculateRope:
             [[[[1.0, 2.0]]], [[[5.0, 6.0]]]],  # position_dim=0  # position_dim=1
             dtype=torch.float32,
             device=device,
-        )  # [2, 1, 1, 2] -> [position_dim=2, n_freq_groups=1, n_heads=1, head_dim=2]
+        )  # [2, 1, 1, 2] -> [position_dim=2, n_freq_groups=1, n_heads=1, head_dim/2=2]
 
         # Expected: matrix multiplication of key_positions and rope_freqs
         # 1.0 * [1.0, 2.0] + 2.0 * [5.0, 6.0] = [11.0, 14.0]
@@ -45,7 +45,7 @@ class TestCalculateRope:
             [
                 [  # position_dim=2
                     [  # n_freq_groups=2
-                        [[1.0, 2.0]],  # n_heads=1, head_dim=2
+                        [[1.0, 2.0]],  # n_heads=1, head_dim/2=2
                         [[3.0, 4.0]],
                     ],
                     [
@@ -82,16 +82,16 @@ class TestCalculateRope:
                 [
                     # n_freq_groups=1 (explicit dimension)
                     [
-                        [1.0, 2.0],  # head 0, head_dim=2
-                        [3.0, 4.0],  # head 1, head_dim=2
+                        [1.0, 2.0],  # head 0, head_dim/2=2
+                        [3.0, 4.0],  # head 1, head_dim/2=2
                     ]
                 ],
                 # position_dim=1
                 [
                     # n_freq_groups=1 (explicit dimension)
                     [
-                        [5.0, 6.0],  # head 0, head_dim=2
-                        [7.0, 8.0],  # head 1, head_dim=2
+                        [5.0, 6.0],  # head 0, head_dim/2=2
+                        [7.0, 8.0],  # head 1, head_dim/2=2
                     ]
                 ],
             ],
@@ -146,15 +146,6 @@ class TestCalculateRope:
                 torch.randn(3, 1, 1, 6, device=device),
             )
 
-        # Test odd head_dim
-        with pytest.raises(
-            (ValueError, torch.jit.Error), match="head_dim must be even"
-        ):
-            calculate_rope(
-                torch.randn(2, 3, 2, device=device),
-                torch.randn(2, 1, 1, 3, device=device),
-            )
-
     @given(
         n_queries=valid_dims(),
         n_keys_per_query=valid_dims(),
@@ -175,7 +166,7 @@ class TestCalculateRope:
         device,
     ):
         """Property-based test to ensure output shapes are correct."""
-        # Test with 4D rope_freqs (position_dim, n_freq_groups, n_heads, head_dim)
+        # Test with 4D rope_freqs (position_dim, n_freq_groups, n_heads, head_dim/2)
         key_positions = torch.randn(
             n_queries, n_keys_per_query, position_dim, device=device
         )
@@ -205,25 +196,25 @@ class TestCalculateRopeBackward:
 
     def test_basic_functionality(self, device):
         """Test basic operation with simple inputs."""
-        # [n_queries=1, n_keys_per_query=1, n_heads=2, head_dim=2]
+        # [n_queries=1, n_keys_per_query=1, n_heads=2, head_dim/2=2]
         grad_key_pos_encoding = torch.tensor(
             [[[[0.1, 0.2], [0.3, 0.4]]]], dtype=torch.float32, device=device
         )
         key_positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
 
-        # [position_dim=2, n_freq_groups=1, n_heads=2, head_dim=2]
+        # [position_dim=2, n_freq_groups=1, n_heads=2, head_dim/2=2]
         rope_freqs = torch.tensor(
             [
                 [  # position_dim=0
                     [  # n_freq_groups=1
-                        [1.0, 2.0],  # head 0, head_dim=2
-                        [3.0, 4.0],  # head 1, head_dim=2
+                        [1.0, 2.0],  # head 0, head_dim/2=2
+                        [3.0, 4.0],  # head 1, head_dim/2=2
                     ]
                 ],
                 [  # position_dim=1
                     [  # n_freq_groups=1
-                        [5.0, 6.0],  # head 0, head_dim=2
-                        [7.0, 8.0],  # head 1, head_dim=2
+                        [5.0, 6.0],  # head 0, head_dim/2=2
+                        [7.0, 8.0],  # head 1, head_dim/2=2
                     ]
                 ],
             ],
@@ -241,7 +232,8 @@ class TestCalculateRopeBackward:
             device=device,
         )
 
-        # Gradient for rope_freqs: [position_dim=2, n_freq_groups=1, n_heads=2, head_dim=2]
+        # Gradient for rope_freqs:
+        #   [position_dim=2, n_freq_groups=1, n_heads=2, head_dim/2=2]
         # position_dim=0, head=0: 0.1 * 1.0, 0.2 * 1.0 = [0.1, 0.2]
         # position_dim=0, head=1: 0.3 * 1.0, 0.4 * 1.0 = [0.3, 0.4]
         # position_dim=1, head=0: 0.1 * 2.0, 0.2 * 2.0 = [0.2, 0.4]
@@ -293,12 +285,12 @@ class TestCalculateRopeBackward:
             [
                 [  # position_dim=0
                     [  # n_freq_groups=1
-                        [1.0, 2.0],  # head 0 (broadcast to all heads), head_dim=2
+                        [1.0, 2.0],  # head 0 (broadcast to all heads), head_dim/2=2
                     ]
                 ],
                 [  # position_dim=1
                     [  # n_freq_groups=1
-                        [5.0, 6.0],  # head 0 (broadcast to all heads), head_dim=2
+                        [5.0, 6.0],  # head 0 (broadcast to all heads), head_dim/2=2
                     ]
                 ],
             ],
@@ -306,7 +298,7 @@ class TestCalculateRopeBackward:
             device=device,
         )
 
-        # Gradient for key_positions - fixed calculation
+        # Gradient for key_positions
         # Head 0: 0.1 * [1.0, 5.0] + 0.2 * [2.0, 6.0] = [0.5, 1.7]
         # Head 1: 0.3 * [1.0, 5.0] + 0.4 * [2.0, 6.0] = [0.3 + 0.8, 1.5 + 2.4] = [1.1, 3.9]
         # Sum over heads: [0.5 + 1.1, 1.7 + 3.9] = [1.6, 5.6]
@@ -353,29 +345,29 @@ class TestCalculateRopeBackward:
 
     def test_freq_group_broadcasting(self, device):
         """Test with broadcasting in the n_freq_groups dimension."""
-        # [n_queries=1, n_keys_per_query=1, n_heads=1, head_dim=2]
+        # [n_queries=1, n_keys_per_query=1, n_heads=1, head_dim/2=2]
         grad_key_pos_encoding = torch.tensor(
             [[[[0.1, 0.2]]]], dtype=torch.float32, device=device
         )
         key_positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
 
-        # [position_dim=2, n_freq_groups=2, n_heads=1, head_dim=2]
+        # [position_dim=2, n_freq_groups=2, n_heads=1, head_dim/2=2]
         rope_freqs = torch.tensor(
             [
                 [  # position_dim=0
                     [  # n_freq_groups=0
-                        [1.0, 2.0],  # n_heads=1, head_dim=2
+                        [1.0, 2.0],  # n_heads=1, head_dim/2=2
                     ],
                     [  # n_freq_groups=1
-                        [3.0, 4.0],  # n_heads=1, head_dim=2
+                        [3.0, 4.0],  # n_heads=1, head_dim/2=2
                     ],
                 ],
                 [  # position_dim=1
                     [  # n_freq_groups=0
-                        [5.0, 6.0],  # n_heads=1, head_dim=2
+                        [5.0, 6.0],  # n_heads=1, head_dim/2=2
                     ],
                     [  # n_freq_groups=1
-                        [7.0, 8.0],  # n_heads=1, head_dim=2
+                        [7.0, 8.0],  # n_heads=1, head_dim/2=2
                     ],
                 ],
             ],
@@ -402,18 +394,18 @@ class TestCalculateRopeBackward:
             [
                 [  # position_dim=0
                     [  # n_freq_groups=0
-                        [0.1, 0.2],  # n_heads=1, head_dim=2
+                        [0.1, 0.2],  # n_heads=1, head_dim/2=2
                     ],
                     [  # n_freq_groups=1
-                        [0.1, 0.2],  # n_heads=1, head_dim=2
+                        [0.1, 0.2],  # n_heads=1, head_dim/2=2
                     ],
                 ],
                 [  # position_dim=1
                     [  # n_freq_groups=0
-                        [0.2, 0.4],  # n_heads=1, head_dim=2
+                        [0.2, 0.4],  # n_heads=1, head_dim/2=2
                     ],
                     [  # n_freq_groups=1
-                        [0.2, 0.4],  # n_heads=1, head_dim=2
+                        [0.2, 0.4],  # n_heads=1, head_dim/2=2
                     ],
                 ],
             ],
@@ -441,13 +433,13 @@ class TestCalculateRopeBackward:
         # Updated shapes
         grad_key_pos_encoding = torch.randn(
             3, 4, 2, 4, device=device
-        )  # [n_queries, n_keys_per_query, n_heads, head_dim]
+        )  # [n_queries, n_keys_per_query, n_heads, head_dim/2]
         key_positions = torch.randn(
             3, 4, 2, device=device
         )  # [n_queries, n_keys_per_query, position_dim]
         rope_freqs = torch.randn(
             2, 1, 2, 4, device=device
-        )  # [position_dim, n_freq_groups, n_heads, head_dim]
+        )  # [position_dim, n_freq_groups, n_heads, head_dim/2]
 
         # Only key_positions gradient
         grad_key_positions, grad_rope_freqs = calculate_rope_backward(
@@ -467,7 +459,7 @@ class TestCalculateRopeBackward:
         """Test that appropriate errors are raised for invalid inputs."""
         grad_key_pos_encoding = torch.randn(
             3, 4, 2, 6, device=device
-        )  # [n_queries, n_keys_per_query, n_heads, head_dim]
+        )  # [n_queries, n_keys_per_query, n_heads, head_dim/2]
 
         # Test 2D key_positions (should be 3D)
         with pytest.raises(
@@ -501,18 +493,6 @@ class TestCalculateRopeBackward:
                 grad_key_pos_encoding,
                 torch.randn(3, 4, 2, device=device),
                 torch.randn(3, 1, 2, 6, device=device),  # position_dim=3 doesn't match
-                True,
-                True,
-            )
-
-        # Test odd head_dim
-        with pytest.raises(
-            (ValueError, torch.jit.Error), match="head_dim must be even"
-        ):
-            calculate_rope_backward(
-                torch.randn(3, 4, 2, 5, device=device),  # odd head_dim=5
-                torch.randn(3, 4, 2, device=device),
-                torch.randn(2, 1, 2, 5, device=device),
                 True,
                 True,
             )

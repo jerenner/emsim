@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from emsim.utils.sparse_utils.indexing.script_funcs import gather_and_mask
-
+from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import rotate_k, calculate_rope
 
 def traceable_sparse_attention(
     query_tensor: Tensor,
@@ -49,40 +49,19 @@ def traceable_sparse_attention(
     k = k.view(n_queries, n_keys_per_query, n_heads, head_dim)
     v = v.view(n_queries, n_keys_per_query, n_heads, head_dim)
 
+    if key_positions is not None:
+        assert rope_freqs is not None
+        assert key_pos_encoding is None
+        key_pos_encoding = calculate_rope(key_positions, rope_freqs)
+
+    # Apply rotary position encoding if provided
+    if key_pos_encoding is not None:
+        k, _, _ = rotate_k(k, key_pos_encoding)
+
     # Move head dim forward
     q = q.transpose(-2, -3).contiguous()  # (n_heads, n_queries, head_dim)
     k = k.permute(2, 0, 1, 3).contiguous()  # (n_heads, n_queries, n_keys_per_query, head_dim)
     v = v.permute(2, 0, 1, 3).contiguous()  # (n_heads, n_queries, n_keys_per_query, head_dim)
-
-    if key_positions is not None:
-        assert rope_freqs is not None
-        assert key_pos_encoding is None
-        position_dim = key_positions.size(-1)
-        n_freq_groups = rope_freqs.size(1)
-        # fmt: off
-        key_pos_encoding = torch.mm(
-            key_positions.reshape(-1, position_dim),  # (n_queries*n_keys_per_query, position_dim)
-            rope_freqs.reshape(position_dim, -1),  # (position_dim, n_freq_groups*embed_dim)
-        ).view(n_queries, n_keys_per_query, n_freq_groups, embed_dim)
-        key_pos_encoding = key_pos_encoding.sum(-2)
-        # fmt: on
-
-    # Apply rotary position encoding if provided
-    if key_pos_encoding is not None:
-        key_pos_encoding = key_pos_encoding.reshape(
-            n_queries, n_keys_per_query, n_heads, head_dim
-        )
-        key_pos_encoding = key_pos_encoding.permute(2, 0, 1, 3).contiguous()
-
-        # Convert to complex and apply rotation
-        k_complex = torch.view_as_complex(k.view(*k.shape[:-1], head_dim // 2, 2))
-        key_pos_complex = torch.view_as_complex(
-            key_pos_encoding.view(*key_pos_encoding.shape[:-1], head_dim // 2, 2)
-        )
-
-        # Complex multiplication for RoPE
-        k_rotated = k_complex * key_pos_complex
-        k = torch.view_as_real(k_rotated).reshape_as(k)
 
     # Calculate attention scores
     attn_scores = torch.matmul(

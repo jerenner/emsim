@@ -68,17 +68,16 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             bias_k (Optional[Tensor]): Key projection bias of shape [embed_dim]
             bias_v (Optional[Tensor]): Value projection bias of shape [embed_dim]
             key_pos_encoding (Optional[Tensor]): Positional encoding for keys of shape
-                [n_queries, n_keys_per_query, n_heads, head_dim]. Used for rotary
-                position embedding (RoPE). If specified, both head_dim must be
-                divisible by 2. Cannot be used together with key_positions
+                [n_queries, n_keys_per_query, n_heads, head_dim/2]. Used for rotary
+                position embedding (RoPE). Cannot be used together with key_positions
                 and rope_freqs.
             key_positions (Optional[Tensor]): Position information for each key of
                 shape [n_queries, n_keys_per_query, position_dim]. Used together with
                 rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
                 Cannot be used together with key_pos_encoding.
             rope_freqs (Optional[Tensor]): Frequency values for rotary embeddings of
-                shape [position_dim, n_freq_groups, n_heads, head_dim] or
-                [position_dim, n_freq_groups, 1, head_dim]. Used together with
+                shape [position_dim, n_freq_groups, n_heads, head_dim/2] or
+                [position_dim, n_freq_groups, 1, head_dim/2]. Used together with
                 key_positions to compute rotary position embedding (RoPE) on-the-fly.
                 Cannot be used together with key_pos_encoding.
             scale_factor (Optional[float]): Scaling factor for attention scores.
@@ -119,16 +118,17 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             raise ValueError("Cannot provide only one of key_positions and rope_freqs")
 
         if key_pos_encoding is not None:
+            assert head_dim % 2 == 0, "head_dim must be even to use RoPE"
             assert key_pos_encoding.shape == (
                 n_queries,
                 n_keys_per_query,
                 n_heads,
-                head_dim,
+                head_dim / 2,
             )
-            assert head_dim % 2 == 0, "head_dim must be even to use RoPE"
 
         if key_positions is not None and rope_freqs is not None:
             # check shapes
+            assert head_dim % 2 == 0, "head_dim must be even to use RoPE"
 
             # (n_queries, n_keys_per_query, position_dim)
             assert key_positions.ndim == 3
@@ -138,7 +138,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
             assert key_positions.shape[0] == n_queries
             assert key_positions.shape[1] == n_keys_per_query
-            assert rope_freqs.shape[-1] == head_dim
+            assert rope_freqs.shape[-1] == head_dim / 2
 
             position_dim = key_positions.shape[-1]
             assert rope_freqs.shape[0] == position_dim

@@ -11,6 +11,8 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
     This function calculates the position encoding by matrix-multiplying key
     positions with rotary frequency embeddings, then summing over frequency
     groups.
+    The returned positional encoding will be in real space, and must be converted
+    complex with e.g. torch.polar before multiplying with the key embedding.
     This function may be used in combination with the others in its module for a
     memory-efficient RoPE application over many positions.
 
@@ -19,12 +21,12 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
             [n_queries, n_keys_per_query, position_dim], where position_dim is the
             dimensionality of the position representation.
         rope_freqs (Tensor): Frequency values for rotary embeddings of shape
-            [position_dim, n_freq_groups, n_heads, head_dim], where n_freq_groups
+            [position_dim, n_freq_groups, n_heads, head_dim/2], where n_freq_groups
             and n_heads can be 1 for broadcasting.
 
     Returns:
         Tensor: Computed positional encoding of shape
-            [n_queries, n_keys_per_query, n_heads, embed_dim]
+            [n_queries, n_keys_per_query, n_heads, head_dim/2]
     """
     if key_positions.ndim != 3:
         raise ValueError(
@@ -36,32 +38,30 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
         )
 
     n_queries, n_keys_per_query, position_dim = key_positions.shape
-    position_dim_freqs, n_freq_groups, n_heads, head_dim = rope_freqs.shape
+    position_dim_freqs, n_freq_groups, n_heads, half_head_dim = rope_freqs.shape
 
-    if rope_freqs.size(0) != position_dim:
+    if position_dim_freqs != position_dim:
         error_msg = "Expected first dimension of `rope_freqs` and last dimension of "
         error_msg += "key_positions to match, got "
         error_msg += str(rope_freqs.size(0)) + " and " + str(key_positions.size(-1))
         raise ValueError(error_msg)
-    if head_dim % 2 != 0:
-        raise ValueError(f"head_dim must be even to use RoPE, got {head_dim}")
 
     # [n_queries*n_keys_per_query, position_dim]
     key_positions_flat = key_positions.reshape(-1, position_dim)
 
-    # [position_dim, n_freq_groups*n_heads*head_dim]
+    # [position_dim, n_freq_groups*n_heads*head_dim/2]
     rope_freqs_flat = rope_freqs.reshape(position_dim, -1)
 
     # Compute position encoding
     key_pos_encoding = torch.mm(
         key_positions_flat,
         rope_freqs_flat,
-    ).view(n_queries, n_keys_per_query, n_freq_groups, n_heads, head_dim)
+    ).view(n_queries, n_keys_per_query, n_freq_groups, n_heads, half_head_dim)
 
     # Sum over frequency groups
     key_pos_encoding = key_pos_encoding.sum(
         dim=2
-    )  # [n_queries, n_keys_per_query, n_heads, head_dim]
+    )  # [n_queries, n_keys_per_query, n_heads, head_dim/2]
 
     return key_pos_encoding
 
@@ -75,8 +75,8 @@ def rotate_k(k: Tensor, rope_encoding: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         k (Tensor): Key tensor of real dtype and shape
             [n_queries, n_keys_per_query, n_heads, head_dim]
         rope_encoding (Tensor): Position encoding of real dtype and shape
-            [n_queries, n_keys_per_query, n_heads, head_dim] or
-            [n_queries, n_keys_per_query, 1,       head_dim] (broadcasted over heads)
+            [n_queries, n_keys_per_query, n_heads, head_dim/2] or
+            [n_queries, n_keys_per_query, 1,       head_dim/2] (broadcasted over heads)
 
     Returns:
         - k_rotated (Tensor): Key tensor after rotation, of shape
@@ -95,8 +95,11 @@ def rotate_k(k: Tensor, rope_encoding: Tensor) -> tuple[Tensor, Tensor, Tensor]:
             "Expected k and rope_encoding to be 4D, got shapes "
             f"{k.shape} and {rope_encoding.shape}"
         )
-    if k.size(-1) % 2 != 0:
-        raise ValueError(f"head_dim ({k.size(-1)}) must be even to use RoPE")
+    if k.size(-1) != rope_encoding.size(-1) * 2:
+        raise ValueError(
+            "Expected rope_encoding to have last dimension equal to half of k's"
+            f"head dim, got {rope_encoding.size(-1)} and {k.size(-1)}"
+        )
     if k.is_complex() or rope_encoding.is_complex():
         raise ValueError(
             "Expected keys and rope_encoding to be real, got dtypes "
@@ -106,12 +109,9 @@ def rotate_k(k: Tensor, rope_encoding: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     # Convert to complex and apply rotation
     keys_complex_shape = k.shape[:-1] + (k.size(-1) // 2, 2)
     keys_complex = torch.view_as_complex(k.view(keys_complex_shape))
-    rope_encoding_complex_shape = rope_encoding.shape[:-1] + (
-        rope_encoding.size(-1) // 2,
-        2,
-    )
-    rope_encoding_complex = torch.view_as_complex(
-        rope_encoding.view(rope_encoding_complex_shape)
+    rope_encoding_complex = torch.polar(
+        torch.ones_like(rope_encoding),
+        rope_encoding,
     )
 
     # multiply and convert back to real
@@ -158,8 +158,8 @@ def rotate_k_backward(
             or None if not needed
         grad_rope_encoding (Tensor): Gradient tensor for the positional encodings
             of real dtype and shape
-            [n_queries, n_keys_per_query, n_heads, head_dim] or
-            [n_queries, n_keys_per_query, 1,       head_dim], or None if not needed
+            [n_queries, n_keys_per_query, n_heads, head_dim/2] or
+            [n_queries, n_keys_per_query, 1,       head_dim/2], or None if not needed
     """
     if grad_k_rotated.ndim != 4 or grad_k_rotated.is_complex():
         raise ValueError(
@@ -176,9 +176,10 @@ def rotate_k_backward(
             "Expected rope_encoding_complex to be a 4D complex tensor, got "
             f"shape {rope_encoding_complex.shape} and dtype {rope_encoding_complex.dtype}"
         )
-    if grad_k_rotated.size(-1) % 2 != 0:
+    if grad_k_rotated.size(-1) / 2 != k_complex.size(-1):
         raise ValueError(
-            f"head_dim ({grad_k_rotated.size(-1)}) must be even to use RoPE"
+            "k_complex's last dimension should be half of grad_k_rotated's head dimension"
+            f"(got {k_complex.size(-1)} and {grad_k_rotated.size(-1)})"
         )
 
     # Check for no grads needed
@@ -194,17 +195,32 @@ def rotate_k_backward(
 
     # Complex multiplication gradient
     # For z = x * y, we have dL/dx = dL/dz * conj(y) and dL/dy = dL/dz * conj(x)
+
+    # Gradient for key tensor
     if needs_grad_k:
         grad_k_complex = grad_k_rotated_complex * rope_encoding_complex.conj()
         grad_k = torch.view_as_real(grad_k_complex).reshape_as(grad_k_rotated)
     else:
         grad_k = None
 
+    # Gradient for position encoding
     if needs_grad_rope_encoding:
-        grad_key_pos_complex = grad_k_rotated_complex * k_complex.conj()
-        grad_rope_encoding = torch.view_as_real(grad_key_pos_complex).reshape_as(
-            grad_k_rotated
-        )
+        # First compute gradient with respect to rope_encoding_complex
+        grad_rope_encoding_complex = grad_k_rotated_complex * k_complex.conj()
+
+        # Check if broadcasting happened
+        is_broadcasted = rope_encoding_complex.size(2) == 1 and k_complex.size(2) > 1
+
+        # Sum gradients across broadcasted dimension (heads)
+        if is_broadcasted:
+            grad_rope_encoding_complex = grad_rope_encoding_complex.sum(
+                dim=2, keepdim=True
+            )
+
+        # Then compute gradient with respect to rope_encoding (the phase angle)
+        # Since rope_encoding_complex = exp(i*rope_encoding), the gradient is:
+        # dL/d(rope_encoding) = Im(dL/d(rope_encoding_complex) / rope_encoding_complex)
+        grad_rope_encoding = (grad_rope_encoding_complex / rope_encoding_complex).imag
     else:
         grad_rope_encoding = None
 
@@ -228,12 +244,12 @@ def calculate_rope_backward(
     Args:
         grad_key_pos_encoding (Tensor): Real-valued gradient of loss with respect to
             the positional encoding, of shape
-            [n_queries, n_keys_per_query, n_heads, head_dim]
+            [n_queries, n_keys_per_query, n_heads, head_dim/2]
         key_positions (Tensor): Position tensor from the forward pass, of shape
             [n_queries, n_keys_per_query, position_dim]
         rope_freqs (Tensor): Frequency values tensor from the forward pass, of shape
-            [position_dim, n_freq_groups, n_heads, head_dim], with n_freq_groups and/or
-            n_heads also allowed to be 1.
+            [position_dim, n_freq_groups, n_heads, head_dim/2], with n_freq_groups
+            and/or n_heads also allowed to be 1.
         needs_grad_key_positions (bool): Whether grad for key_positions is required
         needs_grad_rope_freqs (bool): Whether grad for rope_freqs is required
 
@@ -258,7 +274,7 @@ def calculate_rope_backward(
         )
 
     n_queries, n_keys_per_query, position_dim = key_positions.shape
-    position_dim_freqs, n_freq_groups, n_heads, head_dim = rope_freqs.shape
+    position_dim_freqs, n_freq_groups, n_heads, half_head_dim = rope_freqs.shape
 
     # potentially different than n_heads if rope_freqs was broadcasted over heads
     expanded_n_heads = grad_key_pos_encoding.size(2)
@@ -269,9 +285,6 @@ def calculate_rope_backward(
         error_msg += f"{position_dim_freqs} and {position_dim}"
         raise ValueError(error_msg)
 
-    if head_dim % 2 != 0:
-        raise ValueError(f"head_dim must be even to use RoPE, got {head_dim}")
-
     # Backward of sum: distribute gradient across n_freq_groups
     grad_mm_result = grad_key_pos_encoding.unsqueeze(2).expand(
         -1, -1, n_freq_groups, -1, -1
@@ -279,7 +292,7 @@ def calculate_rope_backward(
 
     # Reshape to match the mm result
     grad_mm_result = grad_mm_result.reshape(
-        n_queries * n_keys_per_query, n_freq_groups * expanded_n_heads * head_dim
+        n_queries * n_keys_per_query, n_freq_groups * expanded_n_heads * half_head_dim
     )
 
     # expand rope_freqs to account for broadcasting
@@ -302,7 +315,7 @@ def calculate_rope_backward(
     if needs_grad_rope_freqs:
         grad_rope_freqs_flat = torch.mm(key_positions_flat.t(), grad_mm_result)
         grad_rope_freqs = grad_rope_freqs_flat.view(
-            position_dim, n_freq_groups, expanded_n_heads, head_dim
+            position_dim, n_freq_groups, expanded_n_heads, half_head_dim
         )
 
         # handle broadcasting case

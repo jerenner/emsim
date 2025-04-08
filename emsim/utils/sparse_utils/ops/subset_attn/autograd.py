@@ -60,7 +60,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         if not is_for_backward:
             del selected
 
-        [queries, keys, values] = [split_heads(x, n_heads) for x in [query_tensor, keys, values]]
+        [queries, keys, values] = [
+            split_heads(x, n_heads) for x in [query_tensor, keys, values]
+        ]
 
         #### Forward step 4: RoPE encoding calculation
 
@@ -88,7 +90,14 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         if not is_for_backward:
             return queries, keys, values, key_rope_encoding
         else:
-            return queries, keys, values, key_rope_encoding, selected, keys_unrotated_copy
+            return (
+                queries,
+                keys,
+                values,
+                key_rope_encoding,
+                selected,
+                keys_unrotated_copy,
+            )
 
     @staticmethod
     def forward(
@@ -210,7 +219,12 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         # embed_dim
         # kv projection
-        assert key_weight.size(1) == value_weight.size(1) == sparse_tensor_values.size(-1) == embed_dim
+        assert (
+            key_weight.size(1)
+            == value_weight.size(1)
+            == sparse_tensor_values.size(-1)
+            == embed_dim
+        )
         # attn calculation
         assert key_weight.size(0) == query_tensor.size(1) == embed_dim
 
@@ -285,20 +299,22 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         #### Steps 3-6 get repeated by backward so step into a shared helper function
 
-        queries, keys, values, key_pos_encoding = GatherAndSubsetAttentionFunction._forward_shared(
-            query_tensor,
-            sparse_tensor_values,
-            index_search,
-            is_specified_mask,
-            key_weight,
-            value_weight,
-            key_bias,
-            value_bias,
-            n_heads,
-            key_positions,
-            rope_freqs,
-            key_pos_encoding,
-            is_for_backward=False,
+        queries, keys, values, key_pos_encoding = (
+            GatherAndSubsetAttentionFunction._forward_shared(
+                query_tensor,
+                sparse_tensor_values,
+                index_search,
+                is_specified_mask,
+                key_weight,
+                value_weight,
+                key_bias,
+                value_bias,
+                n_heads,
+                key_positions,
+                rope_freqs,
+                key_pos_encoding,
+                is_for_backward=False,
+            )
         )
 
         #### Step 7: Attention scores calculation
@@ -417,7 +433,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
     @staticmethod
     def _compute_grad_attn_scores(
-        grad_output: Tensor, values: Tensor, attn_weights: Tensor, is_specified_mask: Tensor
+        grad_output: Tensor,
+        values: Tensor,
+        attn_weights: Tensor,
+        is_specified_mask: Tensor,
     ) -> Tensor:
         # fmt: off
         grad_attn_weights = torch.matmul(
@@ -438,7 +457,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         return grad_attn_scores
 
     @staticmethod
-    def _compute_grad_query(grad_attn_scores: Tensor, keys: Tensor, scale_factor: float):
+    def _compute_grad_query(
+        grad_attn_scores: Tensor, keys: Tensor, scale_factor: float
+    ):
         # fmt: off
         grad_queries = torch.matmul(
             grad_attn_scores.unsqueeze(-2),  # (n_heads, n_queries, 1, n_keys_per_query)
@@ -473,7 +494,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # fmt: on
 
         # (n_queries, n_keys_per_query, n_heads, head_dim)
-        grad_keys_maybe_rotated = permute_for_attention_backward(grad_keys_maybe_rotated)
+        grad_keys_maybe_rotated = permute_for_attention_backward(
+            grad_keys_maybe_rotated
+        )
 
         if key_rope_encoding is not None:
             # Handle backpropagation through RoPE
@@ -509,7 +532,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         # (n_queries, n_keys_per_query, n_heads, head_dim)
         grad_values = permute_for_attention_backward(grad_values)
-        grad_values = grad_values.flatten(-2, -1)  # (n_queries, n_keys_per_query, embed_dim)
+
+        # (n_queries, n_keys_per_query, embed_dim)
+        grad_values = grad_values.flatten(-2, -1)
         return grad_values
 
     @staticmethod
@@ -543,7 +568,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             if grad_weights_stacked is not None:
                 grad_key_weight, grad_value_weight = grad_weights_stacked
                 grad_key_weight = grad_key_weight if needs_grad_key_weight else None
-                grad_value_weight = grad_value_weight if needs_grad_value_weight else None
+                grad_value_weight = (
+                    grad_value_weight if needs_grad_value_weight else None
+                )
 
             if grad_bias_stacked is not None:
                 grad_key_bias, grad_value_bias = grad_bias_stacked
@@ -555,11 +582,17 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             # since it will safely return None, None for the one where
             # needs_grads bools are False
             grad_key_weight, grad_key_bias = linear_grads(
-                grad_keys_flat, selected_flat, needs_grad_key_weight, needs_grad_key_bias
+                grad_keys_flat,
+                selected_flat,
+                needs_grad_key_weight,
+                needs_grad_key_bias,
             )
 
             grad_value_weight, grad_value_bias = linear_grads(
-                grad_values_flat, selected_flat, needs_grad_value_weight, needs_grad_value_bias
+                grad_values_flat,
+                selected_flat,
+                needs_grad_value_weight,
+                needs_grad_value_bias,
             )
         return grad_key_weight, grad_value_weight, grad_key_bias, grad_value_bias
 
@@ -586,7 +619,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             W_stacked,         # (2, embed_dim, embed_dim)
         )                      # (2, n_queries * n_keys_per_query, embed_dim)
         # fmt: on
-        grad_selected = grad_selected.sum(0)  # = elementwise add of keys, values contributions
+
+        # elementwise add of keys, values contributions
+        grad_selected = grad_selected.sum(0)
+
         grad_selected = grad_selected.view(n_queries, n_keys_per_query, embed_dim)
 
         # Zero out grads for masked selecteds

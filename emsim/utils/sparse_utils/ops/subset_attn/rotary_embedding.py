@@ -216,7 +216,7 @@ def rotate_keys_backward(
         else:
             # Can modify tensor in-place rather than creating a new one
             # Need to check needs_grad_rope_encoding because we'll need
-            # grad_k_rotated_complex in that branch
+            # grad_keys_rotated_complex in that branch
             grad_keys_complex = grad_keys_rotated_complex
             grad_keys_complex *= key_rope_encoding_complex.conj()
         grad_keys = torch.view_as_real(grad_keys_complex).reshape_as(grad_keys_rotated)

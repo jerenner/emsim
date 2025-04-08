@@ -1,9 +1,9 @@
-# sometimes this error happens, link to potential workaround
-# https://github.com/pytorch/pytorch/issues/69078#issuecomment-1087217720
 import torch
 from torch import Tensor
 
 
+# sometimes this fucntion errors, link to potential workaround
+# https://github.com/pytorch/pytorch/issues/69078#issuecomment-1087217720
 @torch.jit.script
 def sparse_index_select_inner(
     tensor_indices: Tensor, tensor_values: Tensor, axis: int, index: Tensor
@@ -133,6 +133,12 @@ def linearize_sparse_and_index_tensors(
             # index tensor ignores it
             sparse_tensor = sparse_tensor[..., 0].coalesce()
         else:
+            raise ValueError(
+                "Expected last dim of `index_tensor` to be the same as "
+                "`sparse_tensor.sparse_dim()`, got "
+                f"{str(index_tensor.shape[-1])} and {sparse_tensor.sparse_dim()}, "
+                "respectively."
+            )
             # build error str like this because of torchscript not liking f strings
             error_str = "Expected last dim of `index_tensor` to be the same as "
             error_str += "`sparse_tensor.sparse_dim()`, got "

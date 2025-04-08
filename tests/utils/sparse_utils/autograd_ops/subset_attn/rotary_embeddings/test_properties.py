@@ -8,8 +8,8 @@ from hypothesis import strategies as st
 from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import (
     calculate_rope,
     calculate_rope_backward,
-    rotate_k,
-    rotate_k_backward,
+    rotate_keys,
+    rotate_keys_backward,
 )
 from .conftest import (
     assert_close,
@@ -134,11 +134,11 @@ class TestHypothesis:
         )
 
         # Forward pass
-        k_rotated = rotate_k(keys, rope_encoding)
+        keys_rotated = rotate_keys(keys, rope_encoding)
 
         # Autograd backward
-        grad_output = torch.randn_like(k_rotated, device=device)
-        k_rotated.backward(grad_output)
+        grad_output = torch.randn_like(keys_rotated, device=device)
+        keys_rotated.backward(grad_output)
 
         # Store autograd gradients
         keys_grad_autograd = keys.grad.clone()
@@ -149,16 +149,16 @@ class TestHypothesis:
         rope_encoding.grad = None
 
         # Manual backward pass
-        grad_k, grad_rope_encoding = rotate_k_backward(
+        grad_keys, grad_rope_encoding = rotate_keys_backward(
             grad_output, keys, rope_encoding, True, True
         )
 
         # Compare gradients
         assert_close(
-            grad_k,
+            grad_keys,
             keys_grad_autograd,
             atol=1e-7,
-            msg="Manual grad_k doesn't match autograd",
+            msg="Manual grad_keys doesn't match autograd",
         )
         assert_close(
             grad_rope_encoding,
@@ -283,22 +283,22 @@ class TestHypothesis:
         )
 
         # Forward pass
-        k_rotated = rotate_k(keys, rope_encoding)
+        keys_rotated = rotate_keys(keys, rope_encoding)
 
         # Create two different gradient outputs
-        grad_output1 = torch.randn_like(k_rotated, device=device, dtype=torch.double)
-        grad_output2 = torch.randn_like(k_rotated, device=device, dtype=torch.double)
+        grad_output1 = torch.randn_like(keys_rotated, device=device, dtype=torch.double)
+        grad_output2 = torch.randn_like(keys_rotated, device=device, dtype=torch.double)
         alpha = torch.rand(1, device=device, dtype=torch.double).item()
 
         # Calculate gradients for each output separately
-        k_rotated.backward(grad_output1, retain_graph=True)
+        keys_rotated.backward(grad_output1, retain_graph=True)
         keys_grad1 = keys.grad.clone()
         rope_encoding_grad1 = rope_encoding.grad.clone()
 
         keys.grad = None
         rope_encoding.grad = None
 
-        k_rotated.backward(grad_output2, retain_graph=True)
+        keys_rotated.backward(grad_output2, retain_graph=True)
         keys_grad2 = keys.grad.clone()
         rope_encoding_grad2 = rope_encoding.grad.clone()
 
@@ -307,7 +307,7 @@ class TestHypothesis:
 
         # Calculate gradients for linear combination
         combined_grad_output = alpha * grad_output1 + (1 - alpha) * grad_output2
-        k_rotated.backward(combined_grad_output)
+        keys_rotated.backward(combined_grad_output)
         keys_grad_combined = keys.grad.clone()
         rope_encoding_grad_combined = rope_encoding.grad.clone()
 
@@ -435,15 +435,15 @@ class TestHypothesis:
         rope_encoding = theta  # phase angle directly
 
         # Rotation should preserve magnitude (|z| = |e^{iθ}z| = |z|)
-        k_rotated = rotate_k(keys, rope_encoding)
+        keys_rotated = rotate_keys(keys, rope_encoding)
 
         # Convert keys to complex for magnitude calculation
         keys_complex_view = keys.view(keys.shape[:-1] + (head_dim_half, 2))
         keys_complex = torch.view_as_complex(keys_complex_view)
 
         # Convert rotated keys to complex
-        k_rotated_complex_view = k_rotated.view(
-            k_rotated.shape[:-1] + (head_dim_half, 2)
+        k_rotated_complex_view = keys_rotated.view(
+            keys_rotated.shape[:-1] + (head_dim_half, 2)
         )
         k_rotated_complex = torch.view_as_complex(k_rotated_complex_view)
 
@@ -566,7 +566,7 @@ class TestHypothesis:
             device=device,
             dtype=torch.double,
         )
-        k_rotated_1 = rotate_k(keys_1, rope_encoding_1)
+        k_rotated_1 = rotate_keys(keys_1, rope_encoding_1)
 
         # Reset seed and compute again
         torch.manual_seed(seed)
@@ -586,7 +586,7 @@ class TestHypothesis:
             device=device,
             dtype=torch.double,
         )
-        k_rotated_2 = rotate_k(keys_2, rope_encoding_2)
+        k_rotated_2 = rotate_keys(keys_2, rope_encoding_2)
 
         # Results should be identical
         assert torch.all(keys_1 == keys_2), "Random number generation not deterministic"
@@ -698,11 +698,11 @@ class TestHypothesis:
         ) * (2 * math.pi)
 
         # Apply rotations in sequence
-        k_rotated1 = rotate_k(keys, theta1)
-        k_rotated_sequential = rotate_k(k_rotated1, theta2)
+        k_rotated1 = rotate_keys(keys, theta1)
+        k_rotated_sequential = rotate_keys(k_rotated1, theta2)
 
         # Apply combined rotation
-        k_rotated_combined = rotate_k(keys, theta1 + theta2)
+        k_rotated_combined = rotate_keys(keys, theta1 + theta2)
 
         # Results should match
         assert_close(
@@ -756,18 +756,18 @@ class TestHypothesis:
         )
 
         # Apply rotation
-        k_rotated = rotate_k(keys, rope_encoding_single_head)
+        keys_rotated = rotate_keys(keys, rope_encoding_single_head)
 
         # Create gradient for backward pass
-        grad_k_rotated = torch.randn_like(k_rotated)
+        grad_k_rotated = torch.randn_like(keys_rotated)
 
         # Run backward pass
-        grad_k, grad_rope_encoding = rotate_k_backward(
+        grad_keys, grad_rope_encoding = rotate_keys_backward(
             grad_k_rotated, keys, rope_encoding_single_head, True, True
         )
 
         # Verify shape of gradients
-        assert grad_k.shape == keys.shape, "Gradient for keys has wrong shape"
+        assert grad_keys.shape == keys.shape, "Gradient for keys has wrong shape"
         assert (
             grad_rope_encoding.shape == rope_encoding_single_head.shape
         ), "Gradient for rope_encoding has wrong shape"
@@ -776,11 +776,11 @@ class TestHypothesis:
         rope_encoding_expanded = rope_encoding_single_head.expand(-1, -1, n_heads, -1)
 
         # Forward pass with expanded tensor
-        k_rotated_expanded = rotate_k(keys, rope_encoding_expanded)
+        k_rotated_expanded = rotate_keys(keys, rope_encoding_expanded)
 
         # Results should match
         assert_close(
-            k_rotated,
+            keys_rotated,
             k_rotated_expanded,
             rtol=1e-5,
             msg="Broadcasting in rotate_k doesn't match explicit expansion",

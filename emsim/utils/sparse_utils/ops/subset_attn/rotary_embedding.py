@@ -67,12 +67,14 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
 
 
 @torch.jit.script
-def rotate_k(k: Tensor, key_rope_encoding: Tensor, needs_autograd: bool = True) -> Tensor:
+def rotate_keys(
+    keys: Tensor, key_rope_encoding: Tensor, needs_autograd: bool = True
+) -> Tensor:
     """Applies rotary position encoding (RoPE) to the key tensor via
     complex multiplication.
 
     Args:
-        k (Tensor): Key tensor of real dtype and shape
+        keys (Tensor): Key tensor of real dtype and shape
             [n_queries, n_keys_per_query, n_heads, head_dim]
         key_rope_encoding (Tensor): Position encoding of real dtype and shape
             [n_queries, n_keys_per_query, n_heads, head_dim/2] or
@@ -84,28 +86,28 @@ def rotate_k(k: Tensor, key_rope_encoding: Tensor, needs_autograd: bool = True) 
             default for safety.
 
     Returns:
-        - k_rotated (Tensor): Key tensor after rotation, of shape
+        - keys_rotated (Tensor): Key tensor after rotation, of shape
             [n_queries, n_keys_per_query, n_heads, head_dim] and real dtype
     """
-    if k.ndim != 4 or key_rope_encoding.ndim != 4:
+    if keys.ndim != 4 or key_rope_encoding.ndim != 4:
         raise ValueError(
-            "Expected k and key_rope_encoding to be 4D, got shapes "
-            f"{k.shape} and {key_rope_encoding.shape}"
+            "Expected keys and key_rope_encoding to be 4D, got shapes "
+            f"{keys.shape} and {key_rope_encoding.shape}"
         )
-    if k.size(-1) != key_rope_encoding.size(-1) * 2:
+    if keys.size(-1) != key_rope_encoding.size(-1) * 2:
         raise ValueError(
-            "Expected key_rope_encoding to have last dimension equal to half of k's"
-            f"head dim, got {key_rope_encoding.size(-1)} and {k.size(-1)}"
+            "Expected key_rope_encoding to have last dimension equal to half of keys's"
+            f"head dim, got {key_rope_encoding.size(-1)} and {keys.size(-1)}"
         )
-    if k.is_complex() or key_rope_encoding.is_complex():
+    if keys.is_complex() or key_rope_encoding.is_complex():
         raise ValueError(
             "Expected keys and key_rope_encoding to be real, got dtypes "
-            f"{k.dtype}, {key_rope_encoding.dtype}"
+            f"{keys.dtype}, {key_rope_encoding.dtype}"
         )
 
     # Convert to complex and apply rotation
-    keys_complex_shape = k.shape[:-1] + (k.size(-1) // 2, 2)
-    keys_complex = torch.view_as_complex(k.view(keys_complex_shape))
+    keys_complex_shape = keys.shape[:-1] + (keys.size(-1) // 2, 2)
+    keys_complex = torch.view_as_complex(keys.view(keys_complex_shape))
     rope_encoding_complex = torch.polar(
         torch.ones_like(key_rope_encoding),
         key_rope_encoding,
@@ -118,17 +120,17 @@ def rotate_k(k: Tensor, key_rope_encoding: Tensor, needs_autograd: bool = True) 
         # can use an in-place op rather than creating a new tensor
         keys_rotated = keys_complex
         keys_rotated *= rope_encoding_complex
-    keys_rotated = torch.view_as_real(keys_rotated).reshape_as(k)
+    keys_rotated = torch.view_as_real(keys_rotated).reshape_as(keys)
 
     return keys_rotated
 
 
 @torch.jit.script
-def rotate_k_backward(
-    grad_k_rotated: Tensor,
-    k: Tensor,
+def rotate_keys_backward(
+    grad_keys_rotated: Tensor,
+    keys: Tensor,
     key_rope_encoding: Tensor,
-    needs_grad_k: bool = True,
+    needs_grad_keys: bool = True,
     needs_grad_rope_encoding: bool = True,
     needs_autograd: bool = True,
 ) -> tuple[Optional[Tensor], Optional[Tensor]]:
@@ -139,15 +141,15 @@ def rotate_k_backward(
     dL/dx = dL/dz * conj(y) and dL/dy = dL/dz * conj(x).
 
     Args:
-        grad_k_rotated (Tensor): Gradient of loss with respect to rotated keys,
+        grad_keys_rotated (Tensor): Gradient of loss with respect to rotated keys,
             of shape [n_queries, n_keys_per_query, n_heads, head_dim]
-        k (Tensor): Original, un-rotated key tensor of real dtype and shape
+        keys (Tensor): Original, un-rotated key tensor of real dtype and shape
             [n_queries, n_keys_per_query, n_heads, head_dim].
         key_rope_encoding (Tensor): Real representation of positional encodings
             of real dtype and shape
             [n_queries, n_keys_per_query, n_heads, head_dim/2] or
             [n_queries, n_keys_per_query, 1,       head_dim/2]
-        needs_grad_k (bool): Whether gradients for keys are needed. Default: True
+        needs_grad_keys (bool): Whether gradients for keys are needed. Default: True
         needs_grad_rope_encoding (bool): Whether gradients for positional encodings
             are needed. Default: True
         needs_autograd (bool): If you need this function to be tracked by autograd,
@@ -157,7 +159,7 @@ def rotate_k_backward(
             default for safety.
 
     Returns:
-        grad_k (Tensor): Gradient tensor for the unrotated keys,
+        grad_keys (Tensor): Gradient tensor for the unrotated keys,
             of shape [n_queries, n_keys_per_query, n_heads, head_dim] and real dtype,
             or None if not needed
         grad_rope_encoding (Tensor): Gradient tensor for the positional encodings
@@ -165,15 +167,15 @@ def rotate_k_backward(
             [n_queries, n_keys_per_query, n_heads, head_dim/2] or
             [n_queries, n_keys_per_query, 1,       head_dim/2], or None if not needed
     """
-    if grad_k_rotated.ndim != 4 or grad_k_rotated.is_complex():
+    if grad_keys_rotated.ndim != 4 or grad_keys_rotated.is_complex():
         raise ValueError(
             "Expected grad_k_rotated to be a 4D real tensor, got "
-            f"shape {grad_k_rotated.shape} and dtype {grad_k_rotated.dtype}"
+            f"shape {grad_keys_rotated.shape} and dtype {grad_keys_rotated.dtype}"
         )
-    if k.ndim != 4 or k.is_complex():
+    if keys.ndim != 4 or keys.is_complex():
         raise ValueError(
-            "Expected k to be a 4D real tensor, got "
-            f"shape {k.shape} and dtype {k.dtype}"
+            "Expected keys to be a 4D real tensor, got "
+            f"shape {keys.shape} and dtype {keys.dtype}"
         )
     if key_rope_encoding.ndim != 4 or key_rope_encoding.is_complex():
         raise ValueError(
@@ -182,14 +184,17 @@ def rotate_k_backward(
         )
 
     # Check for no grads needed
-    if not needs_grad_k and not needs_grad_rope_encoding:
+    if not needs_grad_keys and not needs_grad_rope_encoding:
         # Early return
         return None, None
 
     # Convert grad_k_rotated to complex
-    to_complex_shape = grad_k_rotated.shape[:-1] + (grad_k_rotated.size(-1) // 2, 2)
-    grad_k_rotated_complex = torch.view_as_complex(
-        grad_k_rotated.view(to_complex_shape)
+    to_complex_shape = grad_keys_rotated.shape[:-1] + (
+        grad_keys_rotated.size(-1) // 2,
+        2,
+    )
+    grad_keys_rotated_complex = torch.view_as_complex(
+        grad_keys_rotated.view(to_complex_shape)
     )
 
     # Complex multiplication gradient
@@ -203,35 +208,39 @@ def rotate_k_backward(
     )
 
     # Gradient for key tensor
-    if needs_grad_k:
+    if needs_grad_keys:
         if needs_autograd or needs_grad_rope_encoding:
-            grad_k_complex = grad_k_rotated_complex * key_rope_encoding_complex.conj()
+            grad_keys_complex = (
+                grad_keys_rotated_complex * key_rope_encoding_complex.conj()
+            )
         else:
             # Can modify tensor in-place rather than creating a new one
             # Need to check needs_grad_rope_encoding because we'll need
             # grad_k_rotated_complex in that branch
-            grad_k_complex = grad_k_rotated_complex
-            grad_k_complex *= key_rope_encoding_complex.conj()
-        grad_k = torch.view_as_real(grad_k_complex).reshape_as(grad_k_rotated)
+            grad_keys_complex = grad_keys_rotated_complex
+            grad_keys_complex *= key_rope_encoding_complex.conj()
+        grad_keys = torch.view_as_real(grad_keys_complex).reshape_as(grad_keys_rotated)
     else:
-        grad_k = None
+        grad_keys = None
 
     # Gradient for position encoding
     if needs_grad_rope_encoding:
         # Recompute complex version of key tensor
-        k_complex_shape = k.shape[:-1] + (k.size(-1) // 2, 2)
-        k_complex = torch.view_as_complex(k.view(k_complex_shape))
+        keys_complex_shape = keys.shape[:-1] + (keys.size(-1) // 2, 2)
+        keys_complex = torch.view_as_complex(keys.view(keys_complex_shape))
 
         # Compute gradient with respect to rope_encoding_complex
         if needs_autograd:
-            grad_rope_encoding_complex = grad_k_rotated_complex * k_complex.conj()
+            grad_rope_encoding_complex = grad_keys_rotated_complex * keys_complex.conj()
         else:
             # Can modify tensor in-place rather than creating a new one
-            grad_rope_encoding_complex = grad_k_rotated_complex
-            grad_rope_encoding_complex *= k_complex.conj()
+            grad_rope_encoding_complex = grad_keys_rotated_complex
+            grad_rope_encoding_complex *= keys_complex.conj()
 
         # Check if broadcasting happened
-        is_broadcasted = key_rope_encoding_complex.size(2) == 1 and k_complex.size(2) > 1
+        is_broadcasted = (
+            key_rope_encoding_complex.size(2) == 1 and keys_complex.size(2) > 1
+        )
 
         if is_broadcasted:
             # Sum gradients across broadcasted dimension (heads)
@@ -254,7 +263,7 @@ def rotate_k_backward(
     else:
         grad_rope_encoding = None
 
-    return grad_k, grad_rope_encoding
+    return grad_keys, grad_rope_encoding
 
 
 @torch.jit.script

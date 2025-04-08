@@ -62,7 +62,7 @@ def permute_for_attention(tensor: Tensor) -> Tensor:
         # For key/value: [n_queries, n_keys_per_query, n_heads, head_dim] ->
         # [n_heads, n_queries, n_keys_per_query, head_dim]
         # standard batched-heads approach for multiplication with q and attn_weights
-        # but with added n_keys_per_query dim that k broadcasts over q and v
+        # but with added n_keys_per_query dim that keys broadcasts over q and values
         # contracts with attn_weights
         return tensor.permute(2, 0, 1, 3).contiguous()
 
@@ -98,10 +98,10 @@ def select_values_and_project_kv(
     sparse_tensor_values: Tensor,
     index_search: Tensor,
     is_specified_mask: Tensor,
-    Wk: Tensor,
-    Wv: Tensor,
-    bias_k: Optional[Tensor],
-    bias_v: Optional[Tensor],
+    key_weight: Tensor,
+    value_weight: Tensor,
+    key_bias: Optional[Tensor],
+    value_bias: Optional[Tensor],
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Retrieves source sequence elements and computes the key and value tensors for
     multi-head attention
@@ -117,19 +117,19 @@ def select_values_and_project_kv(
         is_specified_mask (Tensor): Boolean mask of shape
             [n_queries, n_keys_per_query] indicating which indices are
             specified in the sparse tensor
-        Wk (Tensor): Key projection matrix of shape [embed_dim, embed_dim]
-        Wv (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
-        bias_k (Optional[Tensor]): Key projection bias of shape [embed_dim]
-        bias_v (Optional[Tensor]): Value projection bias of shape [embed_dim]
+        key_weight (Tensor): Key projection matrix of shape [embed_dim, embed_dim]
+        value_weight (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
+        key_bias (Optional[Tensor]): Key projection bias of shape [embed_dim]
+        value_bias (Optional[Tensor]): Value projection bias of shape [embed_dim]
         n_heads (int): Number of attention heads
         head_dim (int): Dimension of each attention head
 
     Returns:
-        - k (Tensor): Key tensor of shape
+        - keys (Tensor): Key tensor of shape
             [n_queries, n_keys_per_query, embed_dim]
-        - v (Tensor): Value tensor of shape
+        - values (Tensor): Value tensor of shape
             [n_queries, n_keys_per_query, embed_dim]
-        - selected (Tensor): Selected features from sparse tensor before k and v
+        - selected (Tensor): Selected features from sparse tensor before keys and values
             projections, of shape [n_queries, n_keys_per_query, embed_dim]
     """
     assert index_search.ndim == 2
@@ -137,22 +137,30 @@ def select_values_and_project_kv(
 
     selected = gather_and_mask(sparse_tensor_values, index_search, is_specified_mask)
 
-    # Stack weight matrices to batch the k and v projections
-    W_stacked = torch.cat([Wk, Wv])  # (2*embed_dim, embed_dim)
+    # Stack weight matrices to batch the keys and values projections
+    weights_stacked = torch.cat([key_weight, value_weight])  # (2*embed_dim, embed_dim)
 
     # Handle stacking of biases if present
-    if bias_k is not None or bias_v is not None:
-        bias_k = bias_k if bias_k is not None else Wk.new_zeros(Wk.size(0))
-        bias_v = bias_v if bias_v is not None else Wv.new_zeros(Wv.size(0))
-        bias_stacked = torch.cat([bias_k, bias_v])  # (2*embed_dim)
+    if key_bias is not None or value_bias is not None:
+        key_bias = (
+            key_bias
+            if key_bias is not None
+            else key_weight.new_zeros(key_weight.size(0))
+        )
+        value_bias = (
+            value_bias
+            if value_bias is not None
+            else value_weight.new_zeros(value_weight.size(0))
+        )
+        biases_stacked = torch.cat([key_bias, value_bias])  # (2*embed_dim)
     else:
-        bias_stacked = None
+        biases_stacked = None
 
     # (n_queries, n_keys_per_query, 2*embed_dim)
-    kv = F.linear(selected, W_stacked, bias_stacked)
-    k, v = kv.chunk(2, -1)  # (n_queries, n_keys_per_query, embed_dim) * 2
+    kv = F.linear(selected, weights_stacked, biases_stacked)
+    keys, values = kv.chunk(2, -1)  # (n_queries, n_keys_per_query, embed_dim) * 2
 
-    return k, v, selected
+    return keys, values, selected
 
 
 @torch.jit.script
@@ -170,7 +178,7 @@ def linear_grads(
     stacked together.
 
     This function supports both regular and stacked gradients. When grad_output
-    is 3D, with the leading dimension representing a stacking of the k and v
+    is 3D, with the leading dimension representing a stacking of the keys and values
     gradients, the returned tensors are 3D and 2D, respectively.
 
     Args:

@@ -5,8 +5,8 @@ from torch import Tensor
 
 from .rotary_embedding import (
     calculate_rope,
-    rotate_k,
-    rotate_k_backward,
+    rotate_keys,
+    rotate_keys_backward,
     calculate_rope_backward,
 )
 from .autograd_helpers import (
@@ -32,10 +32,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         sparse_tensor_values: Tensor,
         index_search: Tensor,
         is_specified_mask: Tensor,
-        Wk: Tensor,
-        Wv: Tensor,
-        bias_k: Tensor,
-        bias_v: Tensor,
+        key_weight: Tensor,
+        value_weight: Tensor,
+        key_bias: Tensor,
+        value_bias: Tensor,
         n_heads: int,
         key_positions: Optional[Tensor],
         rope_freqs: Optional[Tensor],
@@ -52,15 +52,15 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         #### Forward step 3: Sparse values selection and input projection
         # fmt: off
-        k, v, selected = select_values_and_project_kv(
+        keys, values, selected = select_values_and_project_kv(
             sparse_tensor_values, index_search, is_specified_mask,
-            Wk, Wv, bias_k, bias_v,
+            key_weight, value_weight, key_bias, value_bias,
         )
         # fmt: on
         if not is_for_backward:
             del selected
 
-        [q, k, v] = [split_heads(x, n_heads) for x in [query_tensor, k, v]]
+        [queries, keys, values] = [split_heads(x, n_heads) for x in [query_tensor, keys, values]]
 
         #### Forward step 4: RoPE encoding calculation
 
@@ -69,26 +69,26 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         #### Forward step 5: Rotate the keys by applying RoPE
 
-        k_unrotated_copy = None
+        keys_unrotated_copy = None
         if key_rope_encoding is not None:
             if is_for_backward and need_backward_key_branch:
                 # used later in backward pass to compute RoPE grads
-                k_unrotated_copy = k.clone()
-            k = rotate_k(k, key_rope_encoding, needs_autograd=False)
+                keys_unrotated_copy = keys.clone()
+            keys = rotate_keys(keys, key_rope_encoding, needs_autograd=False)
 
         #### Forward step 6: Permutation
 
         # (n_heads, n_queries, head_dim)
-        q = permute_for_attention(q)
+        queries = permute_for_attention(queries)
 
         # (n_heads, n_queries, n_keys_per_query, head_dim)
-        k = permute_for_attention(k)
-        v = permute_for_attention(v)
+        keys = permute_for_attention(keys)
+        values = permute_for_attention(values)
 
         if not is_for_backward:
-            return q, k, v, key_rope_encoding
+            return queries, keys, values, key_rope_encoding
         else:
-            return q, k, v, key_rope_encoding, selected, k_unrotated_copy
+            return queries, keys, values, key_rope_encoding, selected, keys_unrotated_copy
 
     @staticmethod
     def forward(
@@ -98,10 +98,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         sparse_tensor_values: Tensor,
         index_search: Tensor,
         is_specified_mask: Tensor,
-        Wk: Tensor,
-        Wv: Tensor,
-        bias_k: Optional[Tensor] = None,
-        bias_v: Optional[Tensor] = None,
+        key_weight: Tensor,
+        value_weight: Tensor,
+        key_bias: Optional[Tensor] = None,
+        value_bias: Optional[Tensor] = None,
         key_pos_encoding: Optional[Tensor] = None,
         key_positions: Optional[Tensor] = None,
         rope_freqs: Optional[Tensor] = None,
@@ -127,10 +127,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             is_specified_mask (Tensor): Boolean mask of shape
                 [n_queries, n_keys_per_query] indicating which indices are
                 specified in the sparse tensor
-            Wk (Tensor): Key projection matrix of shape [embed_dim, embed_dim]
-            Wv (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
-            bias_k (Optional[Tensor]): Key projection bias of shape [embed_dim]
-            bias_v (Optional[Tensor]): Value projection bias of shape [embed_dim]
+            key_weight (Tensor): Key projection matrix of shape [embed_dim, embed_dim]
+            value_weight (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
+            key_bias (Optional[Tensor]): Key projection bias of shape [embed_dim]
+            value_bias (Optional[Tensor]): Value projection bias of shape [embed_dim]
             key_pos_encoding (Optional[Tensor]): Positional encoding for keys of shape
                 [n_queries, n_keys_per_query, n_heads, head_dim/2]. Used for rotary
                 position embedding (RoPE). Cannot be used together with key_positions
@@ -171,10 +171,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         #   resulting tensors
         # 4. If we have the two RoPE inputs (key positions and RoPE freqs), compute
         #   the RoPE encoding rotation vector
-        # 5. If we computed the RoPE rotation vector or were given it, apply it to k
-        # 6. Permute the dimensions of the q, k, and v tensors
+        # 5. If we computed the RoPE rotation vector or were given it, apply it to keys
+        # 6. Permute the dimensions of the queries, keys, and values tensors
         #   to heads-batched order (similar to standard MHA)
-        # 7. Compute the attention scores by matmuling q and k along the head_dim
+        # 7. Compute the attention scores by matmuling queries and keys along the head_dim
         #   dimension (with scale factor) (again similar to standard MHA)
         # 8. Mask out the unspecified keys so queries can't attend to them and
         #   apply softmax to compute attention weights (the masking is slightly
@@ -183,12 +183,12 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # 9. Compute the output values by matmuling the attention weights with
         #   the value tensor, contracting out the n_queries_per_keys dimension.
 
-        # The selected, k, and v tensors are the major memory consumers because they
-        # are n_keys_per_query times larger than the q and attn_scores tensors. The
+        # The selected, keys, and values tensors are the major memory consumers because they
+        # are n_keys_per_query times larger than the queries and attn_scores tensors. The
         # custom autograd op lets us have each query element attend to its own
-        # subset of key elements. In tensor terms, this means that the k and v
-        # tensors are 4D while the q (query) tensor is 3D as in standard multi-head
-        # attention. The matmuls between q and k/v are performed with unsqueezes and
+        # subset of key elements. In tensor terms, this means that the keys and values
+        # tensors are 4D while the queries (query) tensor is 3D as in standard multi-head
+        # attention. The matmuls between queries and keys/values are performed with unsqueezes and
         # broadcasts.
 
         ctx.set_materialize_grads(False)
@@ -205,14 +205,14 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         assert query_tensor.size(0) == index_search.size(0) == n_queries
         assert index_search.shape == is_specified_mask.shape
-        assert Wk.ndim == 2
-        assert Wv.ndim == 2
+        assert key_weight.ndim == 2
+        assert value_weight.ndim == 2
 
         # embed_dim
         # kv projection
-        assert Wk.size(1) == Wv.size(1) == sparse_tensor_values.size(-1) == embed_dim
+        assert key_weight.size(1) == value_weight.size(1) == sparse_tensor_values.size(-1) == embed_dim
         # attn calculation
-        assert Wk.size(0) == query_tensor.size(1) == embed_dim
+        assert key_weight.size(0) == query_tensor.size(1) == embed_dim
 
         # rope validations
         if key_pos_encoding is not None and (
@@ -268,10 +268,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         ctx.save_for_backward(
             query_tensor,
             sparse_tensor_values,
-            Wk,
-            Wv,
-            bias_k,
-            bias_v,
+            key_weight,
+            value_weight,
+            key_bias,
+            value_bias,
             (
                 key_pos_encoding
                 if not (key_positions is not None and rope_freqs is not None)
@@ -283,17 +283,17 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         ctx.index_search = index_search
         ctx.is_specified_mask = is_specified_mask
 
-        #### Steps 3-6 get repeated by backward to step into a shared helper function
+        #### Steps 3-6 get repeated by backward so step into a shared helper function
 
-        q, k, v, key_pos_encoding = GatherAndSubsetAttentionFunction._forward_shared(
+        queries, keys, values, key_pos_encoding = GatherAndSubsetAttentionFunction._forward_shared(
             query_tensor,
             sparse_tensor_values,
             index_search,
             is_specified_mask,
-            Wk,
-            Wv,
-            bias_k,
-            bias_v,
+            key_weight,
+            value_weight,
+            key_bias,
+            value_bias,
             n_heads,
             key_positions,
             rope_freqs,
@@ -303,12 +303,12 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         #### Step 7: Attention scores calculation
 
-        q = q.unsqueeze(-2)  # (n_heads, n_queries, 1, head_dim)
+        queries = queries.unsqueeze(-2)  # (n_heads, n_queries, 1, head_dim)
         # fmt: off
         attn_scores = torch.matmul(
-            q * scale_factor,   # (n_heads, n_queries, 1, head_dim)
-            k.transpose(-1, -2) # (n_heads, n_queries, head_dim, n_keys_per_query)
-        ).squeeze(-2)           # (n_heads, n_queries, n_keys_per_query)
+            queries * scale_factor, # (n_heads, n_queries, 1, head_dim)
+            keys.transpose(-1, -2)  # (n_heads, n_queries, head_dim, n_keys_per_query)
+        ).squeeze(-2)               # (n_heads, n_queries, n_keys_per_query)
         # fmt: on
 
         #### Step 8: Masking and softmax
@@ -323,8 +323,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # fmt: off
         output = torch.matmul(
             attn_weights.unsqueeze(-2), # (n_heads, n_queries, 1, n_keys_per_query)
-            v,                          # (n_heads, n_queries, n_keys_per_query, head_dim)
-            out=q,  # memory optimization
+            values,                     # (n_heads, n_queries, n_keys_per_query, head_dim)
+            out=queries,  # memory optimization
         ).squeeze(-2)                   # (n_heads, n_queries, head_dim)
         # fmt: on
 
@@ -358,7 +358,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # Query tensor is its own branch, so no other grads depend on it
         compute_grad_query = needed_grads["query"]
 
-        # Everything else is upstream of k
+        # Everything else is upstream of keys
         compute_grad_k = (
             needed_grads["sparse_values"]
             or needed_grads["key_weight"]
@@ -407,7 +407,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         return {
             "attn_scores": compute_grad_attn_scores,
             "query": compute_grad_query,
-            "k": compute_grad_k,
+            "keys": compute_grad_k,
             "key_branch": compute_grads_key_branch,
             "rope_inputs": compute_grads_rope_inputs,
             "value_branch": compute_grads_value_branch,
@@ -417,12 +417,12 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
     @staticmethod
     def _compute_grad_attn_scores(
-        grad_output: Tensor, v: Tensor, attn_weights: Tensor, is_specified_mask: Tensor
+        grad_output: Tensor, values: Tensor, attn_weights: Tensor, is_specified_mask: Tensor
     ) -> Tensor:
         # fmt: off
         grad_attn_weights = torch.matmul(
             grad_output.unsqueeze(-2), # (n_heads, n_queries, 1, head_dim)
-            v.transpose(-1, -2),       # (n_heads, n_queries, head_dim, n_keys_per_query)
+            values.transpose(-1, -2),       # (n_heads, n_queries, head_dim, n_keys_per_query)
         ).squeeze(-2)                  # (n_heads, n_queries, n_keys_per_query)
         # fmt: on
 
@@ -438,26 +438,26 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         return grad_attn_scores
 
     @staticmethod
-    def _compute_grad_query(grad_attn_scores: Tensor, k: Tensor, scale_factor: float):
+    def _compute_grad_query(grad_attn_scores: Tensor, keys: Tensor, scale_factor: float):
         # fmt: off
-        grad_q = torch.matmul(
+        grad_queries = torch.matmul(
             grad_attn_scores.unsqueeze(-2),  # (n_heads, n_queries, 1, n_keys_per_query)
-            k,                               # (n_heads, n_queries, n_keys_per_query, head_dim)
+            keys,                            # (n_heads, n_queries, n_keys_per_query, head_dim)
         ).squeeze(-2)                        # (n_heads, n_queries, head_dim
 
-        grad_q *= scale_factor
+        grad_queries *= scale_factor
 
         # Flip dims back and stack heads
-        grad_q = permute_for_attention_backward(grad_q)  # (n_queries, n_heads, head_dim)
-        grad_query = grad_q.flatten(-2, -1)  # (n_queries, embed_dim)
+        grad_queries = permute_for_attention_backward(grad_queries)  # (n_queries, n_heads, head_dim)
+        grad_query = grad_queries.flatten(-2, -1)  # (n_queries, embed_dim)
         # fmt: on
         return grad_query
 
     @staticmethod
-    def _compute_grads_k_and_pos_encoding(
+    def _compute_grads_keys_and_rope_encoding(
         grad_attn_scores: Tensor,
-        q: Tensor,
-        k: Tensor,
+        queries: Tensor,
+        keys: Tensor,
         scale_factor: float,
         key_rope_encoding: Union[Tensor, None],
         needs_grad_k: bool,
@@ -466,127 +466,127 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         if not needs_grad_k and not needs_grad_key_pos:
             return None, None
         # fmt: off
-        grad_k_maybe_rotated = torch.matmul(
-            grad_attn_scores.unsqueeze(-1), # (n_heads, n_queries, n_keys_per_query, 1)
-            q.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
-        )                                   # (n_heads, n_queries, n_keys_per_query, head_dim)
+        grad_keys_maybe_rotated = torch.matmul(
+            grad_attn_scores.unsqueeze(-1),       # (n_heads, n_queries, n_keys_per_query, 1)
+            queries.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
+        )                                         # (n_heads, n_queries, n_keys_per_query, head_dim)
         # fmt: on
 
         # (n_queries, n_keys_per_query, n_heads, head_dim)
-        grad_k_maybe_rotated = permute_for_attention_backward(grad_k_maybe_rotated)
+        grad_keys_maybe_rotated = permute_for_attention_backward(grad_keys_maybe_rotated)
 
         if key_rope_encoding is not None:
             # Handle backpropagation through RoPE
-            grad_k, grad_key_pos_encoding = rotate_k_backward(
-                grad_k_maybe_rotated,
-                k,
+            grad_keys, grad_key_pos_encoding = rotate_keys_backward(
+                grad_keys_maybe_rotated,
+                keys,
                 key_rope_encoding,
                 needs_grad_k,
                 needs_grad_key_pos,
                 needs_autograd=False,
             )
         else:
-            grad_k = grad_k_maybe_rotated
+            grad_keys = grad_keys_maybe_rotated
             grad_key_pos_encoding = None
 
-        if grad_k is None:
+        if grad_keys is None:
             assert not needs_grad_k
             return None, grad_key_pos_encoding
 
         # (n_heads, n_queries, embed_dim)
-        grad_k = grad_k.flatten(-2, -1)
+        grad_keys = grad_keys.flatten(-2, -1)
 
-        return grad_k, grad_key_pos_encoding
+        return grad_keys, grad_key_pos_encoding
 
     @staticmethod
-    def _compute_grad_v(attn_weights: Tensor, grad_output: Tensor) -> Tensor:
+    def _compute_grad_values(attn_weights: Tensor, grad_output: Tensor) -> Tensor:
         # fmt: off
-        grad_v = torch.matmul(
+        grad_values = torch.matmul(
             attn_weights.unsqueeze(-1), # (n_heads, n_queries, n_keys_per_query, 1)
             grad_output.unsqueeze(-2)   # (n_heads, n_queries, 1, head_dim)
         )                               # (n_heads, n_queries, n_keys_per_query, head_dim)
         # fmt: on
 
         # (n_queries, n_keys_per_query, n_heads, head_dim)
-        grad_v = permute_for_attention_backward(grad_v)
-        grad_v = grad_v.flatten(-2, -1)  # (n_queries, n_keys_per_query, embed_dim)
-        return grad_v
+        grad_values = permute_for_attention_backward(grad_values)
+        grad_values = grad_values.flatten(-2, -1)  # (n_queries, n_keys_per_query, embed_dim)
+        return grad_values
 
     @staticmethod
-    def _compute_grads_k_v_projections(
-        grad_k_flat: Tensor,
-        grad_v_flat: Tensor,
+    def _compute_grads_key_value_projections(
+        grad_keys_flat: Tensor,
+        grad_values_flat: Tensor,
         selected: Tensor,
-        needs_grad_Wk: bool,
-        needs_grad_Wv: bool,
-        needs_grad_bias_k: bool,
-        needs_grad_bias_v: bool,
+        needs_grad_key_weight: bool,
+        needs_grad_value_weight: bool,
+        needs_grad_key_bias: bool,
+        needs_grad_value_bias: bool,
     ) -> tuple[Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor]]:
         selected_flat = selected.view(-1, selected.size(-1))
 
-        if (needs_grad_Wk or needs_grad_bias_k) and (
-            needs_grad_Wv and needs_grad_bias_v
+        if (needs_grad_key_weight or needs_grad_key_bias) and (
+            needs_grad_value_weight and needs_grad_value_bias
         ):
             # need grads from both projections - batch the two gradient
             # calculations to save a matmul call (bmm vs 2x mm)
 
-            # stack gradients for batched k and v backward (adding leading dim)
-            grad_kv_flat = torch.stack([grad_k_flat, grad_v_flat])
+            # stack gradients for batched keys and values backward (adding leading dim)
+            grad_kv_flat = torch.stack([grad_keys_flat, grad_values_flat])
 
-            grad_W_stacked, grad_bias_stacked = linear_grads(
+            grad_weights_stacked, grad_bias_stacked = linear_grads(
                 grad_kv_flat,
                 selected_flat,
-                needs_grad_Wk or needs_grad_Wv,
-                needs_grad_bias_k or needs_grad_bias_v,
+                needs_grad_key_weight or needs_grad_value_weight,
+                needs_grad_key_bias or needs_grad_value_bias,
             )
 
-            if grad_W_stacked is not None:
-                grad_Wk, grad_Wv = grad_W_stacked
-                grad_Wk = grad_Wk if needs_grad_Wk else None
-                grad_Wv = grad_Wv if needs_grad_Wv else None
+            if grad_weights_stacked is not None:
+                grad_key_weight, grad_value_weight = grad_weights_stacked
+                grad_key_weight = grad_key_weight if needs_grad_key_weight else None
+                grad_value_weight = grad_value_weight if needs_grad_value_weight else None
 
             if grad_bias_stacked is not None:
-                grad_bias_k, grad_bias_v = grad_bias_stacked
-                grad_bias_k = grad_bias_k if needs_grad_bias_k else None
-                grad_bias_v = grad_bias_v if needs_grad_bias_v else None
+                grad_key_bias, grad_value_bias = grad_bias_stacked
+                grad_key_bias = grad_key_bias if needs_grad_key_bias else None
+                grad_value_bias = grad_value_bias if needs_grad_value_bias else None
 
         else:
             # only need one projection's grad. call linear_grads twice
             # since it will safely return None, None for the one where
             # needs_grads bools are False
-            grad_Wk, grad_bias_k = linear_grads(
-                grad_k_flat, selected_flat, needs_grad_Wk, needs_grad_bias_k
+            grad_key_weight, grad_key_bias = linear_grads(
+                grad_keys_flat, selected_flat, needs_grad_key_weight, needs_grad_key_bias
             )
 
-            grad_Wv, grad_bias_v = linear_grads(
-                grad_v_flat, selected_flat, needs_grad_Wv, needs_grad_bias_v
+            grad_value_weight, grad_value_bias = linear_grads(
+                grad_values_flat, selected_flat, needs_grad_value_weight, needs_grad_value_bias
             )
-        return grad_Wk, grad_Wv, grad_bias_k, grad_bias_v
+        return grad_key_weight, grad_value_weight, grad_key_bias, grad_value_bias
 
     @staticmethod
     def _compute_grad_sparse_values(
-        grad_k_flat: Tensor,
-        grad_v_flat: Tensor,
-        Wk: Tensor,
-        Wv: Tensor,
+        grad_keys_flat: Tensor,
+        grad_values_flat: Tensor,
+        key_weight: Tensor,
+        value_weight: Tensor,
         is_specified_mask: Tensor,
         sparse_tensor_values: Tensor,
         index_search: Tensor,
     ) -> Tensor:
         n_queries = is_specified_mask.size(0)
         n_keys_per_query = is_specified_mask.size(1)
-        embed_dim = grad_k_flat.size(-1)
+        embed_dim = grad_keys_flat.size(-1)
 
         # two matrix multiplies - faster if we batch them
-        grad_k_v_stacked = torch.stack([grad_k_flat, grad_v_flat])
-        W_stacked = torch.stack([Wk, Wv])
+        grad_k_v_stacked = torch.stack([grad_keys_flat, grad_values_flat])
+        W_stacked = torch.stack([key_weight, value_weight])
         # fmt: off
         grad_selected = torch.bmm(
             grad_k_v_stacked,  # (2, n_queries * n_keys_per_query, embed_dim)
             W_stacked,         # (2, embed_dim, embed_dim)
         )                      # (2, n_queries * n_keys_per_query, embed_dim)
         # fmt: on
-        grad_selected = grad_selected.sum(0)  # = elementwise add of k, v contributions
+        grad_selected = grad_selected.sum(0)  # = elementwise add of keys, values contributions
         grad_selected = grad_selected.view(n_queries, n_keys_per_query, embed_dim)
 
         # Zero out grads for masked selecteds
@@ -623,10 +623,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 - grad_sparse_values: [num_sparse_values, embed_dim] or None
                 - None (for index_search)
                 - None (for is_specified_mask)
-                - grad_Wk: [embed_dim, embed_dim] or None
-                - grad_Wv: [embed_dim, embed_dim] or None
-                - grad_bias_k: [embed_dim] or None
-                - grad_bias_v: [embed_dim] or None
+                - grad_key_weight: [embed_dim, embed_dim] or None
+                - grad_value_weight: [embed_dim, embed_dim] or None
+                - grad_key_bias: [embed_dim] or None
+                - grad_value_bias: [embed_dim] or None
                 - grad_key_pos_encoding: [n_queries, n_keys_per_query, embed_dim] or None
                 - None (for scale_factor)
         """
@@ -636,19 +636,19 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # 1. Retrieve all inputs and set up variables
         # 2. Deduce which intermediate values need to be recalculated
         # 3. Repeat the first few steps of the forward pass
-        #   - Input and key and value projections, and unstacking the heads of q, k, and v
+        #   - Input and key and value projections, and unstacking the heads of queries, keys, and values
         #   - Calculation of the RoPE encoding and applying it to the key tensor
-        #   - Permutation of q, k, and v into batched-heads structure (as standard)
+        #   - Permutation of queries, keys, and values into batched-heads structure (as standard)
         # 4. If any gradients are required, compute the gradient of the attention scores
         #   as it is downstream of all of the input parameters which may need gradients
         # 5. If query_vector needs a gradient, compute its gradient
         # 6. If any gradients along the key branch (key projection, RoPE parameters,
-        #   or the input sparse tensor values) are needed, compute the grad of k
-        # 7. If RoPE was applied, apply its backward to the grad of k, and get the
+        #   or the input sparse tensor values) are needed, compute the grad of keys
+        # 7. If RoPE was applied, apply its backward to the grad of keys, and get the
         #   gradients of the RoPE encoding or its inputs (key positions and rope
         #   frequencies) if we need those
         # 8. If the value projection or the sparse tensor values need gradients,
-        #   compute the grad of v
+        #   compute the grad of values
         # 9. If the input key and/or value projections need gradients, compute those
         # 10. Finally, if the sparse tensor values need gradients, compute those
         #
@@ -662,10 +662,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         (
             query_tensor,
             sparse_tensor_values,
-            Wk,
-            Wv,
-            bias_k,
-            bias_v,
+            key_weight,
+            value_weight,
+            key_bias,
+            value_bias,
             key_pos_encoding,
             key_positions,
             rope_freqs,
@@ -688,8 +688,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             "sparse_values": ctx.needs_input_grad[2],
             "key_weight": ctx.needs_input_grad[5],
             "value_weight": ctx.needs_input_grad[6],
-            "key_bias": bias_k is not None and ctx.needs_input_grad[7],
-            "value_bias": bias_v is not None and ctx.needs_input_grad[8],
+            "key_bias": key_bias is not None and ctx.needs_input_grad[7],
+            "value_bias": value_bias is not None and ctx.needs_input_grad[8],
             "key_rope_encoding": (
                 key_pos_encoding is not None and ctx.needs_input_grad[9]
             ),
@@ -700,20 +700,20 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # initialize grad vars
         grad_query = None
         grad_sparse_values = None
-        grad_Wk = None
-        grad_Wv = None
-        grad_bias_k = None
-        grad_bias_v = None
+        grad_key_weight = None
+        grad_value_weight = None
+        grad_key_bias = None
+        grad_value_bias = None
         grad_key_pos_encoding = None
         grad_key_positions = None
         grad_rope_freqs = None
 
         # initialize flattened grad vars
-        grad_k_flat = None
-        grad_v_flat = None
+        grad_keys_flat = None
+        grad_values_flat = None
 
-        # initialize pre-rotation k copy for RoPE grads
-        k_unrotated_copy = None
+        # initialize pre-rotation keys copy for RoPE grads
+        keys_unrotated_copy = None
 
         if grad_output is None:
             # early return for no gradients
@@ -723,10 +723,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 grad_sparse_values,  # sparse_tensor_values
                 None,  # index_search
                 None,  # is_specified_mask
-                grad_Wk,  # Wk
-                grad_Wv,  # Wv
-                grad_bias_k,  # bias_k
-                grad_bias_v,  # bias_v
+                grad_key_weight,  # key_weight
+                grad_value_weight,  # value_weight
+                grad_key_bias,  # key_bias
+                grad_value_bias,  # value_bias
                 grad_key_pos_encoding,  # key_pos_encoding
                 grad_key_positions,  # key_positions
                 grad_rope_freqs,  # rope_freqs
@@ -743,16 +743,16 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         #### Step 3: repeat the first few operations of the forward pass
 
-        q, k, v, key_pos_encoding, selected, k_unrotated_copy = (
+        queries, keys, values, key_pos_encoding, selected, keys_unrotated_copy = (
             GatherAndSubsetAttentionFunction._forward_shared(
                 query_tensor,
                 sparse_tensor_values,
                 index_search,
                 is_specified_mask,
-                Wk,
-                Wv,
-                bias_k,
-                bias_v,
+                key_weight,
+                value_weight,
+                key_bias,
+                value_bias,
                 n_heads,
                 key_positions,
                 rope_freqs,
@@ -769,33 +769,33 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         if needed_intermediates["attn_scores"]:
             grad_attn_scores = (
                 GatherAndSubsetAttentionFunction._compute_grad_attn_scores(
-                    grad_output, v, attn_weights, is_specified_mask
+                    grad_output, values, attn_weights, is_specified_mask
                 )
             )
-        del v  # big tensor we no longer need
+        del values  # big tensor we no longer need
 
         #### Step 5: Compute query gradient
 
         if needed_grads["query"]:
             grad_query = GatherAndSubsetAttentionFunction._compute_grad_query(
-                grad_attn_scores, k, scale_factor
+                grad_attn_scores, keys, scale_factor
             )
-        del k
+        del keys
 
-        #### Step 6: Compute gradient of k, representing the entry to the key branch
+        #### Step 6: Compute gradient of keys, representing the entry to the key branch
 
-        if needed_intermediates["k"]:
+        if needed_intermediates["keys"]:
             if needed_intermediates["key_branch"]:
                 #### Step 7: Compute the backward pass of RoPE and compute the RoPE
                 #       encoding's gradient, if needed.
 
-                # combining the computation of grad_k and un-rotating it into one
+                # combining the computation of grad_keys and un-rotating it into one
                 # function makes the main backward's logic less complex
-                grad_k, grad_key_pos_encoding = (
-                    GatherAndSubsetAttentionFunction._compute_grads_k_and_pos_encoding(
+                grad_keys, grad_key_pos_encoding = (
+                    GatherAndSubsetAttentionFunction._compute_grads_keys_and_rope_encoding(
                         grad_attn_scores,
-                        q,
-                        k_unrotated_copy,
+                        queries,
+                        keys_unrotated_copy,
                         scale_factor,
                         key_pos_encoding,
                         needs_grad_k=(
@@ -810,7 +810,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                         ),
                     )
                 )
-                del k_unrotated_copy
+                del keys_unrotated_copy
 
                 #### Step 7.5: Compute the gradients of the RoPE encoding's inputs
                 #       if RoPE was computed on the fly
@@ -827,31 +827,31 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                     grad_key_pos_encoding = None
 
                 # Flatten for grad calcs
-                if grad_k is not None:
+                if grad_keys is not None:
                     # [n_queries * n_keys_per_query * n_heads, head_dim]
-                    grad_k_flat = grad_k.view(-1, embed_dim)
+                    grad_keys_flat = grad_keys.view(-1, embed_dim)
             del grad_attn_scores
-            del q
+            del queries
 
             ##### Step 8: Enter value branch
 
             if needed_intermediates["value_branch"]:
-                grad_v = GatherAndSubsetAttentionFunction._compute_grad_v(
+                grad_values = GatherAndSubsetAttentionFunction._compute_grad_values(
                     attn_weights, grad_output
                 )
 
                 # Flatten for grad calcs
                 # [n_queries * n_keys_per_query * n_heads, head_dim]
-                grad_v_flat = grad_v.view(-1, embed_dim)
+                grad_values_flat = grad_values.view(-1, embed_dim)
 
             ##### Step 9: Input projection gradients
 
             if needed_intermediates["input_projections"]:
                 # need to get at least one of the projection gradients
-                grad_Wk, grad_Wv, grad_bias_k, grad_bias_v = (
-                    GatherAndSubsetAttentionFunction._compute_grads_k_v_projections(
-                        grad_k_flat,
-                        grad_v_flat,
+                grad_key_weight, grad_value_weight, grad_key_bias, grad_value_bias = (
+                    GatherAndSubsetAttentionFunction._compute_grads_key_value_projections(
+                        grad_keys_flat,
+                        grad_values_flat,
                         selected,
                         needed_grads["key_weight"],
                         needed_grads["value_weight"],
@@ -866,10 +866,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             if needed_grads["sparse_values"]:
                 grad_sparse_values = (
                     GatherAndSubsetAttentionFunction._compute_grad_sparse_values(
-                        grad_k_flat,
-                        grad_v_flat,
-                        Wk,
-                        Wv,
+                        grad_keys_flat,
+                        grad_values_flat,
+                        key_weight,
+                        value_weight,
                         is_specified_mask,
                         sparse_tensor_values,
                         index_search,
@@ -882,10 +882,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             grad_sparse_values,  # sparse_tensor_values
             None,  # index_search
             None,  # is_specified_mask
-            grad_Wk,  # Wk
-            grad_Wv,  # Wv
-            grad_bias_k,  # bias_k
-            grad_bias_v,  # bias_v
+            grad_key_weight,  # key_weight
+            grad_value_weight,  # value_weight
+            grad_key_bias,  # key_bias
+            grad_value_bias,  # value_bias
             grad_key_pos_encoding,  # key_pos_encoding
             grad_key_positions,  # key_positions
             grad_rope_freqs,  # rope_freqs

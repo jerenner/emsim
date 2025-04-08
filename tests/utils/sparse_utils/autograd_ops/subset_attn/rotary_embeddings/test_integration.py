@@ -5,8 +5,8 @@ from hypothesis import given, settings, HealthCheck
 from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import (
     calculate_rope,
     calculate_rope_backward,
-    rotate_k,
-    rotate_k_backward,
+    rotate_keys,
+    rotate_keys_backward,
 )
 
 from .conftest import assert_close, valid_dims
@@ -57,17 +57,17 @@ class TestEndToEnd:
 
         # Forward pass
         rope_encoding = calculate_rope(key_positions, rope_freqs)
-        k_rotated = rotate_k(keys, rope_encoding)
+        keys_rotated = rotate_keys(keys, rope_encoding)
 
         # Loss and autograd backward
-        loss = k_rotated.sum()
+        loss = keys_rotated.sum()
         loss.backward()
 
         # Manual backward pass
-        grad_k_rotated = torch.ones_like(k_rotated)  # Gradient from sum() is 1
+        grad_k_rotated = torch.ones_like(keys_rotated)  # Gradient from sum() is 1
 
         # First backward through rotate_k
-        grad_k, grad_rope_encoding = rotate_k_backward(
+        grad_k, grad_rope_encoding = rotate_keys_backward(
             grad_k_rotated, keys, rope_encoding, True, True
         )
 
@@ -158,19 +158,19 @@ class TestEndToEnd:
         expected[0, 0, 2, 6] = 8.0 * cos_val
         expected[0, 0, 2, 7] = 8.0 * sin_val
 
-        k_rotated = rotate_k(keys, rope_encoding)
+        keys_rotated = rotate_keys(keys, rope_encoding)
 
         # Verify the rotation results
         assert_close(
-            k_rotated,
+            keys_rotated,
             expected,
             rtol=1e-4,
             msg="Broadcasting in rotate_k failed",
         )
 
         # Test gradient broadcasting - create dummy gradients
-        grad_k_rotated = torch.ones_like(k_rotated)
-        grad_k, grad_rope_encoding = rotate_k_backward(
+        grad_k_rotated = torch.ones_like(keys_rotated)
+        grad_k, grad_rope_encoding = rotate_keys_backward(
             grad_k_rotated, keys, rope_encoding, True, True
         )
 
@@ -225,10 +225,10 @@ class TestEndToEnd:
         )
 
         # Forward pass to get complex representations
-        k_rotated = rotate_k(keys, rope_encoding)
+        keys_rotated = rotate_keys(keys, rope_encoding)
 
         # Create arbitrary gradients for output
-        grad_output = torch.randn_like(k_rotated, device=device)
+        grad_output = torch.randn_like(keys_rotated, device=device)
 
         # Analytical gradients using the Frechet product formula
         # For complex multiplication z = x * y:
@@ -266,7 +266,7 @@ class TestEndToEnd:
         ).imag
 
         # Compare with autograd gradients
-        k_rotated.backward(grad_output)
+        keys_rotated.backward(grad_output)
 
         # Check that analytical and autograd gradients match
         assert_close(
@@ -286,7 +286,7 @@ class TestEndToEnd:
         keys.grad = None
         rope_encoding.grad = None
 
-        grad_k, grad_rope_encoding = rotate_k_backward(
+        grad_k, grad_rope_encoding = rotate_keys_backward(
             grad_output, keys, rope_encoding, True, True, True
         )
 
@@ -321,13 +321,13 @@ class TestEndToEnd:
             )
 
             # Forward pass with broadcasting
-            k_rotated_broadcast = rotate_k(keys, rope_encoding_single)
+            k_rotated_broadcast = rotate_keys(keys, rope_encoding_single)
 
             # Create same gradients for both passes
             grad_output_broadcast = torch.randn_like(k_rotated_broadcast, device=device)
 
             # Test our backward function directly with broadcasting
-            grad_k_broadcast, grad_rope_broadcast = rotate_k_backward(
+            grad_k_broadcast, grad_rope_broadcast = rotate_keys_backward(
                 grad_output_broadcast,
                 keys,
                 rope_encoding_single,

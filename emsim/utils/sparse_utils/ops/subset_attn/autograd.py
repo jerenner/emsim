@@ -27,6 +27,68 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
     """
 
     @staticmethod
+    def _forward_shared(
+        query_tensor: Tensor,
+        sparse_tensor_values: Tensor,
+        index_search: Tensor,
+        is_specified_mask: Tensor,
+        Wk: Tensor,
+        Wv: Tensor,
+        bias_k: Tensor,
+        bias_v: Tensor,
+        n_heads: int,
+        key_positions: Optional[Tensor],
+        rope_freqs: Optional[Tensor],
+        key_rope_encoding: Optional[Tensor],
+        is_for_backward: bool,  # return additional values if True
+        need_backward_key_branch: Optional[bool] = False,
+    ) -> Union[
+        tuple[Tensor, Tensor, Tensor, Tensor],  # is_for_backward False
+        tuple[
+            Tensor, Tensor, Tensor, Tensor, Tensor, Optional[Tensor]
+        ],  # is_for_backward True
+    ]:
+        """Forward pass computations that get repeated in the backward pass"""
+
+        #### Forward step 3: Sparse values selection and input projection
+        # fmt: off
+        k, v, selected = select_values_and_project_kv(
+            sparse_tensor_values, index_search, is_specified_mask,
+            Wk, Wv, bias_k, bias_v,
+        )
+        # fmt: on
+
+        [q, k, v] = [split_heads(x, n_heads) for x in [query_tensor, k, v]]
+
+        #### Forward step 4: RoPE encoding calculation
+
+        if key_positions is not None and rope_freqs is not None:
+            key_rope_encoding = calculate_rope(key_positions, rope_freqs)
+
+        #### Forward step 5: Rotate the keys by applying RoPE
+
+        k_unrotated_copy = None
+        if key_rope_encoding is not None:
+            if is_for_backward and need_backward_key_branch:
+                # used later in backward pass to compute RoPE grads
+                k_unrotated_copy = k.clone()
+            k = rotate_k(k, key_rope_encoding, needs_autograd=False)
+
+        #### Forward step 6: Permutation
+
+        # (n_heads, n_queries, head_dim)
+        q = permute_for_attention(q)
+
+        # (n_heads, n_queries, n_keys_per_query, head_dim)
+        k = permute_for_attention(k)
+        v = permute_for_attention(v)
+
+        if not is_for_backward:
+            return q, k, v, key_rope_encoding
+        else:
+            return q, k, v, key_rope_encoding, selected, k_unrotated_copy
+
+    @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
         query_tensor: Tensor,
@@ -119,8 +181,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # 9. Compute the output values by matmuling the attention weights with
         #   the value tensor, contracting out the n_queries_per_keys dimension.
 
-        # The k and v tensors are the major memory consumers because they are
-        # n_keys_per_query times larger than the q and attn_scores tensors. The
+        # The selected, k, and v tensors are the major memory consumers because they
+        # are n_keys_per_query times larger than the q and attn_scores tensors. The
         # custom autograd op lets us have each query element attend to its own
         # subset of key elements. In tensor terms, this means that the k and v
         # tensors are 4D while the q (query) tensor is 3D as in standard multi-head
@@ -219,30 +281,23 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         ctx.index_search = index_search
         ctx.is_specified_mask = is_specified_mask
 
-        #### Step 3: Sparse values selection and input projection
+        #### Steps 3-6 get repeated by backward to step into a shared helper function
 
-        # fmt: off
-        k, v, _ = select_values_and_project_kv(
-            sparse_tensor_values, index_search, is_specified_mask,
-            Wk, Wv, bias_k, bias_v,
+        q, k, v, key_pos_encoding = GatherAndSubsetAttentionFunction._forward_shared(
+            query_tensor,
+            sparse_tensor_values,
+            index_search,
+            is_specified_mask,
+            Wk,
+            Wv,
+            bias_k,
+            bias_v,
+            n_heads,
+            key_positions,
+            rope_freqs,
+            key_pos_encoding,
+            is_for_backward=False,
         )
-        # fmt: on
-
-        q, k, v = [split_heads(x, n_heads) for x in [query_tensor, k, v]]
-
-        #### Step 4: RoPE encoding calculation
-
-        if key_positions is not None and rope_freqs is not None:
-            key_pos_encoding = calculate_rope(key_positions, rope_freqs)
-
-        #### Step 5: Rotate the keys by applying RoPE
-
-        if key_pos_encoding is not None:
-            k = rotate_k(k, key_pos_encoding, needs_autograd=False)
-
-        #### Step 6: Permutation
-
-        q, k, v = [permute_for_attention(x) for x in [q, k, v]]
 
         #### Step 7: Attention scores calculation
 
@@ -659,6 +714,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         k_unrotated_copy = None
 
         if grad_output is None:
+            # early return for no gradients
             return (
                 grad_query,  # query_tensor
                 None,  # n_heads
@@ -685,35 +741,26 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         #### Step 3: repeat the first few operations of the forward pass
 
-        # recompute k, v
-        # fmt: off
-        k, v, selected = select_values_and_project_kv(
-            sparse_tensor_values, index_search, is_specified_mask,
-            Wk, Wv, bias_k, bias_v,
+        q, k, v, key_pos_encoding, selected, k_unrotated_copy = (
+            GatherAndSubsetAttentionFunction._forward_shared(
+                query_tensor,
+                sparse_tensor_values,
+                index_search,
+                is_specified_mask,
+                Wk,
+                Wv,
+                bias_k,
+                bias_v,
+                n_heads,
+                key_positions,
+                rope_freqs,
+                key_pos_encoding,
+                is_for_backward=True,
+                need_backward_key_branch=needed_intermediates["key_branch"],
+            )
         )
-        # fmt: on
 
-        if key_positions is not None and rope_freqs is not None:
-            key_pos_encoding = calculate_rope(key_positions, rope_freqs)
-
-        [grad_output, q, k, v] = [
-            split_heads(x, n_heads) for x in [grad_output, query_tensor, k, v]
-        ]
-
-        if key_pos_encoding is not None:
-            if needed_intermediates["key_branch"]:
-                # used later in backward pass to compute RoPE grads
-                k_unrotated_copy = k.clone()
-            k = rotate_k(k, key_pos_encoding, needs_autograd=False)
-
-        # split heads and permute the grad tensor and input tensors
-        # (n_heads, n_queries, head_dim)
-        grad_output = permute_for_attention(grad_output)
-        q = permute_for_attention(q)
-
-        # (n_heads, n_queries, n_keys_per_query, head_dim)
-        k = permute_for_attention(k)
-        v = permute_for_attention(v)
+        grad_output = permute_for_attention(split_heads(grad_output, n_heads))
 
         #### Step 4: Compute gradient of attention scores
 

@@ -55,15 +55,15 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
     rope_freqs_flat = rope_freqs.reshape(position_dim, -1)
 
     # Compute position encoding
-    key_pos_encoding = torch.mm(
+    key_rope_encoding = torch.mm(
         key_positions_flat,
         rope_freqs_flat,
     ).view(n_queries, n_keys_per_query, n_freq_groups, n_heads, half_head_dim)
 
     # Sum over frequency groups
     # [n_queries, n_keys_per_query, n_heads, head_dim/2]
-    key_pos_encoding = key_pos_encoding.sum(dim=2)
-    return key_pos_encoding
+    key_rope_encoding = key_rope_encoding.sum(dim=2)
+    return key_rope_encoding
 
 
 @torch.jit.script
@@ -268,7 +268,7 @@ def rotate_keys_backward(
 
 @torch.jit.script
 def calculate_rope_backward(
-    grad_key_pos_encoding: Tensor,
+    grad_key_rope_encoding: Tensor,
     key_positions: Tensor,
     rope_freqs: Tensor,
     needs_grad_key_positions: bool,
@@ -278,10 +278,10 @@ def calculate_rope_backward(
 
     This function implements the backward pass for the calculation of the rotary
     positional encoding tensor that gets multiplied with the query/key tensor. It
-    propagates the gradients from key_pos_encoding to key_positions and rope_freqs.
+    propagates the gradients from key_rope_encoding to key_positions and rope_freqs.
 
     Args:
-        grad_key_pos_encoding (Tensor): Real-valued gradient of loss with respect to
+        grad_key_rope_encoding (Tensor): Real-valued gradient of loss with respect to
             the positional encoding, of shape
             [n_queries, n_keys_per_query, n_heads, head_dim/2]
         key_positions (Tensor): Position tensor from the forward pass, of shape
@@ -307,16 +307,16 @@ def calculate_rope_backward(
         raise ValueError(
             f"Expected 4 dimensions for `rope_freqs`, got {rope_freqs.ndim}"
         )
-    if grad_key_pos_encoding.ndim != 4:
+    if grad_key_rope_encoding.ndim != 4:
         raise ValueError(
-            f"Expected 4 dimensions for `grad_key_pos_encoding`, got {grad_key_pos_encoding.ndim}"
+            f"Expected 4 dimensions for `grad_key_rope_encoding`, got {grad_key_rope_encoding.ndim}"
         )
 
     n_queries, n_keys_per_query, position_dim = key_positions.shape
     position_dim_freqs, n_freq_groups, n_heads, half_head_dim = rope_freqs.shape
 
     # potentially different than n_heads if rope_freqs was broadcasted over heads
-    expanded_n_heads = grad_key_pos_encoding.size(2)
+    expanded_n_heads = grad_key_rope_encoding.size(2)
 
     if position_dim_freqs != position_dim:
         raise ValueError(
@@ -326,7 +326,7 @@ def calculate_rope_backward(
         )
 
     # Backward of sum: distribute gradient across n_freq_groups
-    grad_mm_result = grad_key_pos_encoding.unsqueeze(2).expand(
+    grad_mm_result = grad_key_rope_encoding.unsqueeze(2).expand(
         -1, -1, n_freq_groups, -1, -1
     )
 

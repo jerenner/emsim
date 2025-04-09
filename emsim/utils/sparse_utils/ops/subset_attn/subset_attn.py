@@ -82,7 +82,8 @@ def batch_sparse_index_subset_attn(
             The frequency group dimension allows for grouping of position dimensions
             into specific frequency groups. The intention is to allow dimensions with
             potentially different spatial characteristics (e.g., x and y vs time for
-            videos) to be grouped separately. This generalization is experimental and
+            videos) to be grouped separately. If dimension i is not in frequency group j,
+            then rope_freqs[i, j] should be 0. This generalization is experimental and
             under active research. For traditional RoPE, G is 1.
         scale_factor (Optional[float]): Optional scaling factor for attention scores.
             If None, will default is 1/sqrt(M).

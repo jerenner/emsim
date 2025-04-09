@@ -20,6 +20,7 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
     frequency groups. The intention is to allow dimensions with potentially different
     frequency characteristics (e.g., x and y vs time for videos) to be grouped
     separately. This generalization is experimental and under active research.
+    If dimension i is not in frequency group j, then rope_freqs[i, j] should be 0.
     For traditional RoPE, keep n_freq_groups as 1.
 
     Args:

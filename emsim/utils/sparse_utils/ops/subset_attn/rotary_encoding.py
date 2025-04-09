@@ -18,7 +18,7 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
     memory-efficient RoPE application over many positions.
     This implementation allows for grouping of position dimensions into specific
     frequency groups. The intention is to allow dimensions with potentially different
-    frequency characteristics (e.g., x and y vs time for videos) to be grouped
+    spatial characteristics (e.g., x and y vs time for videos) to be grouped
     separately. This generalization is experimental and under active research.
     If dimension i is not in frequency group j, then rope_freqs[i, j] should be 0.
     For traditional RoPE, keep n_freq_groups as 1.
@@ -320,6 +320,11 @@ def calculate_rope_backward(
         raise ValueError(
             f"Expected 4 dimensions for `grad_key_rope_encoding`, got {grad_key_rope_encoding.ndim}"
         )
+
+    # Check for no grads needed
+    if not needs_grad_key_positions and not needs_grad_rope_freqs:
+        # Early return
+        return None, None
 
     n_queries, n_keys_per_query, position_dim = key_positions.shape
     position_dim_freqs, n_freq_groups, n_heads, half_head_dim = rope_freqs.shape

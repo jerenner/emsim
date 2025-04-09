@@ -47,6 +47,8 @@ def batch_sparse_index_subset_attn(
             You will need to add this as an extra nn.Linear layer that gets applied
             to this op's output before it gets passed to a transformer FFN block.
             The residual connection and normalization are also not included.
+        - If rotary position encoding is used, query_tensor is expected to be pre-
+            rotated before giving it to this function.
 
     Args:
         sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are

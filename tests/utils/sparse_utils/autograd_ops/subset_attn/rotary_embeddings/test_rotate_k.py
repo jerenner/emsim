@@ -44,8 +44,8 @@ class TestRotateK:
         assert_close(k_rotated, expected, rtol=1e-4, msg="Basic rotate_k failed")
 
     def test_broadcasting(self, device):
-        """Test that rope_encoding can be broadcasted over multiple heads."""
-        # Multiple heads in keys, single head in rope_encoding
+        """Test that key_rope_encoding can be broadcasted over multiple heads."""
+        # Multiple heads in keys, single head in key_rope_encoding
         keys = torch.tensor(
             [
                 # head 1
@@ -175,7 +175,7 @@ class TestRotateK:
             RuntimeError,
             match="The size of tensor a",
         ):
-            # n_heads for rope_encoding nonmatching and not 1
+            # n_heads for key_rope_encoding nonmatching and not 1
             rotate_keys(
                 torch.randn(2, 16, 8, 32, device=device),
                 torch.randn(2, 16, 4, 16, device=device),  # 16 = 32/2
@@ -503,7 +503,7 @@ class TestRotateKBackward:
             grad_k_rotated
         )
 
-        # Expected gradient for rope_encoding
+        # Expected gradient for key_rope_encoding
         grad_rope_encoding_complex = grad_k_rotated_complex * k_complex.conj()
         expected_grad_rope = (
             grad_rope_encoding_complex / rope_encoding_complex
@@ -635,7 +635,7 @@ class TestRotateKBackward:
         # Test bad key_rope_encoding - wrong dimensions
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected rope_encoding to be a 4D real tensor",
+            match="Expected key_rope_encoding to be a 4D real tensor",
         ):
             rotate_keys_backward(
                 torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
@@ -646,7 +646,7 @@ class TestRotateKBackward:
         # Test bad key_rope_encoding - wrong dtype (complex)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected rope_encoding to be a 4D real tensor",
+            match="Expected key_rope_encoding to be a 4D real tensor",
         ):
             rotate_keys_backward(
                 torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor

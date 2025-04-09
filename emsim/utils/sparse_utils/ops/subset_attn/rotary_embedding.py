@@ -179,7 +179,7 @@ def rotate_keys_backward(
         )
     if key_rope_encoding.ndim != 4 or key_rope_encoding.is_complex():
         raise ValueError(
-            "Expected rope_encoding to be a 4D real tensor, got "
+            "Expected key_rope_encoding to be a 4D real tensor, got "
             f"shape {key_rope_encoding.shape} and dtype {key_rope_encoding.dtype}"
         )
 
@@ -200,7 +200,7 @@ def rotate_keys_backward(
     # Complex multiplication gradient
     # For z = x * y, we have dL/dx = dL/dz * conj(y) and dL/dy = dL/dz * conj(x)
 
-    # Unconditionally recompute complex version of rope_encoding tensor since it's
+    # Unconditionally recompute complex version of key_rope_encoding tensor since it's
     # required by both branches
     key_rope_encoding_complex = torch.polar(
         torch.ones_like(key_rope_encoding),
@@ -248,9 +248,9 @@ def rotate_keys_backward(
                 dim=2, keepdim=True
             )
 
-        # Then compute gradient with respect to rope_encoding (the phase angle)
-        # Since rope_encoding_complex = exp(i*rope_encoding), the gradient is:
-        # dL/d(rope_encoding) = Im(dL/d(rope_encoding_complex) / rope_encoding_complex)
+        # Then compute gradient with respect to key_rope_encoding (the phase angle)
+        # Since rope_encoding_complex = exp(i*key_rope_encoding), the gradient is:
+        # dL/d(key_rope_encoding) = Im(dL/d(rope_encoding_complex) / rope_encoding_complex)
         if needs_autograd:
             grad_rope_encoding = (
                 grad_rope_encoding_complex / key_rope_encoding_complex

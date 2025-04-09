@@ -18,7 +18,7 @@ def batch_sparse_index_subset_attn(
     value_weight: Tensor,
     key_bias: Optional[Tensor] = None,
     value_bias: Optional[Tensor] = None,
-    key_pos_encoding: Optional[Tensor] = None,
+    key_rope_encoding: Optional[Tensor] = None,
     key_positions: Optional[Tensor] = None,
     rope_freqs: Optional[Tensor] = None,
     scale_factor: Optional[float] = None,
@@ -36,7 +36,7 @@ def batch_sparse_index_subset_attn(
             that do not have specified values will be masked out in the attention
             calculation similar to masking out padding in standard attention.
         - Queries whose keys are all unspecified will get an output vector of all 0.
-        - For rotary position embeddings, either provide key_pos_encoding OR both
+        - For rotary position embeddings, either provide key_rope_encoding OR both
             key_positions and rope_freqs. Providing both options simultaneously is
             not supported.
         - The output tensor has NOT gone through the output projection (W_o)
@@ -63,22 +63,22 @@ def batch_sparse_index_subset_attn(
         value_weight (Tensor): Value projection matrix of shape [M, M].
         key_bias (Optional[Tensor]): Optional bias vector for key projection of shape [M].
         value_bias (Optional[Tensor]): Optional bias vector for value projection of shape [M].
-        key_pos_encoding (Optional[Tensor]): Optional positional encoding for keys
+        key_rope_encoding (Optional[Tensor]): Optional positional encoding for keys
             of shape [..., L, n_heads, head_dim], where ... matches the batch dimensions
             from key_index_tensor. Used for rotary position embedding (RoPE). The n_heads
             dimension may also be 1, which will broadcast the encoding across heads.
-            If key_pos_encoding is specified, head_dim must be divisible by 2. Cannot be
+            If key_rope_encoding is specified, head_dim must be divisible by 2. Cannot be
             used together with key_positions and rope_freqs.
         key_positions (Optional[Tensor]): Position information for each key of shape
             [..., L, P], where ... matches the batch dimensions from key_index_tensor
             and P is the dimensionality of the position representation. Used together
             with rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
-            Cannot be used together with key_pos_encoding.
+            Cannot be used together with key_rope_encoding.
         rope_freqs (Optional[Tensor]): Frequency values for rotary embeddings of shape
             [P, G, n_heads, head_dim] or [P,G, 1, head_dim], where P matches the position
             dimension from key_positions, and G is the number of frequency groups.
             Used together with key_positions to compute rotary position embedding (RoPE)
-            on-the-fly. Cannot be used together with key_pos_encoding.
+            on-the-fly. Cannot be used together with key_rope_encoding.
         scale_factor (Optional[float]): Optional scaling factor for attention scores.
             If None, will default is 1/sqrt(M).
         check_all_specified (bool): If True, this function will raise a ValueError
@@ -126,7 +126,7 @@ def batch_sparse_index_subset_attn(
         value_weight,
         key_bias,
         value_bias,
-        key_pos_encoding,
+        key_rope_encoding,
         key_positions,
         rope_freqs,
         scale_factor,

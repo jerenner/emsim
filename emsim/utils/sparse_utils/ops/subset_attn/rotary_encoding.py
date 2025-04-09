@@ -9,7 +9,7 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
     """Computes the positional encoding for keys using the provided positions and frequency values.
 
     This function calculates the position encoding by matrix-multiplying key
-    positions with rotary frequency embeddings, then summing over frequency
+    positions with rotary frequency encodings, then summing over frequency
     groups.
     The returned positional encoding will be in real space, and must be converted
     to complex coordinates with e.g. torch.polar before multiplying with the
@@ -26,7 +26,7 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
         key_positions (Tensor): Position information for each key of shape
             [n_queries, n_keys_per_query, position_dim], where position_dim is the
             dimensionality of the position representation.
-        rope_freqs (Tensor): Frequency values for rotary embeddings of shape
+        rope_freqs (Tensor): Frequency values for rotary encodings of shape
             [position_dim, n_freq_groups, n_heads, head_dim/2], where n_freq_groups
             and n_heads can be 1 for broadcasting.
 

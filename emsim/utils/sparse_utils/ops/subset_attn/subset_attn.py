@@ -11,7 +11,7 @@ from .autograd import GatherAndSubsetAttentionFunction
 @torch.jit.script
 def batch_sparse_index_subset_attn(
     sparse_tensor: Tensor,
-    key_index_tensor: Tensor,
+    index_tensor: Tensor,
     query_tensor: Tensor,
     n_heads: int,
     key_weight: Tensor,
@@ -32,7 +32,7 @@ def batch_sparse_index_subset_attn(
     intermediate tensors, recalculating them during the backward pass as needed.
 
     Notes:
-        - Key indices in key_index_tensor pointing to spatial locations in sparse_tensor
+        - Key indices in index_tensor pointing to spatial locations in sparse_tensor
             that do not have specified values will be masked out in the attention
             calculation similar to masking out padding in standard attention.
         - Queries whose keys are all unspecified will get an output vector of all 0.
@@ -51,13 +51,13 @@ def batch_sparse_index_subset_attn(
     Args:
         sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
             S leading sparse dimensions and M is the dense feature dimension.
-        key_index_tensor (Tensor): Long tensor of dimension ..., L, S; where ... are
+        index_tensor (Tensor): Long tensor of dimension ..., L, S; where ... are
             leading batch dimensions, L is the number of keys per query, and S is
             the number of sparse dimensions. Negative indices and indices outside
             the spatial dimension of the sparse tensor are not supported and will
             be considered unspecified.
         query_tensor (Tensor): Query features of shape ..., M; where ... matches
-            the batch dimensions from key_index_tensor, and M is the feature dimension.
+            the batch dimensions from index_tensor, and M is the feature dimension.
         n_heads (int): Number of attention heads to use.
         key_weight (Tensor): Key projection matrix of shape [M, M].
         value_weight (Tensor): Value projection matrix of shape [M, M].
@@ -65,12 +65,12 @@ def batch_sparse_index_subset_attn(
         value_bias (Optional[Tensor]): Optional bias vector for value projection of shape [M].
         key_rope_encoding (Optional[Tensor]): Optional positional encoding for keys
             of shape [..., L, n_heads, head_dim], where ... matches the batch dimensions
-            from key_index_tensor. Used for rotary position embedding (RoPE). The n_heads
+            from index_tensor. Used for rotary position embedding (RoPE). The n_heads
             dimension may also be 1, which will broadcast the encoding across heads.
             If key_rope_encoding is specified, head_dim must be divisible by 2. Cannot be
             used together with key_positions and rope_freqs.
         key_positions (Optional[Tensor]): Position information for each key of shape
-            [..., L, P], where ... matches the batch dimensions from key_index_tensor
+            [..., L, P], where ... matches the batch dimensions from index_tensor
             and P is the dimensionality of the position representation. Used together
             with rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
             Cannot be used together with key_rope_encoding.
@@ -82,32 +82,32 @@ def batch_sparse_index_subset_attn(
         scale_factor (Optional[float]): Optional scaling factor for attention scores.
             If None, will default is 1/sqrt(M).
         check_all_specified (bool): If True, this function will raise a ValueError
-            if any of the indices in `key_index_tensor` are not specified in `sparse_tensor`.
+            if any of the indices in `index_tensor` are not specified in `sparse_tensor`.
             If False, unspecified indices will be masked out in the attention calculation.
             Defaults to False.
 
     Returns:
         - Tensor: Output tensor after attention of shape [..., M], where ... are the
-            batch dimensions from key_index_tensor and query_tensor.
+            batch dimensions from index_tensor and query_tensor.
         - Tensor: Boolean mask of shape [..., L], indicating which keys were actually
             specified in the sparse tensor.
     """
-    if key_index_tensor.is_nested:
+    if index_tensor.is_nested:
         raise ValueError("Nested key index tensor not supported")
-        # return __gather_nested_index(sparse_tensor, key_index_tensor, check_all_specified)
+        # return __gather_nested_index(sparse_tensor, index_tensor, check_all_specified)
 
-    if query_tensor.shape[:-1] != key_index_tensor.shape[:-2]:
+    if query_tensor.shape[:-1] != index_tensor.shape[:-2]:
         raise ValueError(
             "Expected the first n-1 dims of query_tensor and the first n-2 dims of "
             "index_tensor to match, got "
-            f"{query_tensor.shape} and {key_index_tensor.shape}"
+            f"{query_tensor.shape} and {index_tensor.shape}"
         )
 
     sparse_tensor = sparse_tensor.coalesce()
     sparse_tensor_values = sparse_tensor.values()
 
     index_search, is_specified_mask = get_sparse_index_mapping(
-        sparse_tensor, key_index_tensor
+        sparse_tensor, index_tensor
     )
     if check_all_specified and not is_specified_mask.all():
         raise ValueError(
@@ -134,6 +134,6 @@ def batch_sparse_index_subset_attn(
 
     out_shape = query_tensor.shape[:-1] + (value_weight.size(0),)
     assert attended.shape == out_shape
-    assert is_specified_mask.shape == key_index_tensor.shape[:-1]
+    assert is_specified_mask.shape == index_tensor.shape[:-1]
 
     return attended, is_specified_mask

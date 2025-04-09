@@ -108,18 +108,18 @@ def rotate_keys(
     # Convert to complex and apply rotation
     keys_complex_shape = keys.shape[:-1] + (keys.size(-1) // 2, 2)
     keys_complex = torch.view_as_complex(keys.view(keys_complex_shape))
-    rope_encoding_complex = torch.polar(
+    key_rope_encoding_complex = torch.polar(
         torch.ones_like(key_rope_encoding),
         key_rope_encoding,
     )
 
     # multiply and convert back to real
     if needs_autograd:
-        keys_rotated = keys_complex * rope_encoding_complex
+        keys_rotated = keys_complex * key_rope_encoding_complex
     else:
         # can use an in-place op rather than creating a new tensor
         keys_rotated = keys_complex
-        keys_rotated *= rope_encoding_complex
+        keys_rotated *= key_rope_encoding_complex
     keys_rotated = torch.view_as_real(keys_rotated).reshape_as(keys)
 
     return keys_rotated
@@ -162,7 +162,7 @@ def rotate_keys_backward(
         grad_keys (Tensor): Gradient tensor for the unrotated keys,
             of shape [n_queries, n_keys_per_query, n_heads, head_dim] and real dtype,
             or None if not needed
-        grad_rope_encoding (Tensor): Gradient tensor for the positional encodings
+        grad_key_rope_encoding (Tensor): Gradient tensor for the positional encodings
             of real dtype and shape
             [n_queries, n_keys_per_query, n_heads, head_dim/2] or
             [n_queries, n_keys_per_query, 1,       head_dim/2], or None if not needed
@@ -229,13 +229,15 @@ def rotate_keys_backward(
         keys_complex_shape = keys.shape[:-1] + (keys.size(-1) // 2, 2)
         keys_complex = torch.view_as_complex(keys.view(keys_complex_shape))
 
-        # Compute gradient with respect to rope_encoding_complex
+        # Compute gradient with respect to key_rope_encoding_complex
         if needs_autograd:
-            grad_rope_encoding_complex = grad_keys_rotated_complex * keys_complex.conj()
+            grad_key_rope_encoding_complex = (
+                grad_keys_rotated_complex * keys_complex.conj()
+            )
         else:
             # Can modify tensor in-place rather than creating a new one
-            grad_rope_encoding_complex = grad_keys_rotated_complex
-            grad_rope_encoding_complex *= keys_complex.conj()
+            grad_key_rope_encoding_complex = grad_keys_rotated_complex
+            grad_key_rope_encoding_complex *= keys_complex.conj()
 
         # Check if broadcasting happened
         is_broadcasted = (
@@ -244,26 +246,27 @@ def rotate_keys_backward(
 
         if is_broadcasted:
             # Sum gradients across broadcasted dimension (heads)
-            grad_rope_encoding_complex = grad_rope_encoding_complex.sum(
+            grad_key_rope_encoding_complex = grad_key_rope_encoding_complex.sum(
                 dim=2, keepdim=True
             )
 
         # Then compute gradient with respect to key_rope_encoding (the phase angle)
-        # Since rope_encoding_complex = exp(i*key_rope_encoding), the gradient is:
-        # dL/d(key_rope_encoding) = Im(dL/d(rope_encoding_complex) / rope_encoding_complex)
+        # Since key_rope_encoding_complex = exp(i*key_rope_encoding), the gradient is:
+        # dL/d(key_rope_encoding)
+        #   = Im(dL/d(key_rope_encoding_complex) / key_rope_encoding_complex)
         if needs_autograd:
-            grad_rope_encoding = (
-                grad_rope_encoding_complex / key_rope_encoding_complex
+            grad_key_rope_encoding = (
+                grad_key_rope_encoding_complex / key_rope_encoding_complex
             ).imag
         else:
             # Can modify tensor in-place rather than creating a new one
-            grad_rope_encoding = grad_rope_encoding_complex
-            grad_rope_encoding /= key_rope_encoding_complex
-            grad_rope_encoding = grad_rope_encoding.imag
+            grad_key_rope_encoding = grad_key_rope_encoding_complex
+            grad_key_rope_encoding /= key_rope_encoding_complex
+            grad_key_rope_encoding = grad_key_rope_encoding.imag
     else:
-        grad_rope_encoding = None
+        grad_key_rope_encoding = None
 
-    return grad_keys, grad_rope_encoding
+    return grad_keys, grad_key_rope_encoding
 
 
 @torch.jit.script

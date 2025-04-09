@@ -96,7 +96,7 @@ def permute_for_attention_backward(tensor: Tensor) -> Tensor:
 @torch.jit.script
 def select_values_and_project_kv(
     sparse_tensor_values: Tensor,
-    index_search: Tensor,
+    index_tensor: Tensor,
     is_specified_mask: Tensor,
     key_weight: Tensor,
     value_weight: Tensor,
@@ -109,7 +109,7 @@ def select_values_and_project_kv(
     Args:
         sparse_tensor_values (Tensor): Values from sparse tensor of shape
             [num_sparse_values, embed_dim]
-        index_search (Tensor): Long tensor of shape [n_queries, n_keys_per_query]
+        index_tensor (Tensor): Long tensor of shape [n_queries, n_keys_per_query]
             with elements corresponding to the indices of each key along
             sparse_tensor_values's first dimension. If created by
             get_sparse_index_mapping, indices of unspecified keys will be
@@ -132,10 +132,10 @@ def select_values_and_project_kv(
         - selected (Tensor): Selected features from sparse tensor before keys and values
             projections, of shape [n_queries, n_keys_per_query, embed_dim]
     """
-    assert index_search.ndim == 2
+    assert index_tensor.ndim == 2
     assert sparse_tensor_values.ndim == 2
 
-    selected = gather_and_mask(sparse_tensor_values, index_search, is_specified_mask)
+    selected = gather_and_mask(sparse_tensor_values, index_tensor, is_specified_mask)
 
     # Stack weight matrices to batch the keys and values projections
     weights_stacked = torch.cat([key_weight, value_weight])  # (2*embed_dim, embed_dim)

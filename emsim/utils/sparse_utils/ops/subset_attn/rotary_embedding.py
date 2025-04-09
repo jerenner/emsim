@@ -16,6 +16,11 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
     complex representation of the key embedding.
     This function may be used in combination with the others in its module for a
     memory-efficient RoPE application over many positions.
+    This implementation allows for grouping of position dimensions into specific
+    frequency groups. The intention is to allow dimensions with different frequency
+    characteristics (e.g., x and y vs time for videos) to be grouped separately.
+    This generalization is experimental and under active research.
+    For traditional RoPE, keep n_freq_groups as 1.
 
     Args:
         key_positions (Tensor): Position information for each key of shape

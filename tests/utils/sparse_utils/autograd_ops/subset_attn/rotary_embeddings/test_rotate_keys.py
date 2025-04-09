@@ -3,7 +3,7 @@ import torch
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import (
+from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
     rotate_keys,
     rotate_keys_backward,
 )

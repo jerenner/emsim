@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from emsim.utils.sparse_utils.indexing.script_funcs import gather_and_mask
-from emsim.utils.sparse_utils.ops.subset_attn.rotary_embedding import rotate_keys, calculate_rope
+from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import rotate_keys, calculate_rope
 
 def traceable_sparse_attention(
     query_tensor: Tensor,

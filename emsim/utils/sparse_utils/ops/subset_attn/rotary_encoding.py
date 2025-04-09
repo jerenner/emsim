@@ -17,9 +17,9 @@ def calculate_rope(key_positions: Tensor, rope_freqs: Tensor) -> Tensor:
     This function may be used in combination with the others in its module for a
     memory-efficient RoPE application over many positions.
     This implementation allows for grouping of position dimensions into specific
-    frequency groups. The intention is to allow dimensions with different frequency
-    characteristics (e.g., x and y vs time for videos) to be grouped separately.
-    This generalization is experimental and under active research.
+    frequency groups. The intention is to allow dimensions with potentially different
+    frequency characteristics (e.g., x and y vs time for videos) to be grouped
+    separately. This generalization is experimental and under active research.
     For traditional RoPE, keep n_freq_groups as 1.
 
     Args:

@@ -27,6 +27,7 @@ def sparse_index_select(
     axis: int,
     index: Tensor,
     check_bounds: bool = True,
+    disable_builtin_fallback: bool = False,
 ) -> Tensor:
     """Selects values from a sparse tensor along a specified dimension.
 
@@ -35,14 +36,10 @@ def sparse_index_select(
     tensor containing only the values at the specified indices along the given axis.
 
     This function falls back to the built-in tensor.index_select(axis, index)
-    when gradients are not required and the sparse tensor is on cpu. Benchmarking
-    on an A100 (Pytorch 2.5, CUDA 12.1) seems to indicate the built-in version is
-    alawys more memory efficient, and always faster on CPU. On CUDA, the built-in
-    version is faster if we are selecting more than about 500 indices or if there
-    are no matches at selected indices in the sparse tensor.
-    In this function, we use the built-in implementation when we don't require
-    gradients and are either on cpu or are on CUDA with "index" longer than 500
-    elements.
+    when gradients are not required. Benchmarking seems to indicate the built-in
+    version is generally faster and more memory efficient except for some specialized
+    situations on CUDA. You can always use the custom implemenation by setting this
+    function's input argument disable_builtin_fallback to True.
 
     Note that the built-in tensor.index_select will trigger mysterious errors
     of the form "RuntimeError: CUDA error: device-side assert triggered" if it is
@@ -61,6 +58,10 @@ def sparse_index_select(
             Set to False if indices are guaranteed to be in-bounds to avoid a CPU sync
             on CUDA tensors. Benchmarking shows the bounds check leads to an overhead
             of about 5% on cpu and 10% on cuda. Defaults to True.
+        disable_builtin_fallback (bool, optional): Whether to always use the custom
+            gradient-tracking version of index_select, even when gradients are not
+            needed. Does nothing if the input sparse tensor does require gradients.
+            Defaults to False.
 
     Returns:
         Tensor: A new sparse tensor containing the selected values.
@@ -101,10 +102,7 @@ def sparse_index_select(
                 f"Index tensor has entries out of bounds for axis {orig_axis} with size {tensor.shape[axis]}"
             )
 
-    if not tensor.requires_grad and (
-        tensor.is_cpu or (tensor.is_cuda and index.size(0) > 500)
-        # breakpoint of 500 could be more finely profiled
-    ):
+    if not tensor.requires_grad and not disable_builtin_fallback:
         # Fall back to built-in implementation
         return tensor.index_select(axis, index.long()).coalesce()
 

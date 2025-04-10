@@ -22,28 +22,104 @@ def sparse_select(tensor: Tensor, axis: int, index: int) -> Tensor:
 
 
 @torch.jit.script
-def sparse_index_select(tensor: Tensor, axis: int, index: Tensor) -> Tensor:
-    """Equivalent to tensor.index_select(axis, index) but with working backward"""
-    if not tensor.requires_grad:
-        return tensor.index_select(axis, index.long()).coalesce()
-    assert tensor.is_sparse
-    tensor = tensor.coalesce()
-    assert index.ndim <= 1
+def sparse_index_select(
+    tensor: Tensor,
+    axis: int,
+    index: Tensor,
+    check_bounds: bool = True,
+) -> Tensor:
+    """Selects values from a sparse tensor along a specified dimension.
+
+    This function is equivalent to tensor.index_select(axis, index) but works
+    correctly with the backward pass for sparse tensors. It returns a new sparse
+    tensor containing only the values at the specified indices along the given axis.
+
+    This function falls back to the built-in tensor.index_select(axis, index)
+    when gradients are not required and the sparse tensor is on cpu. Benchmarking
+    on an A100 (Pytorch 2.5, CUDA 12.1) seems to indicate the built-in version is
+    alawys more memory efficient, and always faster on CPU. On CUDA, the built-in
+    version is faster if we are selecting more than about 500 indices or if there
+    are no matches at selected indices in the sparse tensor.
+    In this function, we use the built-in implementation when we don't require
+    gradients and are either on cpu or are on CUDA with "index" longer than 500
+    elements.
+
+    Note that the built-in tensor.index_select will trigger mysterious errors
+    of the form "RuntimeError: CUDA error: device-side assert triggered" if it is
+    given indices outside the bounds of a sparse tensor.
+    Unlike the built-in tensor.index_select, this function validates that indices
+    are within bounds (when check_bounds=True), making it a safer alternative even
+    when gradient support isn't needed.
+
+    Args:
+        tensor (Tensor): The input sparse tensor from which to select values.
+        axis (int): The dimension along which to select values. Can be negative
+            to index from the end.
+        index (Tensor): The indices of the values to select along the specified
+            dimension. Must be a 1D tensor or scalar.
+        check_bounds (bool, optional): Whether to check if indices are within bounds.
+            Set to False if indices are guaranteed to be in-bounds to avoid a CPU sync
+            on CUDA tensors. Benchmarking shows the bounds check leads to an overhead
+            of about 5% on cpu and 10% on cuda. Defaults to True.
+
+    Returns:
+        Tensor: A new sparse tensor containing the selected values.
+
+    Raises:
+        ValueError:
+            - If the input tensor is not sparse.
+            - If the index tensor has invalid shape.
+            - If the axis is out of bounds for tensor dimensions.
+            - If check_bounds is True and the index tensor contains out-of-bounds
+              indices.
+    """
+    if not tensor.is_sparse:
+        raise ValueError("Input tensor must be sparse")
+
+    # Validate index tensor shape
+    if index.ndim > 1:
+        raise ValueError(f"Index tensor must be 0D or 1D, got {index.ndim}D")
+    elif index.ndim == 0:
+        index = index.unsqueeze(0)
+
+    # Normalize negative axis
+    orig_axis = axis
     if axis < 0:
         axis = tensor.ndim + axis
-    assert axis >= 0
-    assert (
-        index.max() <= tensor.shape[axis]
-    ), "index tensor has entries out of bounds for axis"
+
+    # Validate axis
+    if axis < 0 or axis >= tensor.ndim:
+        raise ValueError(
+            f"Axis {orig_axis} out of bounds for tensor with {tensor.ndim} dimensions"
+        )
+
+    # Validate index bounds (optional)
+    if check_bounds and index.numel() > 0:
+        out_of_bounds = ((index < 0) | (index >= tensor.shape[axis])).any()
+        if out_of_bounds:  # CPU sync happens here
+            raise ValueError(
+                f"Index tensor has entries out of bounds for axis {orig_axis} with size {tensor.shape[axis]}"
+            )
+
+    if not tensor.requires_grad and (
+        tensor.is_cpu or (tensor.is_cuda and index.size(0) > 500)
+        # breakpoint of 500 could be more finely profiled
+    ):
+        # Fall back to built-in implementation
+        return tensor.index_select(axis, index.long()).coalesce()
+
+    tensor = tensor.coalesce()
+
     tensor_indices = tensor.indices()
     tensor_values = tensor.values()
 
     new_indices, new_values = sparse_index_select_inner(
         tensor_indices, tensor_values, axis, index
     )
+
     new_shape = list(tensor.shape)
     new_shape[axis] = len(index)
-    assert len(new_shape) == tensor.ndim
+
     return torch.sparse_coo_tensor(new_indices, new_values, new_shape).coalesce()
 
 

@@ -2,34 +2,81 @@ import torch
 from torch import Tensor
 
 
-# sometimes this fucntion errors, link to potential workaround
-# https://github.com/pytorch/pytorch/issues/69078#issuecomment-1087217720
 @torch.jit.script
 def sparse_index_select_inner(
     tensor_indices: Tensor, tensor_values: Tensor, axis: int, index: Tensor
 ) -> tuple[Tensor, Tensor]:
-    index_masks = tensor_indices[axis] == index.unsqueeze(1)
-    match_count = index_masks.sum(1)
-    # selected_items = torch.where(index_masks)[1]
-    selected_items = index_masks.nonzero()[:, 1]
-    new_values = tensor_values[selected_items]
-    selected_indices = tensor_indices[:, selected_items]
-    # new_values = tensor_values.expand_as(index_masks)[index_masks]
-    # selected_indices = tensor_indices.unsqueeze(1).expand(-1, index_masks.shape[0], -1)[:, index_masks]
+    """Inner implementation of sparse_index_select.
 
-    leading_indices = selected_indices[:axis]
-    axis_indices = torch.repeat_interleave(
-        torch.arange(
-            index_masks.shape[0],
-            device=tensor_indices.device,
-            dtype=tensor_indices.dtype,
-        ),
-        match_count,
-    ).unsqueeze(0)
-    trailing_indices = selected_indices[axis + 1 :]
-    new_indices = torch.cat([leading_indices, axis_indices, trailing_indices], 0)
+    This function performs the actual selection of values from a sparse tensor's
+    internal representation. It constructs masks to identify which elements match the
+    requested indices, then builds new indices and values tensors for the result.
 
-    return new_indices, new_values
+    Args:
+        tensor_indices (Tensor): The indices tensor from a sparse COO tensor
+            (shape [sparse_dims, nnz]).
+        tensor_values (Tensor): The values tensor from a sparse COO tensor
+            (shape [nnz, ...]).
+        axis (int): The dimension along which to select values. Negative axes are
+            not supported.
+        index (Tensor): The indices of the values to select.
+
+    Returns:
+        tuple[Tensor, Tensor]: A tuple containing:
+            - new_indices (Tensor): The indices for the new sparse tensor.
+            - new_values (Tensor): The values for the new sparse tensor.
+
+    Raises:
+        ValueError: If axis is negative or out of bounds.
+    """
+    sparse_dims = tensor_indices.size(0)
+    dense_dims = tensor_values.ndim - 1
+    if axis < 0:
+        raise ValueError(
+            "`sparse_index_select_inner` does not support negative axes; got "
+            f"{axis}. Please normalize axis or use `sparse_index_select`"
+        )
+    elif axis > sparse_dims + dense_dims:
+        # required by torchscript when concatting multiple format strings
+        error_msg = "axis " + str(axis) + " is out of boundds for sparse tensor "
+        error_msg += "with" + str(sparse_dims) + " and " + str(dense_dims)
+        error_msg += " dense dims."
+        raise ValueError(error_msg)
+
+    if axis < sparse_dims:
+        # Selection along a sparse dimension
+        # Create masks for each index in the index tensor
+        index_masks = tensor_indices[axis].unsqueeze(0) == index.unsqueeze(1)
+
+        # Get indices where matches occur
+        indices_where = torch.where(index_masks)
+        selected_items = indices_where[1]
+
+        # Extract matched values and indices
+        new_values = tensor_values[selected_items]
+        selected_indices = tensor_indices[:, selected_items]
+
+        # Create new indices tensor with proper structure
+        leading_indices = selected_indices[:axis]
+        # Map matched positions to their corresponding index tensor positions
+        axis_indices = indices_where[0].unsqueeze(0)
+        trailing_indices = selected_indices[axis + 1 :]
+
+        new_indices = torch.cat([leading_indices, axis_indices, trailing_indices], 0)
+        return new_indices, new_values
+    else:
+        # Selection is along a dense dimension
+        # For dense dimensions, we need to select from the values tensor directly
+        # First, duplicate the indices for each selected position
+        new_indices = tensor_indices.clone()
+
+        # Then, select the appropriate values from the dense dimension
+        # The dense dimensions start after the nnz dimension in values
+        # So we need to adjust for that when selecting
+        dense_dim = axis - sparse_dims + 1  # +1 because first dim of values is nnz
+        new_values = torch.index_select(tensor_values, dense_dim, index)
+
+        return new_indices, new_values
 
 
 @torch.jit.script
@@ -57,7 +104,7 @@ def flattened_indices(
             - dim_linear_offsets (Tensor): The linear offsets used during flattening,
                 of shape (K,), where K is the number of flattened dimensions.
     """
-    tensor_indices = tensor.indices()
+    tensor_indices = tensor.indices()  # sparse_dim x nnz (counterintuitive)
     indices_to_flatten = tensor_indices[start_axis : end_axis + 1]
 
     # convert shape to tensor since we will be doing math on it.
@@ -70,7 +117,7 @@ def flattened_indices(
     # the trailing dimension will have a stride of 1
     dim_sizes_1 = torch.cat(
         [
-            shape[start_axis + 1 : end_axis + 1],
+            shape[start_axis : end_axis + 1],
             torch.ones(1, device=tensor.device, dtype=torch.long),
         ]
     )
@@ -78,7 +125,10 @@ def flattened_indices(
     # calculate linear offsets for each multidimensional axis's step
     # i.e., for dims [d0, d1, d2], the offsets would be [d1*d2, d2, 1].
     # we accomplish this with a reversed cumprod
-    dim_linear_offsets = dim_sizes_1.flip([0]).cumprod(0).flip([0])
+    reverse_cumprod = dim_sizes_1.flip([0]).cumprod(0).flip([0])
+    flattened_dim_size, dim_linear_offsets = torch.split(
+        reverse_cumprod, [1, reverse_cumprod.size(0) - 1]
+    )
 
     # compute strided 1D indices over the flattened dims by summing each axis's
     # individual contribution
@@ -87,7 +137,7 @@ def flattened_indices(
 
     # make new shape with the flattened axes stacked together
     new_shape = torch.cat(
-        [shape[:start_axis], dim_sizes_1.prod(0, keepdim=True), shape[end_axis + 1 :]]
+        [shape[:start_axis], flattened_dim_size, shape[end_axis + 1 :]]
     )
     # this assertion shouldn't cause a cpu sync
     assert new_shape.size(0) == tensor.ndim - (end_axis - start_axis)

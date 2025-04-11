@@ -74,13 +74,13 @@ def batch_sparse_index_subset_attn(
         key_positions (Optional[Tensor]): Position information for each key of shape
             [..., L, P], where ... matches the batch dimensions from index_tensor
             and P is the dimensionality of the position representation. Used together
-            with rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
+            with rope_freqs to compute rotary position embedding (RoPE) from frequencies.
             Cannot be used together with key_rope_encoding.
         rope_freqs (Optional[Tensor]): Frequency values for rotary encodings of shape
-            [P, G, n_heads, head_dim] or [P,G, 1, head_dim], where P matches the position
+            [P, G, n_heads, head_dim] or [P, G, 1, head_dim], where P matches the position
             dimension from key_positions, and G is the number of frequency groups.
             Used together with key_positions to compute rotary position embedding (RoPE)
-            on-the-fly. Cannot be used together with key_rope_encoding.
+            from frequencies. Cannot be used together with key_rope_encoding.
             The frequency group dimension allows for grouping of position dimensions
             into specific frequency groups. The intention is to allow dimensions with
             potentially different spatial characteristics (e.g., x and y vs time for

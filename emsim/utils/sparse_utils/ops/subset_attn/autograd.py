@@ -5,8 +5,8 @@ from torch import Tensor
 
 from .rotary_encoding import (
     calculate_rope,
-    rotate_keys,
-    rotate_keys_backward,
+    rotate_embeddings,
+    rotate_embeddings_backward,
     calculate_rope_backward,
 )
 from .autograd_helpers import (
@@ -30,7 +30,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
     def _forward_shared(
         query_tensor: Tensor,
         sparse_tensor_values: Tensor,
-        index_tensor: Tensor,
+        linear_index_tensor: Tensor,
         is_specified_mask: Tensor,
         key_weight: Tensor,
         value_weight: Tensor,
@@ -53,7 +53,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         #### Forward step 3: Sparse values selection and input projection
         # fmt: off
         keys, values, selected = select_values_and_project_kv(
-            sparse_tensor_values, index_tensor, is_specified_mask,
+            sparse_tensor_values, linear_index_tensor, is_specified_mask,
             key_weight, value_weight, key_bias, value_bias,
         )
         # fmt: on
@@ -76,7 +76,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             if is_for_backward and need_backward_key_branch:
                 # used later in backward pass to compute RoPE grads
                 keys_unrotated_copy = keys.clone()
-            keys = rotate_keys(keys, key_rope_encoding, needs_autograd=False)
+            keys = rotate_embeddings(keys, key_rope_encoding, needs_autograd=False)
 
         #### Forward step 6: Permutation
 
@@ -105,7 +105,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         query_tensor: Tensor,
         n_heads: int,
         sparse_tensor_values: Tensor,
-        index_tensor: Tensor,
+        linear_index_tensor: Tensor,
         is_specified_mask: Tensor,
         key_weight: Tensor,
         value_weight: Tensor,
@@ -128,11 +128,11 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             n_heads (int): Number of attention heads
             sparse_tensor_values (Tensor): Values from sparse tensor of shape
                 [num_sparse_values, embed_dim]
-            index_tensor (Tensor): Long tensor of shape [n_queries, n_keys_per_query]
-                with elements corresponding to the indices of each key along
-                sparse_tensor_values's first dimension. If created by
-                get_sparse_index_mapping, indices of unspecified keys will be
-                masked to 0 to potentially speed up lookup.
+            linear_index_tensor (Tensor): Long tensor of shape
+                [n_queries, n_keys_per_query] with elements corresponding to the
+                indices of each key/value element along sparse_tensor_values's first
+                dimension. If created by get_sparse_index_mapping, indices of
+                unspecified keys will be masked to 0 to potentially speed up lookup.
             is_specified_mask (Tensor): Boolean mask of shape
                 [n_queries, n_keys_per_query] indicating which indices are
                 specified in the sparse tensor
@@ -146,13 +146,13 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 and rope_freqs.
             key_positions (Optional[Tensor]): Position information for each key of
                 shape [n_queries, n_keys_per_query, position_dim]. Used together with
-                rope_freqs to compute rotary position embedding (RoPE) on-the-fly.
+                rope_freqs to compute rotary position embedding (RoPE) from frequencies.
                 Cannot be used together with key_rope_encoding.
             rope_freqs (Optional[Tensor]): Frequency values for rotary embeddings of
                 shape [position_dim, n_freq_groups, n_heads, head_dim/2] or
                 [position_dim, n_freq_groups, 1, head_dim/2]. Used together with
-                key_positions to compute rotary position embedding (RoPE) on-the-fly.
-                Cannot be used together with key_rope_encoding.
+                key_positions to compute rotary position embedding (RoPE) from
+                frequencies. Cannot be used together with key_rope_encoding.
                 This implementation allows for grouping of position dimensions into
                 specific frequency groups. The intention is to allow dimensions with
                 potentially different spatial characteristics (e.g., x and y vs time
@@ -212,15 +212,15 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         #### Step 1: shape checks
 
         assert query_tensor.ndim == 2  # (n_queries, embed_dim)
-        assert index_tensor.ndim == 2  # (n_queries, n_keys_per_query)
+        assert linear_index_tensor.ndim == 2  # (n_queries, n_keys_per_query)
 
         n_queries = query_tensor.size(0)
         embed_dim = query_tensor.size(1)
-        n_keys_per_query = index_tensor.size(1)
+        n_keys_per_query = linear_index_tensor.size(1)
         head_dim = embed_dim // n_heads
 
-        assert query_tensor.size(0) == index_tensor.size(0) == n_queries
-        assert index_tensor.shape == is_specified_mask.shape
+        assert query_tensor.size(0) == linear_index_tensor.size(0) == n_queries
+        assert linear_index_tensor.shape == is_specified_mask.shape
         assert key_weight.ndim == 2
         assert value_weight.ndim == 2
 
@@ -301,7 +301,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             key_positions,
             rope_freqs,
         )
-        ctx.index_tensor = index_tensor
+        ctx.index_tensor = linear_index_tensor
         ctx.is_specified_mask = is_specified_mask
 
         #### Steps 3-6 get repeated by backward so step into a shared helper function
@@ -310,7 +310,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             GatherAndSubsetAttentionFunction._forward_shared(
                 query_tensor,
                 sparse_tensor_values,
-                index_tensor,
+                linear_index_tensor,
                 is_specified_mask,
                 key_weight,
                 value_weight,
@@ -830,7 +830,7 @@ def _compute_grads_keys_and_rope_encoding(
 
     if key_rope_encoding is not None:
         # Handle backpropagation through RoPE
-        grad_keys, grad_key_rope_encoding = rotate_keys_backward(
+        grad_keys, grad_key_rope_encoding = rotate_embeddings_backward(
             grad_keys_maybe_rotated,
             keys,
             key_rope_encoding,

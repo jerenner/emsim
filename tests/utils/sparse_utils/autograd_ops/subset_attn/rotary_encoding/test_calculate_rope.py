@@ -7,7 +7,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
     calculate_rope_backward,
 )
 
-from .conftest import assert_close, even_dims, valid_dims
+from .conftest import assert_close, even_dims, valid_dims, batch_dims_strategy
 
 
 @pytest.mark.cuda_if_available
@@ -120,24 +120,23 @@ class TestCalculateRope:
 
     def test_error_conditions(self, device):
         """Test that appropriate errors are raised for invalid inputs."""
-        # Test 2D positions (should be 3D)
+        # Test 1D positions (should be at least 2D)
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="Expected 3 dimensions"
+            (ValueError, torch.jit.Error), match="Expected at least 2 dimensions"
         ):
             calculate_rope(
-                torch.randn(2, 3, device=device), torch.randn(3, 1, 1, 4, device=device)
+                torch.randn(2, device=device), torch.randn(3, 1, 1, 6, device=device)
             )
 
         # Test 3D rope_freqs (should be 4D)
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="Expected 4 dimnensions"
+            (ValueError, torch.jit.Error), match="Expected 4 dimensions"
         ):
             calculate_rope(
                 torch.randn(2, 3, 4, device=device),
                 torch.randn(4, 2, 6, device=device),
             )
-
-        # Test dimension mismatch
+        # Test head dimension mismatch
         with pytest.raises(
             (ValueError, torch.jit.Error), match="Expected first dimension"
         ):
@@ -146,9 +145,26 @@ class TestCalculateRope:
                 torch.randn(3, 1, 1, 6, device=device),
             )
 
+    def test_extended_batch_dims(self, device):
+        """Test inputs with lots of batch dimensions"""
+        batch_dims = [2, 4, 6, 8]
+        positions = torch.randn(*batch_dims, 3, device=device)  # position_dim = 3
+
+        rope_freqs = torch.randn(
+            3,  # position_dim
+            2,
+            2,  # n_heads
+            4,  # n_heads/2
+            device=device,
+        )
+
+        expected_shape = (*batch_dims, 2, 4)
+        result = calculate_rope(positions, rope_freqs)
+
+        assert result.shape == expected_shape
+
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         position_dim=valid_dims(),
         n_freq_groups=valid_dims(),
         n_heads=valid_dims(),
@@ -157,8 +173,7 @@ class TestCalculateRope:
     @settings(deadline=None, suppress_health_check=[HealthCheck.differing_executors])
     def test_property_shapes(
         self,
-        n_queries,
-        n_keys_per_query,
+        batch_dims,
         position_dim,
         n_freq_groups,
         n_heads,
@@ -168,14 +183,14 @@ class TestCalculateRope:
         """Property-based test to ensure output shapes are correct."""
         # Test with 4D rope_freqs (position_dim, n_freq_groups, n_heads, head_dim/2)
         positions = torch.randn(
-            n_queries, n_keys_per_query, position_dim, device=device
+            *batch_dims, position_dim, device=device
         )
         rope_freqs = torch.randn(
             position_dim, n_freq_groups, n_heads, head_dim, device=device
         )
 
         result = calculate_rope(positions, rope_freqs)
-        assert result.shape == (n_queries, n_keys_per_query, n_heads, head_dim)
+        assert result.shape == (*batch_dims, n_heads, head_dim)
 
         # Test with broadcasting dimensions
         rope_freqs_broadcast = torch.randn(
@@ -183,8 +198,7 @@ class TestCalculateRope:
         )
         result_broadcast = calculate_rope(positions, rope_freqs_broadcast)
         assert result_broadcast.shape == (
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim,
         )
@@ -271,6 +285,27 @@ class TestCalculateRopeBackward:
             expected_grad_rope_freqs,
             msg="Gradients for rope_freqs incorrect",
         )
+
+    def test_extended_batch_dims(self, device):
+        """Test inputs with lots of batch dimensions"""
+        batch_dims = [2, 4, 6, 8]
+        n_heads = 2
+        half_head_dim = 4
+        position_dim = 3
+        n_freq_groups = 2
+        grad_rope_encoding = torch.randn(*batch_dims, n_heads, half_head_dim)
+        positions = torch.randn(*batch_dims, position_dim)
+        rope_freqs = torch.randn(position_dim, n_freq_groups, n_heads, half_head_dim)
+
+        expected_shape_grad_positions = (*batch_dims, position_dim)
+        expected_shape_grad_rope_freqs = rope_freqs.shape
+
+        grad_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_rope_encoding, positions, rope_freqs, True, True
+        )
+
+        assert grad_positions.shape == expected_shape_grad_positions
+        assert grad_rope_freqs.shape == expected_shape_grad_rope_freqs
 
     def test_head_broadcasting(self, device):
         """Test with broadcasting in the n_heads dimension."""
@@ -457,18 +492,25 @@ class TestCalculateRopeBackward:
 
     def test_error_conditions(self, device):
         """Test that appropriate errors are raised for invalid inputs."""
+        batch_dims = [2, 4, 6]
+        n_heads = 4
+        head_dim = 8
+        position_dim = 3
+        n_freq_groups = 2
         grad_rope_encoding = torch.randn(
-            3, 4, 2, 6, device=device
-        )  # [n_queries, n_keys_per_query, n_heads, head_dim/2]
+            *batch_dims, n_heads, head_dim // 2, device=device
+        )  # [2, 4, 6, n_heads, head_dim/2]
+        positions = torch.randn(*batch_dims, position_dim, device=device)
+        rope_freqs = torch.randn(position_dim, n_freq_groups, n_heads, head_dim // 2)
 
-        # Test 2D positions (should be 3D)
+        # Test 1D positions (should be at least 2D)
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="Expected 3 dimensions"
+            (ValueError, torch.jit.Error), match="Expected at least 2 dimensions"
         ):
             calculate_rope_backward(
                 grad_rope_encoding,
-                torch.randn(3, 2, device=device),
-                torch.randn(2, 1, 2, 6, device=device),
+                torch.randn(position_dim, device=device),
+                rope_freqs,
                 True,
                 True,
             )
@@ -479,20 +521,46 @@ class TestCalculateRopeBackward:
         ):
             calculate_rope_backward(
                 grad_rope_encoding,
-                torch.randn(3, 4, 2, device=device),
+                positions,
                 torch.randn(2, 1, 6, device=device),
                 True,
                 True,
             )
 
-        # Test dimension mismatch between positions and rope_freqs
+        # Test 2D grad_rope_encoding (should be at least 3D)
+        with pytest.raises(
+            (ValueError, torch.jit.Error), match="Expected at least 3 dimensions"
+        ):
+            calculate_rope_backward(
+                torch.randn(n_heads, head_dim // 2, device=device),
+                positions,
+                rope_freqs,
+                True,
+                True,
+            )
+
+        # Test position_dim mismatch between positions and rope_freqs
         with pytest.raises(
             (ValueError, torch.jit.Error), match="Expected first dimension"
         ):
             calculate_rope_backward(
                 grad_rope_encoding,
-                torch.randn(3, 4, 2, device=device),
-                torch.randn(3, 1, 2, 6, device=device),  # position_dim=3 doesn't match
+                positions,
+                torch.randn(
+                    position_dim - 1, n_freq_groups, n_heads, head_dim, device=device
+                ),
+                True,
+                True,
+            )
+
+        # Test mismatched batch dims between grad_rope_encoding and positions
+        with pytest.raises(
+            (ValueError, torch.jit.Error), match="Expected matching batch dims"
+        ):
+            calculate_rope_backward(
+                grad_rope_encoding,
+                positions[0],
+                rope_freqs,
                 True,
                 True,
             )

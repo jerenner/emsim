@@ -15,8 +15,6 @@ from .conftest import assert_close
 class TestRotateEmbeddings:
     """Tests for the rotate_tensor function."""
 
-    n_queries = 4
-    n_keys_per_query = 6
     n_heads = 2
     head_dim = 8
 
@@ -42,6 +40,22 @@ class TestRotateEmbeddings:
         k_rotated = rotate_embeddings(embeddings, angles)
 
         assert_close(k_rotated, expected, rtol=1e-4, msg="Basic rotate_tensor failed")
+
+    def test_extended_batch_dims(self, device):
+        """Test with lots of batch dimensions"""
+        batch_dims = [2, 4, 6, 8]
+
+        embeddings = torch.randn(
+            *batch_dims, self.n_heads, self.head_dim, device=device
+        )
+        rope_encoding = torch.randn(
+            *batch_dims, self.n_heads, self.head_dim // 2, device=device
+        )
+
+        expected_embeddings_rotated_shape = (*batch_dims, self.n_heads, self.head_dim)
+        embeddings_rotated = rotate_embeddings(embeddings, rope_encoding)
+
+        assert embeddings_rotated.shape == expected_embeddings_rotated_shape
 
     def test_broadcasting(self, device):
         """Test that rope_encoding can be broadcasted over multiple heads."""
@@ -101,7 +115,7 @@ class TestRotateEmbeddings:
         # Test embeddings of invalid shape
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected embeddings and rope_encoding to be 4D",
+            match="Expected embeddings and rope_encoding to have the same",
         ):
             rotate_embeddings(
                 torch.randn(2, 3, 4, device=device),
@@ -110,7 +124,7 @@ class TestRotateEmbeddings:
         # Test rope_encoding of invalid shape
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected embeddings and rope_encoding to be 4D",
+            match="Expected embeddings and rope_encoding to have the same",
         ):
             rotate_embeddings(
                 torch.randn(2, 3, 4, 8, device=device),
@@ -274,7 +288,7 @@ class TestRotateEmbeddings:
 
 
 @pytest.mark.cuda_if_available
-class TestRotateTensorProperties:
+class TestRotateEmbeddingsProperties:
 
     @given(
         n_queries=st.integers(1, 10),
@@ -483,8 +497,11 @@ class TestRotateTensorProperties:
 
 
 @pytest.mark.cuda_if_available
-class TestRotateTensorBackward:
+class TestRotateEmbeddingsBackward:
     """Tests for the rotate_tensor_backward function."""
+
+    n_heads = 2
+    head_dim = 8
 
     def test_basic_functionality(self, device):
         """Test basic operation with simple inputs."""
@@ -532,6 +549,29 @@ class TestRotateTensorBackward:
             grad_embeddings, expected_grad_emb, msg="Gradients for embeddings incorrect"
         )
         assert_close(grad_rope, expected_grad_rope, msg="Gradients for rope incorrect")
+
+    def test_extended_batch_dims(self, device):
+        """Test with lots of batch dimensions"""
+        batch_dims = [2, 4, 6, 8]
+
+        grad_embeddings_rotated = torch.randn(
+            *batch_dims, self.n_heads, self.head_dim, device=device
+        )
+        embeddings = torch.randn(
+            *batch_dims, self.n_heads, self.head_dim, device=device
+        )
+        rope_encoding = torch.randn(
+            *batch_dims, self.n_heads, self.head_dim // 2, device=device
+        )
+
+        expected_grad_embeddings_shape = embeddings.shape
+        expected_grad_rope_encoding_shape = rope_encoding.shape
+        grad_embeddings, grad_rope_encoding = rotate_embeddings_backward(
+            grad_embeddings_rotated, embeddings, rope_encoding, True, True
+        )
+
+        assert grad_embeddings.shape == expected_grad_embeddings_shape
+        assert grad_rope_encoding.shape == expected_grad_rope_encoding_shape
 
     def test_needs_autograd_optimization(self, device):
         """Test that needs_autograd=False optimizes memory usage."""
@@ -610,7 +650,7 @@ class TestRotateTensorBackward:
         # Test bad grad_embeddings_rotated - wrong dimensions
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected grad_embeddings_rotated to be a 4D real tensor",
+            match="grad_embeddings_rotated and embeddings to have the same shape",
         ):
             rotate_embeddings_backward(
                 torch.randn(2, 4, 6, device=device),  # Not 4D
@@ -618,10 +658,21 @@ class TestRotateTensorBackward:
                 torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
             )
 
+        # Test bad embeddings - wrong dimensions
+        with pytest.raises(
+            (ValueError, torch.jit.Error),
+            match="grad_embeddings_rotated and embeddings to have the same shape",
+        ):
+            rotate_embeddings_backward(
+                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
+                torch.randn(2, 4, 6, device=device),  # Not 4D
+                torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
+            )
+
         # Test bad grad_embeddings_rotated - wrong dtype (complex)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected grad_embeddings_rotated to be a 4D real tensor",
+            match="grad_embeddings_rotated and embeddings to be real",
         ):
             rotate_embeddings_backward(
                 torch.randn(
@@ -631,26 +682,15 @@ class TestRotateTensorBackward:
                 torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
             )
 
-        # Test bad embeddings - wrong dimensions
-        with pytest.raises(
-            (ValueError, torch.jit.Error),
-            match="Expected embeddings to be a 4D real tensor",
-        ):
-            rotate_embeddings_backward(
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
-                torch.randn(2, 4, 6, device=device),  # Not 4D
-                torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
-            )
-
         # Test bad embeddings - wrong dtype (complex)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected embeddings to be a 4D real tensor",
+            match="grad_embeddings_rotated and embeddings to be real",
         ):
             rotate_embeddings_backward(
                 torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
                 torch.randn(
-                    2, 4, 6, 4, dtype=torch.complex64, device=device
+                    2, 4, 6, 8, dtype=torch.complex64, device=device
                 ),  # Not real
                 torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
             )
@@ -658,7 +698,7 @@ class TestRotateTensorBackward:
         # Test bad rope_encoding - wrong dimensions
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected rope_encoding to be a 4D real tensor",
+            match="Expected embeddings and rope_encoding to have the same number",
         ):
             rotate_embeddings_backward(
                 torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
@@ -669,7 +709,7 @@ class TestRotateTensorBackward:
         # Test bad rope_encoding - wrong dtype (complex)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected rope_encoding to be a 4D real tensor",
+            match="Expected rope_encoding to be real",
         ):
             rotate_embeddings_backward(
                 torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
@@ -677,4 +717,15 @@ class TestRotateTensorBackward:
                 torch.randn(
                     2, 4, 6, 4, dtype=torch.complex64, device=device
                 ),  # Not real
+            )
+
+        # Test bad shapes - wrong trailing dims for rope
+        with pytest.raises(
+            (ValueError, torch.jit.Error),
+            match="Expected rope_encoding's last dimension",
+        ):
+            rotate_embeddings_backward(
+                torch.randn(2, 4, 6, 8, device=device),
+                torch.randn(2, 4, 6, 8, device=device),
+                torch.randn(2, 4, 6, 3, device=device),
             )

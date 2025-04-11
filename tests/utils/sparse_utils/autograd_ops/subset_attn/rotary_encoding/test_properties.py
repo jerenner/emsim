@@ -14,6 +14,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
 from .conftest import (
     assert_close,
     valid_dims,
+    batch_dims_strategy,
 )
 
 
@@ -22,8 +23,7 @@ class TestHypothesis:
     """Property-based tests using hypothesis."""
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         position_dim=valid_dims(),
         n_freq_groups=valid_dims(),
         n_heads=valid_dims(),
@@ -36,8 +36,7 @@ class TestHypothesis:
     )
     def test_calculate_rope_gradient_consistency(
         self,
-        n_queries,
-        n_keys_per_query,
+        batch_dims,
         position_dim,
         n_freq_groups,
         n_heads,
@@ -47,8 +46,7 @@ class TestHypothesis:
         """Property-based test to verify gradients are consistent with autograd."""
         # Create tensors that require gradients
         positions = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             position_dim,
             requires_grad=True,
             device=device,
@@ -97,8 +95,7 @@ class TestHypothesis:
         )
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         n_heads=valid_dims(),
         head_dim_half=valid_dims(),
     )
@@ -108,15 +105,14 @@ class TestHypothesis:
         suppress_health_check=[HealthCheck.differing_executors],
     )
     def test_rotate_embeddings_gradient_consistency(
-        self, device, n_queries, n_keys_per_query, n_heads, head_dim_half
+        self, device, batch_dims, n_heads, head_dim_half
     ):
         """Test that rotate_embeddings gradients are consistent with autograd."""
         head_dim = head_dim_half * 2  # Ensure head_dim is even
 
         # Create tensors requiring gradients
         embeddings = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim,
             requires_grad=True,
@@ -124,8 +120,7 @@ class TestHypothesis:
             dtype=torch.double,
         )
         rope_encoding = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim_half,
             requires_grad=True,
@@ -168,8 +163,7 @@ class TestHypothesis:
         )
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         position_dim=valid_dims(),
         n_freq_groups=valid_dims(),
         n_heads=valid_dims(),
@@ -183,8 +177,7 @@ class TestHypothesis:
     def test_numerical_stability(
         self,
         device,
-        n_queries,
-        n_keys_per_query,
+        batch_dims,
         position_dim,
         n_freq_groups,
         n_heads,
@@ -194,8 +187,7 @@ class TestHypothesis:
         # Test with very small values
         positions_small = (
             torch.rand(
-                n_queries,
-                n_keys_per_query,
+                *batch_dims,
                 position_dim,
                 device=device,
                 dtype=torch.double,
@@ -217,8 +209,7 @@ class TestHypothesis:
         # Test with very large values
         positions_large = (
             torch.rand(
-                n_queries,
-                n_keys_per_query,
+                *batch_dims,
                 position_dim,
                 device=device,
                 dtype=torch.double,
@@ -247,10 +238,9 @@ class TestHypothesis:
         assert not torch.isinf(result_large).any(), "Large values produced infinities"
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         n_heads=valid_dims(),
-        head_dim_half=valid_dims(),
+        half_head_dim=valid_dims(),
     )
     @settings(
         deadline=None,
@@ -258,14 +248,13 @@ class TestHypothesis:
         suppress_health_check=[HealthCheck.differing_executors],
     )
     def test_linearity_of_gradients(
-        self, device, n_queries, n_keys_per_query, n_heads, head_dim_half
+        self, device, batch_dims, n_heads, half_head_dim
     ):
         """Test that gradients follow linearity property."""
-        head_dim = head_dim_half * 2  # Ensure head_dim is even
+        head_dim = half_head_dim * 2  # Ensure head_dim is even
 
         embeddings = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim,
             requires_grad=True,
@@ -273,10 +262,9 @@ class TestHypothesis:
             dtype=torch.double,
         )
         rope_encoding = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
-            head_dim_half,
+            half_head_dim,
             requires_grad=True,
             device=device,
             dtype=torch.double,
@@ -326,7 +314,7 @@ class TestHypothesis:
             expected_keys_grad,
             rtol=1e-4,
             atol=1e-7,
-            msg="Gradients don't satisfy linearity for keys",
+            msg="Gradients don't satisfy linearity for embeddings",
         )
         assert_close(
             rope_encoding_grad_combined,
@@ -337,8 +325,7 @@ class TestHypothesis:
         )
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         position_dim=valid_dims(),
         n_freq_groups=valid_dims(),
         n_heads=valid_dims(),
@@ -352,17 +339,16 @@ class TestHypothesis:
     def test_rope_permutation_invariance(
         self,
         device,
-        n_queries,
-        n_keys_per_query,
+        batch_dims,
         position_dim,
         n_freq_groups,
         n_heads,
         half_head_dim,
     ):
-        """Test that permutation of queries doesn't affect batch independence."""
+        """Test that permutation of embeddings doesn't affect batch independence."""
         # Create inputs
         positions = torch.randn(
-            n_queries, n_keys_per_query, position_dim, device=device, dtype=torch.double
+            *batch_dims, position_dim, device=device, dtype=torch.double
         )
         rope_freqs = torch.randn(
             position_dim,
@@ -376,8 +362,8 @@ class TestHypothesis:
         # Get results
         result = calculate_rope(positions, rope_freqs)
 
-        # Create a permutation of the queries
-        permuted_indices = torch.randperm(n_queries, device=device)
+        # Create a permutation of the embeddings
+        permuted_indices = torch.randperm(positions.size(0), device=device)
         positions_permuted = positions[permuted_indices]
 
         # Get results for permuted input
@@ -391,10 +377,9 @@ class TestHypothesis:
         )
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         n_heads=valid_dims(),
-        head_dim_half=valid_dims(),
+        half_head_dim=valid_dims(),
     )
     @settings(
         deadline=None,
@@ -402,15 +387,14 @@ class TestHypothesis:
         suppress_health_check=[HealthCheck.differing_executors],
     )
     def test_complex_multiplication_properties(
-        self, device, n_queries, n_keys_per_query, n_heads, head_dim_half
+        self, device, batch_dims, n_heads, half_head_dim
     ):
         """Test complex multiplication properties in RoPE implementation."""
-        head_dim = head_dim_half * 2  # Ensure head_dim is even
+        head_dim = half_head_dim * 2  # Ensure head_dim is even
 
         # Create unit vectors for testing complex arithmetic properties
         embeddings = torch.zeros(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim,
             device=device,
@@ -421,18 +405,16 @@ class TestHypothesis:
 
         # Create rotation vectors (equivalent to e^{iθ})
         theta = torch.rand(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
-            head_dim_half,
+            half_head_dim,
             device=device,
             dtype=torch.double,
         ) * (2 * math.pi)
         rope_encoding = torch.zeros(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
-            head_dim_half,
+            half_head_dim,
             device=device,
             dtype=torch.double,
         )
@@ -441,15 +423,15 @@ class TestHypothesis:
         # Rotation should preserve magnitude (|z| = |e^{iθ}z| = |z|)
         embeddings_rotated = rotate_embeddings(embeddings, rope_encoding)
 
-        # Convert keys to complex for magnitude calculation
+        # Convert embeddings to complex for magnitude calculation
         embeddings_complex_view = embeddings.view(
-            embeddings.shape[:-1] + (head_dim_half, 2)
+            embeddings.shape[:-1] + (half_head_dim, 2)
         )
         embeddings_complex = torch.view_as_complex(embeddings_complex_view)
 
-        # Convert rotated keys to complex
+        # Convert rotated embeddings to complex
         emb_rotated_complex_view = embeddings_rotated.view(
-            embeddings_rotated.shape[:-1] + (head_dim_half, 2)
+            embeddings_rotated.shape[:-1] + (half_head_dim, 2)
         )
         emb_rotated_complex = torch.view_as_complex(emb_rotated_complex_view)
 
@@ -465,8 +447,7 @@ class TestHypothesis:
         )
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         position_dim=valid_dims(),
         n_freq_groups=valid_dims(),
         n_heads=valid_dims(),
@@ -480,8 +461,7 @@ class TestHypothesis:
     def test_zeros_ones_edge_cases(
         self,
         device,
-        n_queries,
-        n_keys_per_query,
+        batch_dims,
         position_dim,
         n_freq_groups,
         n_heads,
@@ -490,7 +470,7 @@ class TestHypothesis:
         """Test edge cases with zeros and ones."""
         # All zeros
         positions_zeros = torch.zeros(
-            n_queries, n_keys_per_query, position_dim, device=device, dtype=torch.double
+            *batch_dims, position_dim, device=device, dtype=torch.double
         )
         rope_freqs_ones = torch.ones(
             position_dim,
@@ -508,7 +488,7 @@ class TestHypothesis:
 
         # All ones
         key_positions_ones = torch.ones(
-            n_queries, n_keys_per_query, position_dim, device=device, dtype=torch.double
+            *batch_dims, position_dim, device=device, dtype=torch.double
         )
         rope_freqs_ones = torch.ones(
             position_dim,
@@ -521,8 +501,7 @@ class TestHypothesis:
 
         # Result should be sum over position_dim for each frequency group
         expected = torch.ones(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             half_head_dim,
             device=device,
@@ -537,8 +516,7 @@ class TestHypothesis:
         )
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         n_heads=valid_dims(),
         head_dim_half=valid_dims(),
         seed=st.integers(min_value=0, max_value=10000),
@@ -549,7 +527,7 @@ class TestHypothesis:
         suppress_health_check=[HealthCheck.differing_executors],
     )
     def test_determinism(
-        self, device, n_queries, n_keys_per_query, n_heads, head_dim_half, seed
+        self, device, batch_dims, n_heads, head_dim_half, seed
     ):
         """Test deterministic behavior with same seed."""
         head_dim = head_dim_half * 2  # Ensure head_dim is even
@@ -557,16 +535,14 @@ class TestHypothesis:
         # Set seed
         torch.manual_seed(seed)
         embeddings_1 = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim,
             device=device,
             dtype=torch.double,
         )
         rope_encoding_1 = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim_half,
             device=device,
@@ -577,16 +553,14 @@ class TestHypothesis:
         # Reset seed and compute again
         torch.manual_seed(seed)
         embeddings_2 = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim,
             device=device,
             dtype=torch.double,
         )
         rope_encoding_2 = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim_half,
             device=device,
@@ -603,11 +577,10 @@ class TestHypothesis:
         ), "Random number generation not deterministic"
         assert torch.all(
             embeddings_rotated_1 == embeddings_rotated_2
-        ), "rotate_k is not deterministic"
+        ), "rotate_embeddings is not deterministic"
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         position_dim=valid_dims(),
         n_freq_groups=st.integers(min_value=2, max_value=4),
         n_heads=valid_dims(),
@@ -621,8 +594,7 @@ class TestHypothesis:
     def test_additive_rope_freq_groups(
         self,
         device,
-        n_queries,
-        n_keys_per_query,
+        batch_dims,
         position_dim,
         n_freq_groups,
         n_heads,
@@ -630,7 +602,7 @@ class TestHypothesis:
     ):
         """Test that frequency groups are additive in calculate_rope."""
         positions = torch.randn(
-            n_queries, n_keys_per_query, position_dim, device=device, dtype=torch.double
+            *batch_dims, position_dim, device=device, dtype=torch.double
         )
 
         # Create separate frequency groups
@@ -663,8 +635,7 @@ class TestHypothesis:
         )
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         n_heads=valid_dims(),
         head_dim_half=valid_dims(),
     )
@@ -674,15 +645,14 @@ class TestHypothesis:
         suppress_health_check=[HealthCheck.differing_executors],
     )
     def test_double_rotation_composition(
-        self, device, n_queries, n_keys_per_query, n_heads, head_dim_half
+        self, device, batch_dims, n_heads, head_dim_half
     ):
         """Test that consecutive rotations compose correctly (e^{iθ}*e^{iφ} = e^{i(θ+φ)})."""
         head_dim = head_dim_half * 2  # Ensure head_dim is even
 
-        # Create keys
+        # Create embeddings
         embeddings = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim,
             device=device,
@@ -691,16 +661,14 @@ class TestHypothesis:
 
         # Create two separate rotation angles
         theta1 = torch.rand(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim_half,
             device=device,
             dtype=torch.double,
         ) * (2 * math.pi)
         theta2 = torch.rand(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim_half,
             device=device,
@@ -724,8 +692,7 @@ class TestHypothesis:
         )
 
     @given(
-        n_queries=valid_dims(),
-        n_keys_per_query=valid_dims(),
+        batch_dims=batch_dims_strategy(),
         n_heads=valid_dims(),
         half_head_dim=valid_dims(),
     )
@@ -737,8 +704,7 @@ class TestHypothesis:
     def test_broadcasting_heads(
         self,
         device,
-        n_queries,
-        n_keys_per_query,
+        batch_dims,
         n_heads,
         half_head_dim,
     ):
@@ -747,8 +713,7 @@ class TestHypothesis:
 
         # Create a key tensor with multiple heads
         embeddings = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             n_heads,
             head_dim,
             device=device,
@@ -757,8 +722,7 @@ class TestHypothesis:
 
         # Create rope_encoding with only 1 in the head dimension for broadcasting
         rope_encoding_single_head = torch.randn(
-            n_queries,
-            n_keys_per_query,
+            *batch_dims,
             1,
             half_head_dim,
             device=device,
@@ -779,13 +743,14 @@ class TestHypothesis:
         # Verify shape of gradients
         assert (
             grad_embeddings.shape == embeddings.shape
-        ), "Gradient for keys has wrong shape"
+        ), "Gradient for embeddings has wrong shape"
         assert (
             grad_rope_encoding.shape == rope_encoding_single_head.shape
         ), "Gradient for rope_encoding has wrong shape"
 
         # Alternative calculation to verify correctness
-        rope_encoding_expanded = rope_encoding_single_head.expand(-1, -1, n_heads, -1)
+        expanded_shape = (-1,) * len(batch_dims) + (n_heads, -1)
+        rope_encoding_expanded = rope_encoding_single_head.expand(expanded_shape)
 
         # Forward pass with expanded tensor
         embeddings_rotated_expanded = rotate_embeddings(
@@ -797,5 +762,5 @@ class TestHypothesis:
             embeddings_rotated,
             embeddings_rotated_expanded,
             rtol=1e-5,
-            msg="Broadcasting in rotate_k doesn't match explicit expansion",
+            msg="Broadcasting in rotate_embeddings doesn't match explicit expansion",
         )

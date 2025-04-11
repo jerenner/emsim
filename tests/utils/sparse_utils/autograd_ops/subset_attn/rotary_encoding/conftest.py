@@ -20,3 +20,11 @@ def valid_dims():
 
 def even_dims():
     return st.integers(min_value=2, max_value=8).filter(lambda x: x % 2 == 0)
+
+
+def batch_dims_strategy():
+    return st.lists(
+        st.integers(min_value=1, max_value=8),
+        min_size=1,
+        max_size=4,
+    )

@@ -5,8 +5,8 @@ from hypothesis import given, settings, HealthCheck
 from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
     calculate_rope,
     calculate_rope_backward,
-    rotate_keys,
-    rotate_keys_backward,
+    rotate_embeddings,
+    rotate_embeddings_backward,
 )
 
 from .conftest import assert_close, valid_dims
@@ -28,7 +28,7 @@ class TestEndToEnd:
         # Setup
 
         # Create inputs that require gradients
-        key_positions = torch.randn(
+        positions = torch.randn(
             self.n_queries,
             self.n_keys_per_query,
             self.position_dim,
@@ -45,7 +45,7 @@ class TestEndToEnd:
             device=device,
             dtype=torch.double,
         )
-        keys = torch.randn(
+        embeddings = torch.randn(
             self.n_queries,
             self.n_keys_per_query,
             self.n_heads,
@@ -56,32 +56,38 @@ class TestEndToEnd:
         )
 
         # Forward pass
-        rope_encoding = calculate_rope(key_positions, rope_freqs)
-        keys_rotated = rotate_keys(keys, rope_encoding)
+        rope_encoding = calculate_rope(positions, rope_freqs)
+        embeddings_rotated = rotate_embeddings(embeddings, rope_encoding)
 
         # Loss and autograd backward
-        loss = keys_rotated.sum()
+        loss = embeddings_rotated.sum()
         loss.backward()
 
         # Manual backward pass
-        grad_k_rotated = torch.ones_like(keys_rotated)  # Gradient from sum() is 1
+        grad_embeddings_rotated = torch.ones_like(
+            embeddings_rotated
+        )  # Gradient from sum() is 1
 
         # First backward through rotate_k
-        grad_k, grad_rope_encoding = rotate_keys_backward(
-            grad_k_rotated, keys, rope_encoding, True, True
+        grad_embeddings, grad_rope_encoding = rotate_embeddings_backward(
+            grad_embeddings_rotated, embeddings, rope_encoding, True, True
         )
 
         # Then backward through calculate_rope
-        grad_key_positions, grad_rope_freqs = calculate_rope_backward(
-            grad_rope_encoding, key_positions, rope_freqs, True, True
+        grad_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_rope_encoding, positions, rope_freqs, True, True
         )
 
         # Check gradients match autograd
-        assert_close(grad_k, keys.grad, msg="Manual grad_k doesn't match autograd")
         assert_close(
-            grad_key_positions,
-            key_positions.grad,
-            msg="Manual grad_key_positions doesn't match autograd",
+            grad_embeddings,
+            embeddings.grad,
+            msg="Manual grad_embeddings doesn't match autograd",
+        )
+        assert_close(
+            grad_positions,
+            positions.grad,
+            msg="Manual grad_positions doesn't match autograd",
         )
         assert_close(
             grad_rope_freqs,
@@ -91,8 +97,8 @@ class TestEndToEnd:
 
     def test_broadcasting(self, device):
         """Test that rope_encoding can be broadcasted over multiple heads."""
-        # Multiple heads in keys
-        keys = torch.tensor(
+        # Multiple heads in embeddings
+        embeddings = torch.tensor(
             [
                 # Query 1, Key 1
                 [
@@ -158,24 +164,26 @@ class TestEndToEnd:
         expected[0, 0, 2, 6] = 8.0 * cos_val
         expected[0, 0, 2, 7] = 8.0 * sin_val
 
-        keys_rotated = rotate_keys(keys, rope_encoding)
+        embeddings_rotated = rotate_embeddings(embeddings, rope_encoding)
 
         # Verify the rotation results
         assert_close(
-            keys_rotated,
+            embeddings_rotated,
             expected,
             rtol=1e-4,
             msg="Broadcasting in rotate_k failed",
         )
 
         # Test gradient broadcasting - create dummy gradients
-        grad_k_rotated = torch.ones_like(keys_rotated)
-        grad_k, grad_rope_encoding = rotate_keys_backward(
-            grad_k_rotated, keys, rope_encoding, True, True
+        grad_embeddings_rotated = torch.ones_like(embeddings_rotated)
+        grad_embeddings, grad_rope_encoding = rotate_embeddings_backward(
+            grad_embeddings_rotated, embeddings, rope_encoding, True, True
         )
 
         # Keys gradient should maintain original shape
-        assert grad_k.shape == keys.shape, "Keys gradient has wrong shape"
+        assert (
+            grad_embeddings.shape == embeddings.shape
+        ), "Embeddings gradient has wrong shape"
 
         # Rope encoding gradient should maintain broadcasting shape
         assert (
@@ -205,7 +213,7 @@ class TestEndToEnd:
         head_dim = half_head_dim * 2  # Ensure head_dim is even
 
         # Create inputs and set requires_grad=True for autograd
-        keys = torch.randn(
+        embeddings = torch.randn(
             n_queries,
             n_keys_per_query,
             n_heads,
@@ -225,10 +233,10 @@ class TestEndToEnd:
         )
 
         # Forward pass to get complex representations
-        keys_rotated = rotate_keys(keys, rope_encoding)
+        embeddings_rotated = rotate_embeddings(embeddings, rope_encoding)
 
         # Create arbitrary gradients for output
-        grad_output = torch.randn_like(keys_rotated, device=device)
+        grad_output = torch.randn_like(embeddings_rotated, device=device)
 
         # Analytical gradients using the Frechet product formula
         # For complex multiplication z = x * y:
@@ -244,19 +252,21 @@ class TestEndToEnd:
             torch.ones_like(rope_encoding),
             rope_encoding,
         )
-        keys_complex_shape = keys.shape[:-1] + (keys.size(-1) // 2, 2)
-        keys_complex = torch.view_as_complex(keys.view(keys_complex_shape))
+        embeddings_complex_shape = embeddings.shape[:-1] + (embeddings.size(-1) // 2, 2)
+        embeddings_complex = torch.view_as_complex(
+            embeddings.view(embeddings_complex_shape)
+        )
 
         # Compute gradients analytically
-        analytical_grad_keys_complex = (
+        analytical_grad_embeddings_complex = (
             grad_output_complex * rope_encoding_complex.conj()
         )
-        analytical_grad_rope_complex = grad_output_complex * keys_complex.conj()
+        analytical_grad_rope_complex = grad_output_complex * embeddings_complex.conj()
 
         # Convert back to real tensor format
-        analytical_grad_keys = torch.view_as_real(
-            analytical_grad_keys_complex
-        ).reshape_as(keys)
+        analytical_grad_embeddings = torch.view_as_real(
+            analytical_grad_embeddings_complex
+        ).reshape_as(embeddings)
 
         # For rope_encoding, we need the gradient of the angle
         # Since rope_encoding_complex = exp(i*rope_encoding), the gradient is:
@@ -266,14 +276,14 @@ class TestEndToEnd:
         ).imag
 
         # Compare with autograd gradients
-        keys_rotated.backward(grad_output)
+        embeddings_rotated.backward(grad_output)
 
         # Check that analytical and autograd gradients match
         assert_close(
-            analytical_grad_keys,
-            keys.grad,
+            analytical_grad_embeddings,
+            embeddings.grad,
             rtol=1e-4,
-            msg="Analytical gradient for keys doesn't match autograd",
+            msg="Analytical gradient for embeddings doesn't match autograd",
         )
         assert_close(
             analytical_grad_rope,
@@ -283,25 +293,31 @@ class TestEndToEnd:
         )
 
         # Now test the backward method directly
-        keys.grad = None
+        embeddings.grad = None
         rope_encoding.grad = None
 
-        grad_k, grad_rope_encoding = rotate_keys_backward(
-            grad_output, keys, rope_encoding, True, True, True
+        grad_embeddings, grad_rope_encoding = rotate_embeddings_backward(
+            grad_output, embeddings, rope_encoding, True, True, True
         )
 
         # Compare with analytical gradients
         assert_close(
-            grad_k,
-            analytical_grad_keys,
+            grad_embeddings,
+            analytical_grad_embeddings,
             rtol=1e-4,
-            msg="rotate_k_backward gradient for keys doesn't match analytical gradient",
+            msg=(
+                "rotate_embeddings_backward gradient for embeddings doesn't match "
+                "analytical gradient",
+            ),
         )
         assert_close(
             grad_rope_encoding,
             analytical_grad_rope,
             rtol=1e-4,
-            msg="rotate_k_backward gradient for rope_encoding doesn't match analytical gradient",
+            msg=(
+                "rotate_embeddings_backward gradient for rope_encoding doesn't match "
+                "analytical gradient",
+            ),
         )
 
         # Test broadcasting case (single head in rope_encoding)
@@ -321,15 +337,19 @@ class TestEndToEnd:
             )
 
             # Forward pass with broadcasting
-            k_rotated_broadcast = rotate_keys(keys, rope_encoding_single)
+            embeddings_rotated_broadcast = rotate_embeddings(
+                embeddings, rope_encoding_single
+            )
 
             # Create same gradients for both passes
-            grad_output_broadcast = torch.randn_like(k_rotated_broadcast, device=device)
+            grad_output_broadcast = torch.randn_like(
+                embeddings_rotated_broadcast, device=device
+            )
 
             # Test our backward function directly with broadcasting
-            grad_k_broadcast, grad_rope_broadcast = rotate_keys_backward(
+            grad_k_broadcast, grad_rope_broadcast = rotate_embeddings_backward(
                 grad_output_broadcast,
-                keys,
+                embeddings,
                 rope_encoding_single,
                 True,
                 True,
@@ -362,11 +382,11 @@ class TestEndToEnd:
             # Manually calculate and sum the gradients for each head
             for h in range(n_heads):
                 # Extract this head's data
-                head_keys_complex = keys_complex[:, :, h : h + 1, :]
+                head_embeddings_complex = embeddings_complex[:, :, h : h + 1, :]
                 head_grad_output = grad_output_complex_broadcast[:, :, h : h + 1, :]
 
                 # Calculate gradient for this head
-                head_grad_complex = head_grad_output * head_keys_complex.conj()
+                head_grad_complex = head_grad_output * head_embeddings_complex.conj()
 
                 # Accumulate
                 summed_grad_complex += head_grad_complex

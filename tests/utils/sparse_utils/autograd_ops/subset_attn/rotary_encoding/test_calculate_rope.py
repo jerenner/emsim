@@ -16,29 +16,29 @@ class TestCalculateRope:
 
     def test_basic_functionality(self, device):
         """Test basic operation with simple inputs."""
-        key_positions = torch.tensor(
+        positions = torch.tensor(
             [[[1.0, 2.0]]], dtype=torch.float32, device=device
         )  # [1, 1, 2]
 
-        # Now with position_dim=2 to match key_positions
+        # Now with position_dim=2 to match positions
         rope_freqs = torch.tensor(
             [[[[1.0, 2.0]]], [[[5.0, 6.0]]]],  # position_dim=0  # position_dim=1
             dtype=torch.float32,
             device=device,
         )  # [2, 1, 1, 2] -> [position_dim=2, n_freq_groups=1, n_heads=1, head_dim/2=2]
 
-        # Expected: matrix multiplication of key_positions and rope_freqs
+        # Expected: matrix multiplication of positions and rope_freqs
         # 1.0 * [1.0, 2.0] + 2.0 * [5.0, 6.0] = [11.0, 14.0]
         expected = torch.tensor(
             [[[[11.0, 14.0]]]], dtype=torch.float32, device=device
         )  # [1, 1, 1, 2]
-        result = calculate_rope(key_positions, rope_freqs)
+        result = calculate_rope(positions, rope_freqs)
 
         assert_close(result, expected, msg="Basic calculate_rope failed")
 
     def test_multi_freq_groups(self, device):
         """Test with multiple frequency groups."""
-        key_positions = torch.tensor(
+        positions = torch.tensor(
             [[[1.0, 2.0]]], dtype=torch.float32, device=device
         )  # [1, 1, 2]
         rope_freqs = torch.tensor(
@@ -66,13 +66,13 @@ class TestCalculateRope:
         ).squeeze(
             0
         )  # [1, 1, 1, 2]
-        result = calculate_rope(key_positions, rope_freqs)
+        result = calculate_rope(positions, rope_freqs)
 
         assert_close(result, expected, msg="Multi-group calculate_rope failed")
 
     def test_multi_heads(self, device):
         """Test with multiple heads."""
-        key_positions = torch.tensor(
+        positions = torch.tensor(
             [[[1.0, 2.0]]], dtype=torch.float32, device=device
         )  # [1, 1, 2]
 
@@ -115,12 +115,12 @@ class TestCalculateRope:
             device=device,
         )  # [1, 1, 2, 2]
 
-        result = calculate_rope(key_positions, rope_freqs)
+        result = calculate_rope(positions, rope_freqs)
         assert_close(result, expected, msg="Multi-head calculate_rope failed")
 
     def test_error_conditions(self, device):
         """Test that appropriate errors are raised for invalid inputs."""
-        # Test 2D key_positions (should be 3D)
+        # Test 2D positions (should be 3D)
         with pytest.raises(
             (ValueError, torch.jit.Error), match="Expected 3 dimensions"
         ):
@@ -167,21 +167,21 @@ class TestCalculateRope:
     ):
         """Property-based test to ensure output shapes are correct."""
         # Test with 4D rope_freqs (position_dim, n_freq_groups, n_heads, head_dim/2)
-        key_positions = torch.randn(
+        positions = torch.randn(
             n_queries, n_keys_per_query, position_dim, device=device
         )
         rope_freqs = torch.randn(
             position_dim, n_freq_groups, n_heads, head_dim, device=device
         )
 
-        result = calculate_rope(key_positions, rope_freqs)
+        result = calculate_rope(positions, rope_freqs)
         assert result.shape == (n_queries, n_keys_per_query, n_heads, head_dim)
 
         # Test with broadcasting dimensions
         rope_freqs_broadcast = torch.randn(
             position_dim, 1, n_heads, head_dim, device=device
         )
-        result_broadcast = calculate_rope(key_positions, rope_freqs_broadcast)
+        result_broadcast = calculate_rope(positions, rope_freqs_broadcast)
         assert result_broadcast.shape == (
             n_queries,
             n_keys_per_query,
@@ -197,10 +197,10 @@ class TestCalculateRopeBackward:
     def test_basic_functionality(self, device):
         """Test basic operation with simple inputs."""
         # [n_queries=1, n_keys_per_query=1, n_heads=2, head_dim/2=2]
-        grad_key_pos_encoding = torch.tensor(
+        grad_rope_encoding = torch.tensor(
             [[[[0.1, 0.2], [0.3, 0.4]]]], dtype=torch.float32, device=device
         )
-        key_positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
+        positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
 
         # [position_dim=2, n_freq_groups=1, n_heads=2, head_dim/2=2]
         rope_freqs = torch.tensor(
@@ -222,11 +222,11 @@ class TestCalculateRopeBackward:
             device=device,
         )
 
-        # Gradient for key_positions
+        # Gradient for positions
         # Head 0: 0.1 * [1.0, 5.0] + 0.2 * [2.0, 6.0] = [0.5, 1.7]
         # Head 1: 0.3 * [3.0, 7.0] + 0.4 * [4.0, 8.0] = [2.5, 5.3]
         # Sum over heads: [0.5 + 2.5, 1.7 + 5.3] = [3.0, 7.0]
-        expected_grad_key_positions = torch.tensor(
+        expected_grad_positions = torch.tensor(
             [[[3.0, 7.0]]],
             dtype=torch.float32,
             device=device,
@@ -257,14 +257,14 @@ class TestCalculateRopeBackward:
             device=device,
         )
 
-        grad_key_positions, grad_rope_freqs = calculate_rope_backward(
-            grad_key_pos_encoding, key_positions, rope_freqs, True, True
+        grad_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_rope_encoding, positions, rope_freqs, True, True
         )
 
         assert_close(
-            grad_key_positions,
-            expected_grad_key_positions,
-            msg="Gradients for key_positions incorrect",
+            grad_positions,
+            expected_grad_positions,
+            msg="Gradients for positions incorrect",
         )
         assert_close(
             grad_rope_freqs,
@@ -275,10 +275,10 @@ class TestCalculateRopeBackward:
     def test_head_broadcasting(self, device):
         """Test with broadcasting in the n_heads dimension."""
         # [n_queries=1, n_keys_per_query=1, n_heads=2, head_dim=2]
-        grad_key_pos_encoding = torch.tensor(
+        grad_rope_encoding = torch.tensor(
             [[[[0.1, 0.2], [0.3, 0.4]]]], dtype=torch.float32, device=device
         )
-        key_positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
+        positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
 
         # [position_dim=2, n_freq_groups=1, n_heads=1, head_dim=2
         rope_freqs = torch.tensor(
@@ -298,7 +298,7 @@ class TestCalculateRopeBackward:
             device=device,
         )
 
-        # Gradient for key_positions
+        # Gradient for positions
         # Head 0: 0.1 * [1.0, 5.0] + 0.2 * [2.0, 6.0] = [0.5, 1.7]
         # Head 1: 0.3 * [1.0, 5.0] + 0.4 * [2.0, 6.0] = [0.3 + 0.8, 1.5 + 2.4] = [1.1, 3.9]
         # Sum over heads: [0.5 + 1.1, 1.7 + 3.9] = [1.6, 5.6]
@@ -328,12 +328,12 @@ class TestCalculateRopeBackward:
             device=device,
         )
 
-        grad_key_positions, grad_rope_freqs = calculate_rope_backward(
-            grad_key_pos_encoding, key_positions, rope_freqs, True, True
+        grad_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_rope_encoding, positions, rope_freqs, True, True
         )
 
         assert_close(
-            grad_key_positions,
+            grad_positions,
             expected_grad_key_positions,
             msg="Gradients for key_positions with head broadcasting incorrect",
         )
@@ -346,10 +346,10 @@ class TestCalculateRopeBackward:
     def test_freq_group_broadcasting(self, device):
         """Test with broadcasting in the n_freq_groups dimension."""
         # [n_queries=1, n_keys_per_query=1, n_heads=1, head_dim/2=2]
-        grad_key_pos_encoding = torch.tensor(
+        grad_rope_encoding = torch.tensor(
             [[[[0.1, 0.2]]]], dtype=torch.float32, device=device
         )
-        key_positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
+        positions = torch.tensor([[[1.0, 2.0]]], dtype=torch.float32, device=device)
 
         # [position_dim=2, n_freq_groups=2, n_heads=1, head_dim/2=2]
         rope_freqs = torch.tensor(
@@ -375,11 +375,11 @@ class TestCalculateRopeBackward:
             device=device,
         )
 
-        # Gradient for key_positions - sum of all freq groups
+        # Gradient for positions - sum of all freq groups
         # Freq 0: 0.1 * [1.0, 5.0] + 0.2 * [2.0, 6.0] = [0.5, 1.7]
         # Freq 1: 0.1 * [3.0, 7.0] + 0.2 * [4.0, 8.0] = [1.1, 2.3]
         # Sum over freq groups: [0.5 + 1.1, 1.7 + 2.3] = [1.6, 4.0]
-        expected_grad_key_positions = torch.tensor(
+        expected_grad_positions = torch.tensor(
             [[[1.6, 4.0]]],
             dtype=torch.float32,
             device=device,
@@ -413,14 +413,14 @@ class TestCalculateRopeBackward:
             device=device,
         )
 
-        grad_key_positions, grad_rope_freqs = calculate_rope_backward(
-            grad_key_pos_encoding, key_positions, rope_freqs, True, True
+        grad_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_rope_encoding, positions, rope_freqs, True, True
         )
 
         assert_close(
-            grad_key_positions,
-            expected_grad_key_positions,
-            msg="Gradients for key_positions with freq group broadcasting incorrect",
+            grad_positions,
+            expected_grad_positions,
+            msg="Gradients for positions with freq group broadcasting incorrect",
         )
         assert_close(
             grad_rope_freqs,
@@ -431,42 +431,42 @@ class TestCalculateRopeBackward:
     def test_selective_gradient_computation(self, device):
         """Test that only requested gradients are computed."""
         # Updated shapes
-        grad_key_pos_encoding = torch.randn(
+        grad_rope_encoding = torch.randn(
             3, 4, 2, 4, device=device
         )  # [n_queries, n_keys_per_query, n_heads, head_dim/2]
-        key_positions = torch.randn(
+        positions = torch.randn(
             3, 4, 2, device=device
         )  # [n_queries, n_keys_per_query, position_dim]
         rope_freqs = torch.randn(
             2, 1, 2, 4, device=device
         )  # [position_dim, n_freq_groups, n_heads, head_dim/2]
 
-        # Only key_positions gradient
-        grad_key_positions, grad_rope_freqs = calculate_rope_backward(
-            grad_key_pos_encoding, key_positions, rope_freqs, True, False
+        # Only positions gradient
+        grad_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_rope_encoding, positions, rope_freqs, True, False
         )
-        assert grad_key_positions is not None
+        assert grad_positions is not None
         assert grad_rope_freqs is None
 
         # Only rope_freqs gradient
-        grad_key_positions, grad_rope_freqs = calculate_rope_backward(
-            grad_key_pos_encoding, key_positions, rope_freqs, False, True
+        grad_positions, grad_rope_freqs = calculate_rope_backward(
+            grad_rope_encoding, positions, rope_freqs, False, True
         )
-        assert grad_key_positions is None
+        assert grad_positions is None
         assert grad_rope_freqs is not None
 
     def test_error_conditions(self, device):
         """Test that appropriate errors are raised for invalid inputs."""
-        grad_key_pos_encoding = torch.randn(
+        grad_rope_encoding = torch.randn(
             3, 4, 2, 6, device=device
         )  # [n_queries, n_keys_per_query, n_heads, head_dim/2]
 
-        # Test 2D key_positions (should be 3D)
+        # Test 2D positions (should be 3D)
         with pytest.raises(
             (ValueError, torch.jit.Error), match="Expected 3 dimensions"
         ):
             calculate_rope_backward(
-                grad_key_pos_encoding,
+                grad_rope_encoding,
                 torch.randn(3, 2, device=device),
                 torch.randn(2, 1, 2, 6, device=device),
                 True,
@@ -478,19 +478,19 @@ class TestCalculateRopeBackward:
             (ValueError, torch.jit.Error), match="Expected 4 dimensions"
         ):
             calculate_rope_backward(
-                grad_key_pos_encoding,
+                grad_rope_encoding,
                 torch.randn(3, 4, 2, device=device),
                 torch.randn(2, 1, 6, device=device),
                 True,
                 True,
             )
 
-        # Test dimension mismatch between key_positions and rope_freqs
+        # Test dimension mismatch between positions and rope_freqs
         with pytest.raises(
             (ValueError, torch.jit.Error), match="Expected first dimension"
         ):
             calculate_rope_backward(
-                grad_key_pos_encoding,
+                grad_rope_encoding,
                 torch.randn(3, 4, 2, device=device),
                 torch.randn(3, 1, 2, 6, device=device),  # position_dim=3 doesn't match
                 True,

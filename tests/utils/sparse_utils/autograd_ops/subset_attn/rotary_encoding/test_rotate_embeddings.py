@@ -151,18 +151,18 @@ class TestRotateEmbeddings:
         # Test complex inputs
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected embeddings and rope_encoding to be real",
+            match="Expected embeddings to be real",
         ):
             rotate_embeddings(
                 torch.randn(2, 3, 4, 8, dtype=torch.complex64, device=device),
-                torch.randn(2, 3, 4, 4, dtype=torch.float32, device=device),
+                torch.randn(2, 3, 4, 4, device=device),
             )
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected embeddings and rope_encoding to be real",
+            match="Expected rope_encoding to be real",
         ):
             rotate_embeddings(
-                torch.randn(2, 3, 4, 8, dtype=torch.float32, device=device),
+                torch.randn(2, 3, 4, 8, device=device),
                 torch.randn(2, 3, 4, 4, dtype=torch.complex64, device=device),
             )
 
@@ -654,8 +654,8 @@ class TestRotateEmbeddingsBackward:
         ):
             rotate_embeddings_backward(
                 torch.randn(2, 4, 6, device=device),  # Not 4D
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
-                torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
+                torch.randn(2, 4, 6, 8, device=device),
+                torch.randn(2, 4, 6, 4, device=device),
             )
 
         # Test bad embeddings - wrong dimensions
@@ -664,35 +664,35 @@ class TestRotateEmbeddingsBackward:
             match="grad_embeddings_rotated and embeddings to have the same shape",
         ):
             rotate_embeddings_backward(
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
-                torch.randn(2, 4, 6, device=device),  # Not 4D
-                torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
+                torch.randn(2, 4, 6, 8, device=device),
+                torch.randn(2, 4, 6, 6, device=device),  # Wrong head dim
+                torch.randn(2, 4, 6, 4, device=device),
             )
 
         # Test bad grad_embeddings_rotated - wrong dtype (complex)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="grad_embeddings_rotated and embeddings to be real",
+            match="grad_embeddings_rotated to be real",
         ):
             rotate_embeddings_backward(
                 torch.randn(
                     2, 4, 6, 8, dtype=torch.complex64, device=device
                 ),  # Not real
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
-                torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
+                torch.randn(2, 4, 6, 8, device=device),
+                torch.randn(2, 4, 6, 4, device=device),
             )
 
         # Test bad embeddings - wrong dtype (complex)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="grad_embeddings_rotated and embeddings to be real",
+            match="embeddings to be real",
         ):
             rotate_embeddings_backward(
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
+                torch.randn(2, 4, 6, 8, device=device),
                 torch.randn(
                     2, 4, 6, 8, dtype=torch.complex64, device=device
                 ),  # Not real
-                torch.randn(2, 4, 6, 4, device=device),  # 4D real tensor
+                torch.randn(2, 4, 6, 4, device=device),
             )
 
         # Test bad rope_encoding - wrong dimensions
@@ -701,8 +701,8 @@ class TestRotateEmbeddingsBackward:
             match="Expected embeddings and rope_encoding to have the same number",
         ):
             rotate_embeddings_backward(
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
+                torch.randn(2, 4, 6, 8, device=device),
+                torch.randn(2, 4, 6, 8, device=device),
                 torch.randn(2, 4, 6, device=device),  # Not 4D
             )
 
@@ -712,8 +712,8 @@ class TestRotateEmbeddingsBackward:
             match="Expected rope_encoding to be real",
         ):
             rotate_embeddings_backward(
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
-                torch.randn(2, 4, 6, 8, device=device),  # 4D real tensor
+                torch.randn(2, 4, 6, 8, device=device),
+                torch.randn(2, 4, 6, 8, device=device),
                 torch.randn(
                     2, 4, 6, 4, dtype=torch.complex64, device=device
                 ),  # Not real
@@ -722,7 +722,7 @@ class TestRotateEmbeddingsBackward:
         # Test bad shapes - wrong trailing dims for rope
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected rope_encoding's last dimension",
+            match="Expected rope_encoding to have last dimension",
         ):
             rotate_embeddings_backward(
                 torch.randn(2, 4, 6, 8, device=device),

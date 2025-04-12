@@ -182,8 +182,10 @@ def linear_grads(
     gradients, the returned tensors are 3D and 2D, respectively.
 
     Args:
-        grad_output (Tensor): Gradient of output, of shape [batch_size, out_features]
-            or [num_projections, batch_size, out_features] for stacked mode
+        grad_output (Optional[Tensor]): Gradient of output, of shape
+            [batch_size, out_features], or
+            [num_projections, batch_size, out_features] for stacked mode, or None.
+            If grad_output is None, this function returns (None, None).
         inputs (Tensor): Input tensor, of shape [batch_size, in_features]
         need_weight_grad (bool): Whether weight gradients are needed
         need_bias_grad (bool): Whether bias gradients are needed

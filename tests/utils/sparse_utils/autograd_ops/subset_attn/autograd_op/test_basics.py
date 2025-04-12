@@ -306,7 +306,7 @@ class TestGradcheck:
             unique=True,
         ),
     )
-    def test_hypothesis_gradchech(
+    def test_hypothesis_gradcheck(
         self,
         device,
         use_rope: str,

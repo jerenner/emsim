@@ -888,6 +888,8 @@ def _compute_grads_key_value_projections(
     ):
         # need grads from both projections - batch the two gradient
         # calculations to save a matmul call (bmm vs 2x mm)
+
+        # type refinement for torchscript
         assert grad_keys_flat is not None
         assert grad_values_flat is not None
 

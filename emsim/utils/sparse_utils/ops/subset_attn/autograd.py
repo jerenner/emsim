@@ -847,7 +847,7 @@ def _compute_grads_keys_and_rope_encoding(
         return None, grad_key_rope_encoding
 
     # (n_heads, n_queries, embed_dim)
-    grad_keys = grad_keys.flatten(-2, -1)
+    grad_keys = grad_keys.flatten(-2, -1)  # stack heads
 
     return grad_keys, grad_key_rope_encoding
 
@@ -872,8 +872,8 @@ def _compute_grad_values(attn_weights: Tensor, grad_output: Tensor) -> Tensor:
 
 @torch.jit.script
 def _compute_grads_key_value_projections(
-    grad_keys_flat: Tensor,
-    grad_values_flat: Tensor,
+    grad_keys_flat: Optional[Tensor],
+    grad_values_flat: Optional[Tensor],
     selected: Tensor,
     needs_grad_key_weight: bool,
     needs_grad_value_weight: bool,
@@ -888,6 +888,8 @@ def _compute_grads_key_value_projections(
     ):
         # need grads from both projections - batch the two gradient
         # calculations to save a matmul call (bmm vs 2x mm)
+        assert grad_keys_flat is not None
+        assert grad_values_flat is not None
 
         # stack gradients for batched keys and values backward (adding leading dim)
         grad_kv_flat = torch.stack([grad_keys_flat, grad_values_flat])

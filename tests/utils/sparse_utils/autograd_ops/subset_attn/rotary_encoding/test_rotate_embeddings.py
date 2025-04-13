@@ -13,7 +13,7 @@ from .conftest import assert_close
 
 @pytest.mark.cuda_if_available
 class TestRotateEmbeddings:
-    """Tests for the rotate_tensor function."""
+    """Tests for the rotate_embeddings function."""
 
     n_heads = 2
     head_dim = 8
@@ -37,9 +37,11 @@ class TestRotateEmbeddings:
             [[[[0.5, 0.866, 1.0, 1.7321]]]], dtype=torch.double, device=device
         )
 
-        k_rotated = rotate_embeddings(embeddings, angles)
+        embeddings_rotated = rotate_embeddings(embeddings, angles)
 
-        assert_close(k_rotated, expected, rtol=1e-4, msg="Basic rotate_tensor failed")
+        assert_close(
+            embeddings_rotated, expected, rtol=1e-4, msg="Basic rotate_tensor failed"
+        )
 
     def test_extended_batch_dims(self, device):
         """Test with lots of batch dimensions"""

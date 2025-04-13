@@ -1,5 +1,5 @@
+from .sparse_index_select import sparse_index_select
 from .indexing import (
-    sparse_index_select,
     sparse_select,
     batch_sparse_index,
     union_sparse_indices,

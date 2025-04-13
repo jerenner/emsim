@@ -2,8 +2,10 @@ import pytest
 import torch
 import numpy as np
 
-from emsim.utils.sparse_utils.indexing.indexing import sparse_index_select
-from emsim.utils.sparse_utils.indexing.script_funcs import sparse_index_select_inner
+from emsim.utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
+from emsim.utils.sparse_utils.indexing.sparse_index_select import (
+    _sparse_index_select_inner,
+)
 
 
 # Helper functions for testing
@@ -138,6 +140,20 @@ class TestBasicFunctionality:
         expected = expected_values.to_sparse()
         assert_sparse_tensors_equal(result, expected)
 
+    def test_disable_builtin_fallback(self, device):
+        # Test the "disable_builtin_fallback" option
+        values = torch.tensor([[1.0, 0.0, 2.0], [0.0, 3.0, 0.0]], device=device)
+        sparse = values.to_sparse()
+
+        index = torch.tensor([1, 1, 1], device=device)
+        result = sparse_index_select(sparse, 1, index, disable_builtin_fallback=True)
+
+        expected_values = torch.tensor(
+            [[0.0, 0.0, 0.0], [3.0, 3.0, 3.0]], device=device
+        )
+        expected = expected_values.to_sparse()
+        assert_sparse_tensors_equal(result, expected)
+
 
 @pytest.mark.cpu_and_cuda
 class TestEdgeCases:
@@ -233,7 +249,16 @@ class TestErrorHandling:
 
         # Test with 2D index tensor
         with pytest.raises((ValueError, torch.jit.Error), match="must be 0D or 1D"):
-            sparse_index_select(sparse_tensor, 0, torch.zeros((2, 2), device=device))
+            sparse_index_select(
+                sparse_tensor, 0, torch.zeros((2, 2), dtype=torch.long, device=device)
+            )
+
+        # Test with float index tensor
+        with pytest.raises((ValueError, torch.jit.Error), match="non-integer dtype"):
+            sparse_index_select(
+                sparse_tensor, 0, torch.tensor([0.0], dtype=torch.float, device=device)
+            )
+
 
 @pytest.mark.cpu_and_cuda
 class TestGradients:
@@ -1175,7 +1200,7 @@ class TestInnerFunction:
         axis = 1
         index = torch.tensor([1], device=device)
 
-        new_indices, new_values = sparse_index_select_inner(
+        new_indices, new_values = _sparse_index_select_inner(
             tensor_indices, tensor_values, axis, index
         )
 
@@ -1187,7 +1212,6 @@ class TestInnerFunction:
         expected = torch.tensor([[0.0], [3.0]], device=device).to_sparse()
         assert_sparse_tensors_equal(result, expected)
 
-    @pytest.mark.cpu_and_cuda
     def test_inner_function_complex_case(self, device):
         # Test inner function with a more complex 3D tensor
         values = torch.zeros((3, 4, 5), device=device)
@@ -1202,7 +1226,7 @@ class TestInnerFunction:
         axis = 1
         index = torch.tensor([1, 2], device=device)
 
-        new_indices, new_values = sparse_index_select_inner(
+        new_indices, new_values = _sparse_index_select_inner(
             tensor_indices, tensor_values, axis, index
         )
 
@@ -1217,3 +1241,27 @@ class TestInnerFunction:
         expected = expected_values.to_sparse()
 
         assert_sparse_tensors_equal(result, expected)
+
+    def test_inner_function_errors(self, device):
+        # Test error messages
+        values = torch.tensor([[1.0, 0.0, 2.0], [0.0, 3.0, 0.0]], device=device)
+        sparse = values.to_sparse().coalesce()
+
+        tensor_indices = sparse.indices()
+        tensor_values = sparse.values()
+
+        index = torch.tensor([1], device=device)
+
+        with pytest.raises(
+            (ValueError, torch.jit.Error), match="does not support negative axes"
+        ):
+            _, _ = _sparse_index_select_inner(
+                tensor_indices, tensor_values, -1, index
+            )
+
+        with pytest.raises(
+            (ValueError, torch.jit.Error), match="is out of bounds"
+        ):
+            _, _ = _sparse_index_select_inner(
+                tensor_indices, tensor_values, 5, index
+            )

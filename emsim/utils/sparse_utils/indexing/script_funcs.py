@@ -3,83 +3,6 @@ from torch import Tensor
 
 
 @torch.jit.script
-def sparse_index_select_inner(
-    tensor_indices: Tensor, tensor_values: Tensor, axis: int, index: Tensor
-) -> tuple[Tensor, Tensor]:
-    """Inner implementation of sparse_index_select.
-
-    This function performs the actual selection of values from a sparse tensor's
-    internal representation. It constructs masks to identify which elements match the
-    requested indices, then builds new indices and values tensors for the result.
-
-    Args:
-        tensor_indices (Tensor): The indices tensor from a sparse COO tensor
-            (shape [sparse_dims, nnz]).
-        tensor_values (Tensor): The values tensor from a sparse COO tensor
-            (shape [nnz, ...]).
-        axis (int): The dimension along which to select values. Negative axes are
-            not supported.
-        index (Tensor): The indices of the values to select.
-
-    Returns:
-        tuple[Tensor, Tensor]: A tuple containing:
-            - new_indices (Tensor): The indices for the new sparse tensor.
-            - new_values (Tensor): The values for the new sparse tensor.
-
-    Raises:
-        ValueError: If axis is negative or out of bounds.
-    """
-    sparse_dims = tensor_indices.size(0)
-    dense_dims = tensor_values.ndim - 1
-    if axis < 0:
-        raise ValueError(
-            "`sparse_index_select_inner` does not support negative axes; got "
-            f"{axis}. Please normalize axis or use `sparse_index_select`"
-        )
-    elif axis > sparse_dims + dense_dims:
-        # required by torchscript when concatting multiple format strings
-        error_msg = "axis " + str(axis) + " is out of boundds for sparse tensor "
-        error_msg += "with" + str(sparse_dims) + " and " + str(dense_dims)
-        error_msg += " dense dims."
-        raise ValueError(error_msg)
-
-    if axis < sparse_dims:
-        # Selection along a sparse dimension
-        # Create masks for each index in the index tensor
-        index_masks = tensor_indices[axis].unsqueeze(0) == index.unsqueeze(1)
-
-        # Get indices where matches occur
-        indices_where = torch.where(index_masks)
-        selected_items = indices_where[1]
-
-        # Extract matched values and indices
-        new_values = tensor_values[selected_items]
-        selected_indices = tensor_indices[:, selected_items]
-
-        # Create new indices tensor with proper structure
-        leading_indices = selected_indices[:axis]
-        # Map matched positions to their corresponding index tensor positions
-        axis_indices = indices_where[0].unsqueeze(0)
-        trailing_indices = selected_indices[axis + 1 :]
-
-        new_indices = torch.cat([leading_indices, axis_indices, trailing_indices], 0)
-        return new_indices, new_values
-    else:
-        # Selection is along a dense dimension
-        # For dense dimensions, we need to select from the values tensor directly
-        # First, duplicate the indices for each selected position
-        new_indices = tensor_indices.clone()
-
-        # Then, select the appropriate values from the dense dimension
-        # The dense dimensions start after the nnz dimension in values
-        # So we need to adjust for that when selecting
-        dense_dim = axis - sparse_dims + 1  # +1 because first dim of values is nnz
-        new_values = torch.index_select(tensor_values, dense_dim, index)
-
-        return new_indices, new_values
-
-
-@torch.jit.script
 def flattened_indices(
     tensor: Tensor, start_axis: int, end_axis: int
 ) -> tuple[Tensor, Tensor, Tensor]:
@@ -126,6 +49,7 @@ def flattened_indices(
     # i.e., for dims [d0, d1, d2], the offsets would be [d1*d2, d2, 1].
     # we accomplish this with a reversed cumprod
     reverse_cumprod = dim_sizes_1.flip([0]).cumprod(0).flip([0])
+
     flattened_dim_size, dim_linear_offsets = torch.split(
         reverse_cumprod, [1, reverse_cumprod.size(0) - 1]
     )
@@ -189,14 +113,6 @@ def linearize_sparse_and_index_tensors(
                 f"{str(index_tensor.shape[-1])} and {sparse_tensor.sparse_dim()}, "
                 "respectively."
             )
-            # build error str like this because of torchscript not liking f strings
-            error_str = "Expected last dim of `index_tensor` to be the same as "
-            error_str += "`sparse_tensor.sparse_dim()`, got "
-            error_str += str(index_tensor.shape[-1])
-            error_str += " and "
-            error_str += str(sparse_tensor.sparse_dim())
-            error_str += ", respectively."
-            raise ValueError(error_str)
 
     sparse_tensor_indices_linear, _, dim_linear_offsets = flattened_indices(
         sparse_tensor, 0, sparse_tensor.sparse_dim() - 1
@@ -254,8 +170,9 @@ def get_sparse_index_mapping(
     out_of_bounds_indices.logical_or_(torch.any(index_tensor > sparse_shape, -1))
 
     # put dummy value of 0 in the OOB indices.
-    # Maybe it'll make the linearization computations and searchsorted faster
-    # without requiring a cpu sync to pull them out of the tensor.
+    # Maybe it'll make the linearization computations and searchsorted faster:
+    # a compromise between just giving searchsorted random indices to find vs
+    # causing a cpu sync to call nonzeros to filter them out
     index_tensor = index_tensor.masked_fill(out_of_bounds_indices.unsqueeze(-1), 0)
     (
         sparse_tensor_indices_linearized,
@@ -265,7 +182,7 @@ def get_sparse_index_mapping(
     # The dummy value of 0 should always return searched index of 0 since
     # the sparse_tensor_indices_linearized values are always nonnegative.
     # Should be faster to find than random search values.
-    index_search = torch.searchsorted(
+    index_search = torch.searchsorted(  # binary search
         sparse_tensor_indices_linearized, index_tensor_linearized
     )
     # guard against IndexError
@@ -295,8 +212,9 @@ def gather_and_mask(
     indices and zeros out values where the mask is False.
 
     Args:
-        values (Tensor): Source tensor to gather from, must be 2D with shape (N, D)
-            where N is the number of elements and D is the feature dimension.
+        values (Tensor): Source tensor to gather from, must be 1D with shape (N)
+            or n-D with shape (N, D0, D1, ...), where N is the number of elements
+            and D are potentially multiple feature dimensions.
         indices (Tensor): Long tensor of indices into the first dimension of values.
             Can be of any shape.
         mask (Tensor): Boolean tensor with the same shape as indices. True indicates
@@ -314,30 +232,45 @@ def gather_and_mask(
     Raises:
         ValueError: If values is not 2D or if indices and mask have different shapes.
     """
-    if values.ndim != 2:
-        error_str = "Expected values to be 2D, got shape "
-        error_str += str(values.shape)
-        raise ValueError(error_str)
+    input_values_1d = False
+    if values.ndim == 1:
+        input_values_1d = True
+        values = values.unsqueeze(1)
+
     if indices.shape != mask.shape:
-        error_str = "Expected indices and mask to have same shape, got "
-        error_str += str(indices.shape)
-        error_str += " and "
-        error_str += str(mask.shape)
-        raise ValueError(error_str)
+        raise ValueError(
+            "Expected indices and mask to have same shape, got "
+            f"{indices.shape} and {mask.shape}"
+        )
 
     indices_flat = indices.reshape(-1)
     mask_flat = mask.reshape(-1)
 
-    # significantly faster than values[indices] for some reason
-    selected = torch.gather(
-        values, 0, indices_flat.unsqueeze(-1).expand(-1, values.size(-1))
-    )
+    # gather with manually broadcasted indices is significantly faster than
+    # direct indexing with values[indices] for some reason
 
+    # figure out how much to broadcast
+    value_dims = values.shape[1:]
+    n_value_dims = values.ndim - 1
+
+    # unsqueeze to proper dimensions
+    gather_indices = indices_flat.view((indices_flat.size(0),) + (1,) * n_value_dims)
+
+    # expand to proper size: expand creates a view so memory-efficient
+    gather_indices = gather_indices.expand((indices_flat.size(0),) + value_dims)
+
+    # do the actual gather
+    selected = torch.gather(values, 0, gather_indices)
+
+    # unsqueeze mask
+    mask_flat = mask_flat.view((mask_flat.size(0),) + (1,) * n_value_dims)
     if mask_inplace:
-        selected.masked_fill_(~mask_flat.unsqueeze(-1), 0)
+        selected.masked_fill_(~mask_flat, 0)
     else:
-        selected = selected.masked_fill(~mask_flat.unsqueeze(-1), 0)
+        selected = selected.masked_fill(~mask_flat, 0)
 
-    new_shape = indices.shape + (values.shape[-1],)
+    new_shape = indices.shape
+    if not input_values_1d:
+        new_shape += value_dims
     selected = selected.reshape(new_shape)
     return selected

@@ -166,3 +166,5 @@ cython_debug/
 slurm-*.out
 outputs
 catscan_outputs
+
+slurm-*.out

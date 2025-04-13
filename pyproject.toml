@@ -3,7 +3,8 @@ env = [
     "OMP_NUM_THREADS=16",  # MinkowskiEngine issues a warning on import if this is unset
 ]
 markers = [
-    "cuda_if_available: mark test to run on CUDA when available, otherwise fall back to CPU"
+    "cuda_if_available: mark test to run on CUDA when available, otherwise fall back to CPU",
+    "cpu_and_cuda: mark test to run on both cpu as well as CUDA if available"
 ]
 filterwarnings = [
     "ignore:.*custom_[fb]wd.*:FutureWarning:spconv.pytorch.functional",  # spconv import

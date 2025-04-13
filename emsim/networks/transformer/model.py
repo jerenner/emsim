@@ -17,7 +17,7 @@ from ...utils.sparse_utils.batching.batching import (
     batch_offsets_from_sparse_tensor_indices,
     split_batch_concatted_tensor,
 )
-from ...utils.sparse_utils.indexing.indexing import sparse_index_select
+from ...utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
 from ...utils.sparse_utils.shape_ops import sparse_resize
 from ..denoising_generator import DenoisingGenerator
 from ..me_salience_mask_predictor import MESparseMaskPredictor

@@ -5,7 +5,7 @@ from torch import Tensor, nn
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import BinaryAveragePrecision
 
-from emsim.utils.sparse_utils.indexing import sparse_index_select
+from emsim.utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
 from emsim.utils.sparse_utils.shape_ops import sparse_resize
 
 

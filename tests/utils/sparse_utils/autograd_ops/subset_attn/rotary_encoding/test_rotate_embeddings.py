@@ -288,6 +288,56 @@ class TestRotateEmbeddings:
         with pytest.raises(RuntimeError, match="a leaf Variable that requires grad"):
             _ = rotate_embeddings(embeddings_5, encoding_5, needs_autograd=False)
 
+    def test_half_precision(self, device):
+        """Tests if the handling of half-precision inputs works correctly"""
+        batch_dims = [2]
+
+        embeddings = torch.randn(
+            *batch_dims, self.n_heads, self.head_dim, device=device, dtype=torch.float32
+        )
+        rope_encoding = torch.randn(
+            *batch_dims,
+            self.n_heads,
+            self.head_dim // 2,
+            device=device,
+            dtype=torch.float32
+        )
+
+        # full precision calculation
+        rotated_full = rotate_embeddings(embeddings, rope_encoding)
+        assert rotated_full.dtype == torch.float32
+
+        # half precision calculation
+        embeddings_half = embeddings.half()
+        rope_encoding_half = rope_encoding.half()
+        rotated_half = rotate_embeddings(embeddings_half, rope_encoding_half)
+        assert rotated_half.dtype == torch.float16
+
+        # bfloat16 calculation
+        embeddings_bf16 = embeddings.bfloat16()
+        rope_encoding_bf16 = rope_encoding.bfloat16()
+        rotated_bf16 = rotate_embeddings(embeddings_bf16, rope_encoding_bf16)
+        assert rotated_bf16.dtype == torch.bfloat16
+
+        # Determine input precision error
+        embeddings_half_error = torch.abs(embeddings - embeddings_half.float()).max()
+        rope_half_error = torch.abs(rope_encoding - rope_encoding_half.float()).max()
+
+        embeddings_bf16_error = torch.abs(embeddings - embeddings_bf16.float()).max()
+        rope_bf16_error = torch.abs(rope_encoding - rope_encoding_bf16.float()).max()
+
+        # Determine suitable tolerances
+        atol_half = max(embeddings_half_error, rope_half_error) * 10
+        atol_bf16 = max(embeddings_bf16_error, rope_bf16_error) * 10
+
+        # Verify errors didn't explode during the operation
+        assert torch.allclose(
+            rotated_full, rotated_half.float(), atol=atol_half, rtol=1e-2
+        )
+        assert torch.allclose(
+            rotated_full, rotated_bf16.float(), atol=atol_bf16, rtol=5e-2
+        )
+
 
 @pytest.mark.cuda_if_available
 class TestRotateEmbeddingsProperties:
@@ -731,3 +781,84 @@ class TestRotateEmbeddingsBackward:
                 torch.randn(2, 4, 6, 8, device=device),
                 torch.randn(2, 4, 6, 3, device=device),
             )
+
+    def test_half_precision(self, device):
+        """Tests if the handling of half-precision inputs works correctly"""
+        batch_dims = [2]
+
+        grad_emb_rot_full = torch.randn(
+            *batch_dims, self.n_heads, self.head_dim, device=device, dtype=torch.float32
+        )
+        embeddings = torch.randn(
+            *batch_dims, self.n_heads, self.head_dim, device=device, dtype=torch.float32
+        )
+        rope_encoding = torch.randn(
+            *batch_dims,
+            self.n_heads,
+            self.head_dim // 2,
+            device=device,
+            dtype=torch.float32
+        )
+
+        # full precision calculation
+        grad_emb_full, grad_rope_full = rotate_embeddings_backward(
+            grad_emb_rot_full, embeddings, rope_encoding
+        )
+        assert grad_emb_full.dtype == torch.float32
+        assert grad_rope_full.dtype == torch.float32
+
+        # half precision calculation
+        grad_emb_rot_half = grad_emb_rot_full.half()
+        embeddings_half = embeddings.half()
+        rope_encoding_half = rope_encoding.half()
+        grad_emb_half, grad_rope_half = rotate_embeddings_backward(
+            grad_emb_rot_half, embeddings_half, rope_encoding_half
+        )
+        assert grad_emb_half.dtype == torch.float16
+        assert grad_rope_half.dtype == torch.float16
+
+        # bfloat16 calculation
+        grad_emb_rot_bf16 = grad_emb_rot_full.bfloat16()
+        embeddings_bf16 = embeddings.bfloat16()
+        rope_encoding_bf16 = rope_encoding.bfloat16()
+        grad_emb_bf16, grad_rope_bf16 = rotate_embeddings_backward(
+            grad_emb_rot_bf16, embeddings_bf16, rope_encoding_bf16
+        )
+        assert grad_emb_bf16.dtype == torch.bfloat16
+        assert grad_rope_bf16.dtype == torch.bfloat16
+
+        # Determine input precision error
+        grad_emb_rot_half_error = torch.abs(
+            grad_emb_rot_full - grad_emb_rot_half.float()
+        ).max()
+        embeddings_half_error = torch.abs(embeddings - embeddings_half.float()).max()
+        rope_half_error = torch.abs(rope_encoding - rope_encoding_half.float()).max()
+
+        grad_emb_rot_bf16_error = torch.abs(
+            grad_emb_rot_full - grad_emb_rot_bf16.float()
+        ).max()
+        embeddings_bf16_error = torch.abs(embeddings - embeddings_bf16.float()).max()
+        rope_bf16_error = torch.abs(rope_encoding - rope_encoding_bf16.float()).max()
+
+        # Determine suitable tolerances
+        atol_half = (
+            max(grad_emb_rot_half_error, embeddings_half_error, rope_half_error) * 10
+        )
+        atol_bf16 = (
+            max(grad_emb_rot_bf16_error, embeddings_bf16_error, rope_bf16_error) * 10
+        )
+
+        # Verify errors didn't explode during the operation
+        assert torch.allclose(
+            grad_emb_full, grad_emb_half.float(), atol=atol_half, rtol=1e-2
+        )
+        assert torch.allclose(
+            grad_rope_full, grad_rope_half.float(), atol=atol_half, rtol=1e-2
+        )
+
+        assert torch.allclose(
+            grad_emb_full, grad_emb_bf16.float(), atol=atol_bf16, rtol=5e-2
+        )
+        assert torch.allclose(
+            grad_rope_full, grad_rope_bf16.float(), atol=atol_bf16, rtol=5e-2
+        )

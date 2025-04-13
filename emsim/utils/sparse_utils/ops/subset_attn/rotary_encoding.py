@@ -115,6 +115,16 @@ def calculate_rope(positions: Tensor, rope_freqs: Tensor) -> Tensor:
 
 
 @torch.jit.script
+def _upcast_if_needed(tensor: Tensor) -> Tensor:
+    """Helper function to upcast a tensor to float32 for complex number operations
+    if in lower precision. Pytorch complex number ops currently only support
+    32-bit or higher."""
+    if tensor.dtype not in (torch.float32, torch.float64):
+        return tensor.to(torch.float32)
+    return tensor
+
+
+@torch.jit.script
 def rotate_embeddings(
     embeddings: Tensor, rope_encoding: Tensor, needs_autograd: bool = True
 ) -> Tensor:
@@ -137,12 +147,26 @@ def rotate_embeddings(
     Returns:
         - embeddings_rotated (Tensor): Embedding tensor after rotation, of shape
             [..., n_heads, head_dim] and real dtype
+
+    Note:
+        - This function uses Pytorch's complex number operations, which only support
+            single and double precision. If `embeddings` and `rope_encoding` are
+            half precision or lower, they are temporarily upcasted to float32 for
+            this function, and the outputs are downcasted back to the original dtype
+            before returning them.
     """
     _validate_same_ndims(embeddings, "embeddings", rope_encoding, "rope_encoding")
     _validate_at_least_nd(embeddings, "embeddings", 3)
     _validate_real(embeddings, "embeddings")
     _validate_real(rope_encoding, "rope_encoding")
     _validate_head_dim(embeddings, rope_encoding)
+
+    # Save original dtypes
+    embeddings_dtype = embeddings.dtype
+
+    # Upcast if needed
+    embeddings = _upcast_if_needed(embeddings)
+    rope_encoding = _upcast_if_needed(rope_encoding)
 
     # Convert to complex and apply rotation
     embeddings_complex_shape = embeddings.shape[:-1] + (embeddings.size(-1) // 2, 2)
@@ -162,6 +186,8 @@ def rotate_embeddings(
         embeddings_rotated = embeddings_complex
         embeddings_rotated *= rope_encoding_complex
     embeddings_rotated = torch.view_as_real(embeddings_rotated).reshape_as(embeddings)
+
+    embeddings_rotated = embeddings_rotated.to(embeddings_dtype)
 
     return embeddings_rotated
 
@@ -208,6 +234,14 @@ def rotate_embeddings_backward(
             of real dtype and shape
             [..., n_heads, head_dim/2] or
             [..., 1,       head_dim/2], or None if not needed
+
+    Note:
+        - This function uses Pytorch's complex number operations, which only support
+            single and double precision. If any of the input tensors are
+            half precision or lower, they are temporarily upcasted to float32 for
+            this function, and the output gradients are downcasted back to the original
+            dtype of `embeddings` and `rope_encoding`, respectively, before returning
+            them.
     """
     _validate_same_ndims(embeddings, "embeddings", rope_encoding, "rope_encoding")
     _validate_real(grad_embeddings_rotated, "grad_embeddings_rotated")
@@ -225,6 +259,15 @@ def rotate_embeddings_backward(
     if not needs_grad_embeddings and not needs_grad_rope_encoding:
         # Early return
         return None, None
+
+    # Save input dtypes
+    embeddings_dtype = embeddings.dtype
+    rope_encoding_dtype = rope_encoding.dtype
+
+    # Upcast if needed
+    grad_embeddings_rotated = _upcast_if_needed(grad_embeddings_rotated)
+    embeddings = _upcast_if_needed(embeddings)
+    rope_encoding = _upcast_if_needed(rope_encoding)
 
     # Convert grad_tensor_rotated to complex
     to_complex_shape = grad_embeddings_rotated.shape[:-1] + (
@@ -260,6 +303,7 @@ def rotate_embeddings_backward(
         grad_embeddings = torch.view_as_real(grad_emb_complex).reshape_as(
             grad_embeddings_rotated
         )
+        grad_embeddings = grad_embeddings.to(embeddings_dtype)  # downcast
     else:
         grad_embeddings = None
 
@@ -303,6 +347,8 @@ def rotate_embeddings_backward(
             grad_rope_encoding = grad_rope_encoding_complex
             grad_rope_encoding /= rope_encoding_complex
             grad_rope_encoding = grad_rope_encoding.imag
+
+        grad_rope_encoding = grad_rope_encoding.to(rope_encoding_dtype)  # downcast
     else:
         grad_rope_encoding = None
 

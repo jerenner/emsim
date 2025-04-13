@@ -1,5 +1,6 @@
 import pytest
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 from emsim.utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
@@ -363,7 +364,7 @@ class TestGradients:
     def test_hybrid_sparse_complex_gradient_flow(self, device):
         """Test gradient flow through complex operations on hybrid sparse tensors."""
         # Create a hybrid sparse tensor
-        i = torch.tensor([[0, 1, 2], [0, 1, 2]], device=device)
+        i = torch.tensor([[0, 0], [1, 1], [2, 2]], device=device).T
         v = torch.tensor(
             [
                 [[1.0, 2.0], [3.0, 4.0]],  # Values for (0,0)
@@ -396,9 +397,9 @@ class TestGradients:
                 # Reshape to process each 2D block independently
                 x_reshaped = x_dense.reshape(-1, w)
 
-                # Apply linear layers
+                # Apply layers
                 x = self.linear1(x_reshaped)
-                x = torch.relu(x)
+                x = F.gelu(x)
                 x = self.linear2(x)
 
                 # Reshape back to original structure
@@ -425,13 +426,35 @@ class TestGradients:
 
 
 @pytest.mark.cpu_and_cuda
+class TestAgainstBuiltin:
+
+    def test_builtin_index_select_does_not_support_grad(self, device):
+        i = torch.tensor([[0, 0], [1, 0], [1, 1], [2, 2]], device=device).T
+        v = torch.tensor([1.0, 2.0, 3.0, 4.0], device=device)
+        shape = (3, 3)
+        sparse_tensor = torch.sparse_coo_tensor(i, v, shape).coalesce()
+        sparse_tensor.requires_grad_(True)
+
+        # Select specific indices
+        index = torch.tensor([0, 2], device=device)
+
+        selected = sparse_tensor.index_select(0, index)
+        loss = selected.to_dense().sum()
+
+        with pytest.raises(
+            NotImplementedError, match="Could not run 'aten::index_add_'"
+        ):
+            loss.backward()
+
+
+@pytest.mark.cpu_and_cuda
 class TestGradcheck:
 
     def test_gradcheck_sparse_index_select(self, device):
         """Perform a detailed gradcheck on the sparse_index_select function."""
         # Create a small sparse tensor with double precision
-        i = torch.tensor([[0, 0, 1, 2], [0, 1, 1, 0]], device=device)
-        # Fix: Use double precision for gradcheck
+        i = torch.tensor([[0, 0], [0, 1], [1, 1], [2, 0]], device=device).T
+        # Use double precision for gradcheck
         v = torch.tensor(
             [1.0, 2.0, 3.0, 4.0], device=device, dtype=torch.double, requires_grad=True
         )
@@ -1062,14 +1085,8 @@ class TestPerformanceAndIntegration:
 
         # Create a simple two-layer network
         linear1 = torch.nn.Linear(5, 8, device=device)
-        relu = torch.nn.ReLU()
+        activation = torch.nn.GELU()
         linear2 = torch.nn.Linear(8, 3, device=device)
-
-        # Initialize weights deterministically
-        torch.nn.init.ones_(linear1.weight)
-        torch.nn.init.zeros_(linear1.bias)
-        torch.nn.init.ones_(linear2.weight)
-        torch.nn.init.zeros_(linear2.bias)
 
         # Create optimizer
         optimizer = torch.optim.SGD([sparse_tensor], lr=0.1)
@@ -1080,7 +1097,7 @@ class TestPerformanceAndIntegration:
 
         # Forward pass through the network
         output1 = linear1(selected.to_dense())
-        output2 = relu(output1)
+        output2 = activation(output1)
         output3 = linear2(output2)
 
         # Compute loss
@@ -1255,13 +1272,7 @@ class TestInnerFunction:
         with pytest.raises(
             (ValueError, torch.jit.Error), match="does not support negative axes"
         ):
-            _, _ = _sparse_index_select_inner(
-                tensor_indices, tensor_values, -1, index
-            )
+            _, _ = _sparse_index_select_inner(tensor_indices, tensor_values, -1, index)
 
-        with pytest.raises(
-            (ValueError, torch.jit.Error), match="is out of bounds"
-        ):
-            _, _ = _sparse_index_select_inner(
-                tensor_indices, tensor_values, 5, index
-            )
+        with pytest.raises((ValueError, torch.jit.Error), match="is out of bounds"):
+            _, _ = _sparse_index_select_inner(tensor_indices, tensor_values, 5, index)

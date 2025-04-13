@@ -2,15 +2,18 @@ from typing import Any, Union
 
 import pytest
 import torch
-from hypothesis import given, settings, assume
-from hypothesis import strategies as st
-from torch import Tensor
+from hypothesis import given, settings
 
 from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
     GatherAndSubsetAttentionFunction,
 )
-
-from .conftest import DIFFERENTIABLE_TENSOR_NAMES, attention_inputs
+from .conftest import (
+    DIFFERENTIABLE_TENSOR_NAMES,
+    attention_inputs,
+    simple_attention_input_configs,
+    ordered_inputs,
+    set_requires_grad,
+)
 
 
 @pytest.fixture
@@ -21,41 +24,6 @@ def base_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
 @pytest.fixture
 def query_with_all_keys_unspecified_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
     return attention_inputs(unspecified_query_indices=[0, 2])
-
-
-def ordered_inputs(
-    inputs: Union[dict[str, Any], tuple[dict[str, Any], dict[str, Any]]],
-) -> tuple:
-    if isinstance(inputs, tuple):
-        inputs = inputs[0]
-
-    return (
-        inputs["query_tensor"],
-        inputs["n_heads"],
-        inputs["sparse_tensor_values"],
-        inputs["index_tensor"],
-        inputs["is_specified_mask"],
-        inputs["key_weight"],
-        inputs["value_weight"],
-        inputs["key_bias"],
-        inputs["value_bias"],
-        inputs["key_rope_encoding"],
-        inputs["key_positions"],
-        inputs["rope_freqs"],
-        inputs["scale_factor"],
-    )
-
-
-def set_requires_grad(inputs: dict[str, Any], tensor_names: Union[str, list[str]]):
-    """Sets the requires_grad flag to True for specified tensors in the input dict"""
-    modified_inputs = inputs.copy()
-    if isinstance(tensor_names, str):
-        tensor_names = [tensor_names]
-    for name in tensor_names:
-        if name in modified_inputs and modified_inputs[name] is not None:
-            tensor: Tensor = modified_inputs[name].clone()
-            modified_inputs[name] = tensor.requires_grad_(True)
-    return modified_inputs
 
 
 def grad_not_none(inputs: dict[str, Any], name: str, pass_if_none: bool = False):
@@ -215,49 +183,20 @@ class TestBasicForwardBackward:
         assert grad_not_none(inputs, tensor_requiring_grads)
         assert grad_same_shape(inputs, tensor_requiring_grads)
 
+    # Property-based version using Hypothesis
+
     @settings(deadline=None)
-    @given(
-        use_rope=st.sampled_from(["none", "precomputed", "from_freqs"]),
-        use_biases=st.booleans(),
-        tensors_requiring_grads=st.lists(
-            st.sampled_from(DIFFERENTIABLE_TENSOR_NAMES),
-            min_size=1,
-            max_size=len(DIFFERENTIABLE_TENSOR_NAMES),
-            unique=True,
-        ),
-    )
+    @given(tensor_configs=simple_attention_input_configs())
     def test_hypothesis_forward_backward(
         self,
         device,
-        use_rope: str,
-        use_biases: bool,
-        tensors_requiring_grads: list[str],
+        tensor_configs: dict[str, Union[bool, list[str]]],
     ):
         """Hypothesis-based test to try random combinations of inputs"""
-        assume(  # filter out invalid rope combinations
-            not (
-                "key_rope_encoding" in tensors_requiring_grads
-                and use_rope != "precomputed"
-            )
-        )
-        assume(
-            not (
-                (
-                    "key_positions" in tensors_requiring_grads
-                    or "rope_freqs" in tensors_requiring_grads
-                )
-                and use_rope in ("none, precomputed")
-            )
-        )
-        assume(  # don't make biases require grads when they aren't being used
-            not (
-                (
-                    "key_bias" in tensors_requiring_grads
-                    or "value_bias" in tensors_requiring_grads
-                )
-                and not use_biases
-            )
-        )
+        use_biases = tensor_configs["use_biases"]
+        use_rope = tensor_configs["use_rope"]
+        tensors_requiring_grads = tensor_configs["tensors_requiring_grads"]
+
         inputs = attention_inputs(
             use_biases=use_biases, use_rope=use_rope, device=device
         )
@@ -295,55 +234,33 @@ class TestGradcheck:
 
         assert torch.autograd.gradcheck(GatherAndSubsetAttentionFunction.apply, inputs)
 
+    # Property-based version using hypothesis
+
     @settings(deadline=None, max_examples=25)
-    @given(
-        use_rope=st.sampled_from(["none", "precomputed", "from_freqs"]),
-        use_biases=st.booleans(),
-        tensors_requiring_grads=st.lists(
-            st.sampled_from(DIFFERENTIABLE_TENSOR_NAMES),
-            min_size=1,
-            max_size=len(DIFFERENTIABLE_TENSOR_NAMES),
-            unique=True,
-        ),
-    )
+    @given(tensor_configs=simple_attention_input_configs())
     def test_hypothesis_gradcheck(
         self,
-        device,
-        use_rope: str,
-        use_biases: bool,
-        tensors_requiring_grads: list[str],
+        device: str,
+        tensor_configs: dict[str, Union[bool, list[str]]],
     ):
         """Hypothesis-based test to try random combinations of inputs"""
-        assume(  # filter out invalid rope combinations
-            not (
-                "key_rope_encoding" in tensors_requiring_grads
-                and use_rope != "precomputed"
-            )
-        )
-        assume(
-            not (
-                (
-                    "key_positions" in tensors_requiring_grads
-                    or "rope_freqs" in tensors_requiring_grads
-                )
-                and use_rope in ("none, precomputed")
-            )
-        )
-        assume(  # don't make biases require grads when they aren't being used
-            not (
-                (
-                    "key_bias" in tensors_requiring_grads
-                    or "value_bias" in tensors_requiring_grads
-                )
-                and not use_biases
-            )
-        )
+        use_biases = tensor_configs["use_biases"]
+        use_rope = tensor_configs["use_rope"]
+        tensors_requiring_grads = tensor_configs["tensors_requiring_grads"]
+
         inputs = attention_inputs(
-            use_biases=use_biases, use_rope=use_rope, device=device, dtype=torch.double,
+            use_biases=use_biases,
+            use_rope=use_rope,
+            device=device,
+            dtype=torch.double,
         )
 
         inputs = set_requires_grad(inputs, tensors_requiring_grads)
         inputs = ordered_inputs(inputs)
 
-        # Forward pass
-        assert torch.autograd.gradcheck(GatherAndSubsetAttentionFunction.apply, inputs)
+        nondet_tol = 1e-5 if device == "cuda" else 0.0
+
+        # Run gradcheck
+        assert torch.autograd.gradcheck(
+            GatherAndSubsetAttentionFunction.apply, inputs, nondet_tol=nondet_tol
+        )

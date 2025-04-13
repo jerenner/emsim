@@ -24,17 +24,26 @@ def generate_cuda_parameterization(metafunc: pytest.Metafunc):
         return
 
     cuda_marker = metafunc.definition.get_closest_marker("cuda_if_available")
+    both_marker = metafunc.definition.get_closest_marker("cpu_and_cuda")
     no_cuda = metafunc.config.getoption("--no-cuda")
 
-    # Default to CPU for tests without the cuda marker
-    if not cuda_marker:
-        metafunc.parametrize("device", ["cpu"], ids=lambda d: f"device={d}")
+    # For tests with cpu_and_cuda marker, run on both CPU and CUDA if available
+    if both_marker:
+        if CUDA_AVAILABLE and not no_cuda:
+            devices = ["cpu", "cuda"]
+        else:
+            devices = ["cpu"]
+        metafunc.parametrize("device", devices, ids=lambda d: f"device={d}")
         return
 
-    # For tests with cuda marker, use CUDA if available, otherwise CPU
-    if CUDA_AVAILABLE and not no_cuda:
-        devices = ["cuda"]
-    else:
-        devices = ["cpu"]
+    # For tests with cuda_if_available marker, use CUDA if available, otherwise CPU
+    if cuda_marker:
+        if CUDA_AVAILABLE and not no_cuda:
+            devices = ["cuda"]
+        else:
+            devices = ["cpu"]
+        metafunc.parametrize("device", devices, ids=lambda d: f"device={d}")
+        return
 
-    metafunc.parametrize("device", devices, ids=lambda d: f"device={d}")
+    # Default to CPU for tests without markers
+    metafunc.parametrize("device", ["cpu"], ids=lambda d: f"device={d}")

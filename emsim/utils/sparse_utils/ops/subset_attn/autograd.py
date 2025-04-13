@@ -348,7 +348,6 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         output = torch.matmul(
             attn_weights.unsqueeze(-2), # (n_heads, n_queries, 1, n_keys_per_query)
             values,                     # (n_heads, n_queries, n_keys_per_query, head_dim)
-            out=queries,  # memory optimization
         ).squeeze(-2)                   # (n_heads, n_queries, head_dim)
         # fmt: on
 

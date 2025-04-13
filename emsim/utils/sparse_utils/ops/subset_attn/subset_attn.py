@@ -31,6 +31,16 @@ def batch_sparse_index_subset_attn(
     The implementation uses a custom autograd function to avoid storing large
     intermediate tensors, recalculating them during the backward pass as needed.
 
+    This function supports rotary position encoding (RoPE) for the selected keys. You
+    may either pass in the RoPE encoding tensor `key_rope_encoding`, or its components
+    `key_positions` and `rope_freqs`, which allows for computation of
+    `key_rope_encoding` inside of the autograd function. This latter option is useful
+    because the `rope_encoding` tensor may be significantly larger in memory than
+    `key_positions` and `rope_freqs` combined (see shape information in the args
+    section below for more detail), and letting the custom autograd function handle
+    computing the encoding from the positions and frequencies lets us avoid storing
+    that tensor as well.
+
     Notes:
         - Key indices in index_tensor pointing to spatial locations in sparse_tensor
             that do not have specified values will be masked out in the attention

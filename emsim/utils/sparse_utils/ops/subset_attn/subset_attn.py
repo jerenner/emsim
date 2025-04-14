@@ -124,7 +124,7 @@ def batch_sparse_index_subset_attn(
     sparse_tensor = sparse_tensor.coalesce()
     sparse_tensor_values = sparse_tensor.values()
 
-    index_search, is_specified_mask = get_sparse_index_mapping(
+    linear_index_tensor, is_specified_mask = get_sparse_index_mapping(
         sparse_tensor, index_tensor
     )
     if check_all_specified and not is_specified_mask.all():
@@ -138,7 +138,7 @@ def batch_sparse_index_subset_attn(
         query_tensor,
         n_heads,
         sparse_tensor_values,
-        index_search,
+        linear_index_tensor,
         is_specified_mask,
         key_weight,
         value_weight,

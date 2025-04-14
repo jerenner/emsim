@@ -165,4 +165,8 @@ class TestBatchSparseIndexProperties:
         dense_selected_grad = dense_tensor.grad.clone()[index_tensor.unbind(-1)]
 
         # compare
-        assert torch.allclose(sparse_selected_grad, dense_selected_grad)
+        if dtype == torch.float16:
+            atol = 1e-5
+        else:
+            atol = 1e-8  # default
+        assert torch.allclose(sparse_selected_grad, dense_selected_grad, atol=atol)

@@ -65,7 +65,8 @@ def calculate_rope(positions: Tensor, rope_freqs: Tensor) -> Tensor:
     groups.
     The returned positional encoding will be in real space, and must be converted
     to complex coordinates with e.g. torch.polar before multiplying with the
-    complex representation of the embedding tensor.
+    complex representation of the embedding tensor (this conversion is handled by
+    rotate_embeddings).
     This function may be used in combination with the others in its module for a
     memory-efficient RoPE application over many positions.
     This implementation allows for grouping of position dimensions into specific
@@ -133,8 +134,7 @@ def rotate_embeddings(
 
     Args:
         embeddings (Tensor): Embeddings tensor to be rotated (usually a query or
-            key tensor) of real dtype and shape
-            [..., n_heads, head_dim]
+            key tensor) of real dtype and shape [..., n_heads, head_dim]
         rope_encoding (Tensor): Position encoding of real dtype and shape
             [..., n_heads, head_dim/2] or
             [..., 1,       head_dim/2] (broadcasted over heads)
@@ -152,8 +152,8 @@ def rotate_embeddings(
         - This function uses Pytorch's complex number operations, which only support
             single and double precision. If `embeddings` and `rope_encoding` are
             half precision or lower, they are temporarily upcasted to float32 for
-            this function, and the outputs are downcasted back to the original dtype
-            before returning them.
+            this function, and the output is downcasted back to `embeddings`'s original
+            dtype before returning it.
     """
     _validate_same_ndims(embeddings, "embeddings", rope_encoding, "rope_encoding")
     _validate_at_least_nd(embeddings, "embeddings", 3)
@@ -161,7 +161,7 @@ def rotate_embeddings(
     _validate_real(rope_encoding, "rope_encoding")
     _validate_head_dim(embeddings, rope_encoding)
 
-    # Save original dtypes
+    # Save original dtype
     embeddings_dtype = embeddings.dtype
 
     # Upcast if needed
@@ -187,6 +187,7 @@ def rotate_embeddings(
         embeddings_rotated *= rope_encoding_complex
     embeddings_rotated = torch.view_as_real(embeddings_rotated).reshape_as(embeddings)
 
+    # Cast back
     embeddings_rotated = embeddings_rotated.to(embeddings_dtype)
 
     return embeddings_rotated

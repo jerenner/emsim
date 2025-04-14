@@ -9,11 +9,11 @@ from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
     GatherAndSubsetAttentionFunction,
 )
 
+from ..input_generation import attention_inputs
 from ..traceable_sparse_attn import traceable_sparse_attention
 from .conftest import (
-    attention_inputs,
     exhaustive_attention_input_configs,
-    ordered_inputs,
+    ordered_autograd_inputs,
     set_requires_grad,
 )
 
@@ -28,13 +28,14 @@ from .conftest import (
 def test_gradcheck_exhaustive(device: str, input_params: dict[str, Any]) -> None:
     """Gradcheck test letting Hypothesis really explore the input space.
 
-    Takes a while to run."""
+    Takes a while to run.
+    """
     tensors_requiring_grads = input_params["tensors_requiring_grads"]
 
     inputs = attention_inputs(**input_params, device=device)
 
     inputs = set_requires_grad(inputs, tensors_requiring_grads)
-    inputs = ordered_inputs(inputs)
+    inputs = ordered_autograd_inputs(inputs)
 
     nondet_tol = 1e-5 if device == "cuda" else 0.0
 
@@ -54,7 +55,7 @@ def test_forward_against_traceable(device: str, input_params: dict[str, Any]):
     """Test the forward method against a reference implementation that doesn't have
     optimizations."""
     inputs = attention_inputs(**input_params, device=device)
-    inputs = ordered_inputs(inputs)
+    inputs = ordered_autograd_inputs(inputs)
 
     optimized_output = GatherAndSubsetAttentionFunction.apply(*inputs)
     reference_output = traceable_sparse_attention(*inputs)
@@ -79,7 +80,7 @@ def test_gradients_against_traceable(device: str, input_params: dict[str, Any]):
     # set up inputs
     inputs = attention_inputs(**input_params, device=device)
     inputs = set_requires_grad(inputs, tensors_requiring_grads)
-    optimized_inputs = ordered_inputs(inputs)
+    optimized_inputs = ordered_autograd_inputs(inputs)
 
     # make a fresh copy of input tensors for reference implementation
     reference_inputs = [

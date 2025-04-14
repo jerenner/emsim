@@ -7,23 +7,14 @@ from hypothesis import given, settings
 from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
     GatherAndSubsetAttentionFunction,
 )
+
+from ..input_generation import attention_inputs
 from .conftest import (
     DIFFERENTIABLE_TENSOR_NAMES,
-    attention_inputs,
-    simple_attention_input_configs,
-    ordered_inputs,
+    ordered_autograd_inputs,
     set_requires_grad,
+    simple_attention_input_configs,
 )
-
-
-@pytest.fixture
-def base_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
-    return attention_inputs()
-
-
-@pytest.fixture
-def query_with_all_keys_unspecified_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
-    return attention_inputs(unspecified_query_indices=[0, 2])
 
 
 def grad_not_none(inputs: dict[str, Any], name: str, pass_if_none: bool = False):
@@ -40,14 +31,16 @@ def grad_same_shape(inputs: dict[str, Any], name: str, pass_if_none: bool = Fals
 
 @pytest.mark.cuda_if_available
 class TestBasicForwardBackward:
-    def test_attention_forward_shape(self, base_inputs):
+    def test_attention_forward_shape(self, device: str):
         """Test that the forward pass produces output with the correct shape."""
-        inputs = base_inputs
+        inputs = attention_inputs(device=device)
         metadata = inputs["metadata"]
 
-        output = GatherAndSubsetAttentionFunction.apply(*ordered_inputs(inputs))
+        output = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs)
+        )
 
-        expected_shape = (metadata["n_queries"], metadata["embed_dim"])
+        expected_shape = (sum(metadata["n_queries"]), metadata["embed_dim"])
         assert (
             output.shape == expected_shape
         ), f"Expected shape {expected_shape}, got {output.shape}"
@@ -56,12 +49,16 @@ class TestBasicForwardBackward:
 
     def test_attention_forward_with_unspecified_keys(
         self,
-        query_with_all_keys_unspecified_inputs,
+        device: str,
     ):
         """Test forward pass with queries having all keys unspecified."""
-        inputs = query_with_all_keys_unspecified_inputs
+        inputs = attention_inputs(
+            n_queries=4, unspecified_query_indices=[0, 2], device=device
+        )
 
-        output = GatherAndSubsetAttentionFunction.apply(*(ordered_inputs(inputs)))
+        output = GatherAndSubsetAttentionFunction.apply(
+            *(ordered_autograd_inputs(inputs))
+        )
 
         # Check that queries with all keys unspecified produce finite values
         unspecified_indices = inputs["metadata"]["unspecified_query_indices"]
@@ -70,19 +67,21 @@ class TestBasicForwardBackward:
                 output[unspecified_indices]
             ).any(), "Output for queries with all keys unspecified contains NaN values"
 
-    def test_attention_forward_backward(self, base_inputs):
+    def test_attention_forward_backward(self, device):
         """Test both forward and backward passes with gradients."""
-        inputs = base_inputs
+        inputs = attention_inputs(device=device)
         metadata = inputs["metadata"]
 
         # Ensure tensors require gradients
         inputs = set_requires_grad(inputs, DIFFERENTIABLE_TENSOR_NAMES)
 
         # Forward pass
-        output = GatherAndSubsetAttentionFunction.apply(*ordered_inputs(inputs))
+        output = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs)
+        )
 
         # Check output shape
-        expected_shape = (metadata["n_queries"], metadata["embed_dim"])
+        expected_shape = (sum(metadata["n_queries"]), metadata["embed_dim"])
         assert output.shape == expected_shape
 
         # Create a simple loss and run backward
@@ -123,7 +122,9 @@ class TestBasicForwardBackward:
         inputs = set_requires_grad(inputs, DIFFERENTIABLE_TENSOR_NAMES)
 
         # Forward pass
-        output = GatherAndSubsetAttentionFunction.apply(*ordered_inputs(inputs))
+        output = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs)
+        )
 
         # Backward pass
         loss = output.sum()
@@ -174,7 +175,9 @@ class TestBasicForwardBackward:
         inputs = set_requires_grad(inputs, tensor_requiring_grads)
 
         # Forward pass
-        output = GatherAndSubsetAttentionFunction.apply(*ordered_inputs(inputs))
+        output = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs)
+        )
 
         # Backward pass
         loss = output.sum()
@@ -204,7 +207,9 @@ class TestBasicForwardBackward:
         inputs = set_requires_grad(inputs, tensors_requiring_grads)
 
         # Forward pass
-        output = GatherAndSubsetAttentionFunction.apply(*ordered_inputs(inputs))
+        output = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs)
+        )
 
         # Backward pass
         loss = output.sum()
@@ -230,7 +235,7 @@ class TestGradcheck:
             name for name in DIFFERENTIABLE_TENSOR_NAMES if inputs[name] is not None
         ]
         inputs = set_requires_grad(inputs, tensors_to_diff)
-        inputs = ordered_inputs(inputs)
+        inputs = ordered_autograd_inputs(inputs)
 
         assert torch.autograd.gradcheck(GatherAndSubsetAttentionFunction.apply, inputs)
 
@@ -256,7 +261,7 @@ class TestGradcheck:
         )
 
         inputs = set_requires_grad(inputs, tensors_requiring_grads)
-        inputs = ordered_inputs(inputs)
+        inputs = ordered_autograd_inputs(inputs)
 
         nondet_tol = 1e-5 if device == "cuda" else 0.0
 

@@ -150,7 +150,7 @@ def get_sparse_index_mapping(
             is_specified_mask being set to False.
 
     Returns:
-        index_search: Long tensor of dimension ... of the locations in
+        linear_index_tensor: Long tensor of dimension ... of the locations in
             sparse_tensor.values() corresponding to the indices in index_tensor.
             Elements where is_specified_mask is False are junk data and should
             not be used.
@@ -182,23 +182,28 @@ def get_sparse_index_mapping(
     # The dummy value of 0 should always return searched index of 0 since
     # the sparse_tensor_indices_linearized values are always nonnegative.
     # Should be faster to find than random search values.
-    index_search = torch.searchsorted(  # binary search
+    linear_index_tensor = torch.searchsorted(  # binary search
         sparse_tensor_indices_linearized, index_tensor_linearized
     )
     # guard against IndexError
-    index_search.clamp_max_(sparse_tensor_indices_linearized.shape[0] - 1)
+    linear_index_tensor.clamp_max_(sparse_tensor_indices_linearized.shape[0] - 1)
+
+    # linear_index_tensor is distinct from index_tensor_linearized in that
+    # index_tensor_linearized has the flattened version of the index in the sparse
+    # tensor, while linear_index_tensor has the corresponding index in the sparse
+    # tensor's values() tensor
 
     # Check if the indices were specified by checking for an exact match at the
     # resultant searched indices
     is_specified_mask: Tensor = (
-        sparse_tensor_indices_linearized[index_search] == index_tensor_linearized
+        sparse_tensor_indices_linearized[linear_index_tensor] == index_tensor_linearized
     )
     is_specified_mask.logical_and_(~out_of_bounds_indices.view(-1))
 
-    index_search = index_search.view(index_tensor.shape[:-1])
+    linear_index_tensor = linear_index_tensor.view(index_tensor.shape[:-1])
     is_specified_mask = is_specified_mask.view(index_tensor.shape[:-1])
 
-    return index_search, is_specified_mask
+    return linear_index_tensor, is_specified_mask
 
 
 @torch.jit.script

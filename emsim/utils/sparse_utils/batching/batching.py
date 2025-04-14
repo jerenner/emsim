@@ -87,7 +87,7 @@ def remove_batch_dim_and_concat(
 
     Args:
         tensor (Tensor): A tensor of shape (batch_size, max_seq_length, D1, D2, ..., Dn)
-        batch_offsets (Tensor, optional): Optional boolean tensor of shape
+        padding_mask (Tensor, optional): Optional boolean tensor of shape
             (batch_size, max_seq_length) where True indicates padded positions
 
     Returns:
@@ -107,7 +107,7 @@ def remove_batch_dim_and_concat(
         if not padding_mask.shape[0] == batch_size:
             raise ValueError("Batch size mismatch between tensor and padding_mask")
         if not padding_mask.shape[1] == max_len:
-            raise ValueError("Sequence length mismatch between tesnor and padding_mask")
+            raise ValueError("Sequence length mismatch between tensor and padding_mask")
 
     if padding_mask is None or not padding_mask.any():
         # All sequences are same length so can just return a view

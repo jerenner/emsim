@@ -3,6 +3,7 @@ from typing import Any, Union
 import pytest
 import torch
 from hypothesis import given, settings
+from torch import Tensor
 
 from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
     GatherAndSubsetAttentionFunction,
@@ -221,6 +222,124 @@ class TestBasicForwardBackward:
 
 
 @pytest.mark.cuda_if_available
+class TestDropout:
+    def test_dropout_effect_on_output(self, device: str):
+        """Test that dropout has a measurable effect during training."""
+        seed = 1
+        # Get inputs without dropout
+        inputs_no_dropout = attention_inputs(device=device, dropout_p=0.0, seed=seed)
+        # Same inputs with high dropout
+        inputs_dropout = attention_inputs(device=device, dropout_p=0.5, seed=seed)
+
+        inputs_no_dropout = ordered_autograd_inputs(inputs_no_dropout)
+        inputs_dropout = ordered_autograd_inputs(inputs_dropout)
+
+        # ensure tensor inputs are the same
+        for inp_no, inp_with in zip(inputs_no_dropout, inputs_dropout):
+            if isinstance(inp_no, Tensor):
+                assert torch.equal(inp_no, inp_with)
+
+        # Run forward passes
+        output_no_dropout = GatherAndSubsetAttentionFunction.apply(*inputs_no_dropout)
+        output_dropout = GatherAndSubsetAttentionFunction.apply(*inputs_dropout)
+
+        # Outputs should be different when dropout is applied
+        assert not torch.allclose(
+            output_no_dropout, output_dropout, rtol=1e-4, atol=1e-4
+        )
+
+    def test_dropout_training_vs_eval(self, device: str):
+        """Test that dropout is only applied in training mode."""
+        seed = 1
+
+        # Get inputs with dropout in training mode
+        inputs_training = attention_inputs(
+            device=device, dropout_p=0.5, training=True, seed=seed
+        )
+        ordered_inputs_training = ordered_autograd_inputs(inputs_training)
+
+        # Get inputs with dropout in eval mode
+        # (same seed so input tensors should be the same)
+        inputs_eval = attention_inputs(
+            device=device, dropout_p=0.5, training=False, seed=seed
+        )
+        ordered_inputs_eval = ordered_autograd_inputs(inputs_eval)
+
+        # Double check input tensors are the same with the same generation seed
+        for inp_train, inp_eval in zip(ordered_inputs_training, ordered_inputs_eval):
+            if isinstance(inp_train, Tensor):
+                assert torch.equal(inp_train, inp_eval)
+
+        # Run forward passes
+        torch.manual_seed(seed)
+        output_training_1 = GatherAndSubsetAttentionFunction.apply(
+            *ordered_inputs_training
+        )
+
+        # If we run again in training mode, should get different results
+        torch.manual_seed(seed + 1)  # Different seed
+        output_training_2 = GatherAndSubsetAttentionFunction.apply(
+            *ordered_inputs_training
+        )
+
+        # In eval mode, dropout should be ignored
+        output_eval = GatherAndSubsetAttentionFunction.apply(*ordered_inputs_eval)
+
+        # Training outputs should differ from each other
+        assert not torch.allclose(
+            output_training_1, output_training_2, rtol=1e-4, atol=1e-4
+        )
+
+        # Eval mode outputs should be deterministic regardless of dropout_p
+        # They should match outputs with dropout_p=0
+        inputs_no_dropout = attention_inputs(
+            device=device, dropout_p=0.0, training=False, seed=seed
+        )
+        output_no_dropout = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs_no_dropout)
+        )
+        assert torch.allclose(output_eval, output_no_dropout, rtol=1e-4, atol=1e-4)
+
+    def test_dropout_reproducibility(self, device: str):
+        """Test that dropout is reproducible with the same seed."""
+        seed = 42
+        dropout_p = 0.3
+
+        # First run with seed
+        inputs1 = attention_inputs(
+            device=device, dropout_p=dropout_p, training=True, seed=seed
+        )
+        torch.manual_seed(seed)
+        output1 = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs1)
+        )
+
+        # Second run with same seed
+        inputs2 = attention_inputs(
+            device=device, dropout_p=dropout_p, training=True, seed=seed
+        )
+        torch.manual_seed(seed)
+        output2 = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs2)
+        )
+
+        # Outputs should be identical with same seed
+        assert torch.allclose(output1, output2)
+
+        # Different seed should give different output
+        inputs3 = attention_inputs(
+            device=device, dropout_p=dropout_p, training=True, seed=seed
+        )
+        torch.manual_seed(seed + 1)
+        output3 = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs3)
+        )
+
+        # Outputs should differ with different seed
+        assert not torch.allclose(output1, output3)
+
+
+@pytest.mark.cuda_if_available
 class TestGradcheck:
     @pytest.mark.parametrize(
         "use_rope",
@@ -229,7 +348,9 @@ class TestGradcheck:
     )
     def test_basic_gradcheck(uself, device, use_rope: str) -> None:
         """Test gradcheck with different RoPE settings."""
-        inputs = attention_inputs(use_rope=use_rope, device=device, dtype=torch.double)
+        inputs = attention_inputs(
+            use_rope=use_rope, device=device, dtype=torch.double, dropout_p=0.0
+        )
 
         tensors_to_diff = [
             name for name in DIFFERENTIABLE_TENSOR_NAMES if inputs[name] is not None
@@ -258,6 +379,7 @@ class TestGradcheck:
             use_rope=use_rope,
             device=device,
             dtype=torch.double,
+            dropout_p=0.0,
         )
 
         inputs = set_requires_grad(inputs, tensors_requiring_grads)

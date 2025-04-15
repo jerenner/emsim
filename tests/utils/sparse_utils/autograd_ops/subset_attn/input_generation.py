@@ -31,6 +31,8 @@ def attention_inputs(
     generate_linear_sparse_tensor_directly: bool = False,
     device: Union[str, torch.device] = "cpu",
     dtype: torch.dtype = torch.float32,
+    dropout_p: float = 0.1,
+    training: bool = True,
     seed: Optional[int] = None,
     **kwargs,
 ):
@@ -231,6 +233,8 @@ def attention_inputs(
         ),
         "rope_freqs": rope_freqs,
         "scale_factor": scale_factor,
+        "dropout_p": dropout_p,
+        "training": training,
         "metadata": {
             "n_queries": n_queries,
             "embed_dim": embed_dim,

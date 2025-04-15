@@ -32,7 +32,7 @@ def test_gradcheck_exhaustive(device: str, input_params: dict[str, Any]) -> None
     """
     tensors_requiring_grads = input_params["tensors_requiring_grads"]
 
-    inputs = attention_inputs(**input_params, device=device)
+    inputs = attention_inputs(**input_params, device=device, dropout_p=0.0)
 
     inputs = set_requires_grad(inputs, tensors_requiring_grads)
     inputs = ordered_autograd_inputs(inputs)
@@ -54,7 +54,7 @@ def test_gradcheck_exhaustive(device: str, input_params: dict[str, Any]) -> None
 def test_forward_against_traceable(device: str, input_params: dict[str, Any]):
     """Test the forward method against a reference implementation that doesn't have
     optimizations."""
-    inputs = attention_inputs(**input_params, device=device)
+    inputs = attention_inputs(**input_params, device=device, dropout_p=0.0)
     inputs = ordered_autograd_inputs(inputs)
 
     optimized_output = GatherAndSubsetAttentionFunction.apply(*inputs)
@@ -78,7 +78,7 @@ def test_gradients_against_traceable(device: str, input_params: dict[str, Any]):
     tensors_requiring_grads = input_params["tensors_requiring_grads"]
 
     # set up inputs
-    inputs = attention_inputs(**input_params, device=device)
+    inputs = attention_inputs(**input_params, device=device, dropout_p=0.0)
     inputs = set_requires_grad(inputs, tensors_requiring_grads)
     optimized_inputs = ordered_autograd_inputs(inputs)
 

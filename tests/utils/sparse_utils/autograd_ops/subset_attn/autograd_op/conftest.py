@@ -41,6 +41,8 @@ def ordered_autograd_inputs(
         inputs["key_positions"],
         inputs["rope_freqs"],
         inputs["scale_factor"],
+        inputs["dropout_p"],
+        inputs["training"],
     )
 
 

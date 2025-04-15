@@ -115,6 +115,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         key_positions: Optional[Tensor] = None,
         rope_freqs: Optional[Tensor] = None,
         scale_factor: float = None,  # scaling for attn, default 1/sqrt(d)
+        dropout_p: float = 0.0,
+        training: bool = True,
     ) -> Tensor:
         """Performs sparse neighborhood attention with minimal memory usage.
 
@@ -162,6 +164,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 For traditional RoPE, keep n_freq_groups as 1.
             scale_factor (Optional[float]): Scaling factor for attention scores.
                 Default is 1/sqrt(embed_dim).
+            dropout_p (float): Dropout rate for attention weights.
+            training (bool): Whether we are in training mode. If True, dropout is
+                applied.
 
         Returns:
             Tensor: Output tensor after attention of shape [n_queries, embed_dim]
@@ -280,6 +285,10 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         ctx.head_dim = head_dim
         ctx.n_keys_per_query = n_keys_per_query
 
+        # save dropout info
+        ctx.dropout_p = dropout_p
+        ctx.training = training
+
         # default scale factor
         if scale_factor is None:
             scale_factor = embed_dim ** (-1 / 2)
@@ -342,6 +351,20 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # nans expected if all of the keys that a query tried to attend to were unspecified
         attn_weights.nan_to_num_(0.0)
 
+        ctx.attn_weights = attn_weights
+
+        #### Step 8.5: Apply dropout if in training mode
+        attn_dropout_mask = None
+        if training and dropout_p > 0.0:
+            # Create and apply dropout mask
+            attn_dropout_mask = torch.empty_like(attn_weights, dtype=torch.bool)
+            attn_dropout_mask.bernoulli_(dropout_p)  # 1 means drop this element
+            dropout_scale = 1.0 / (1.0 - dropout_p)
+            attn_weights = (
+                attn_weights.masked_fill(attn_dropout_mask, 0.0) * dropout_scale
+            )
+        ctx.attn_dropout_mask = attn_dropout_mask
+
         #### Step 9: Compute the output values
 
         # fmt: off
@@ -354,8 +377,6 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         output = output.transpose(-2, -3)  # (n_queries, n_heads, head_dim)
         output = output.reshape(n_queries, embed_dim)
 
-        ctx.attn_weights = attn_weights
-
         return output
 
     @staticmethod
@@ -367,7 +388,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         Tensor, Tensor, Tensor, Tensor, Tensor,
         Tensor, Tensor, Tensor, Tensor,
         Tensor, Tensor, Tensor, int, int,
-        float, dict[str, bool],
+        float, dict[str, bool], float, bool, Optional[Tensor]
         # fmt: on
     ]:
         """Retrieves all saved tensors and shape info from forward pass and preps
@@ -392,6 +413,11 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # retrieve scale factor
         scale_factor: float = ctx.scale_factor
 
+        # retrieve dropout info
+        dropout_p: float = ctx.dropout_p
+        training: bool = ctx.training
+        attn_dropout_mask: Optional[Tensor] = ctx.attn_dropout_mask
+
         # account for which inputs need gradients
         needed_grads = {
             "query": ctx.needs_input_grad[0],
@@ -412,7 +438,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             query_tensor, sparse_tensor_values, key_weight, value_weight, key_bias,
             value_bias, key_rope_encoding, key_positions, rope_freqs,
             index_tensor, is_specified_mask, attn_weights, embed_dim, n_heads,
-            scale_factor, needed_grads
+            scale_factor, needed_grads, dropout_p, training, attn_dropout_mask,
         )
         # fmt: on
 
@@ -528,6 +554,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 - grad_key_positions: [n_queries, n_keys_per_query, position_dim] or None
                 - grad_rope_freqs: [position_dim, n_freq_groups, n_heads, head_dim/2] or None
                 - None (for scale_factor)
+                - None (for dropout_p)
+                - None (for training)
         """
 
         ######
@@ -571,7 +599,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         # Early return for no gradients
         if grad_output is None:
-            return (None,) * 13
+            return (None,) * 15
 
         ##### Step 1: retrieve values and set up variables
 
@@ -580,7 +608,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             query_tensor, sparse_tensor_values, key_weight, value_weight, key_bias,
             value_bias, key_rope_encoding, key_positions, rope_freqs,
             index_tensor, is_specified_mask, attn_weights, embed_dim, n_heads,
-            scale_factor, needed_grads,
+            scale_factor, needed_grads, dropout_p, training, attn_dropout_mask,
         ) = GatherAndSubsetAttentionFunction._initialize_backward(ctx)
         # fmt: on
 
@@ -637,7 +665,13 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         if needed_intermediates["attn_scores"]:
             grad_attn_scores = _compute_grad_attn_scores(
-                grad_output, values, attn_weights, is_specified_mask
+                grad_output,
+                values,
+                attn_weights,
+                is_specified_mask,
+                dropout_p,
+                training,
+                attn_dropout_mask,
             )
         del values  # big tensor we no longer need
 
@@ -701,7 +735,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             ##### Step 8: Enter value branch
 
             if needed_intermediates["value_branch"]:
-                grad_values = _compute_grad_values(attn_weights, grad_output)
+                grad_values = _compute_grad_values(
+                    attn_weights, grad_output, dropout_p, training, attn_dropout_mask
+                )
 
                 # Flatten for grad calcs
                 # [n_queries * n_keys_per_query * n_heads, head_dim]
@@ -751,6 +787,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             grad_key_positions,  # key_positions
             grad_rope_freqs,  # rope_freqs
             None,  # scale_factor
+            None,  # dropout_p
+            None,  # training
         )
 
 
@@ -763,6 +801,9 @@ def _compute_grad_attn_scores(
     values: Tensor,
     attn_weights: Tensor,
     is_specified_mask: Tensor,
+    dropout_p: float,
+    training: bool,
+    attn_dropout_mask: Optional[Tensor] = None,
 ) -> Tensor:
     """Computes gradients of attention scores with respect to softmax attention weights. Implements the softmax gradient."""
     # fmt: off
@@ -771,6 +812,12 @@ def _compute_grad_attn_scores(
         values.transpose(-1, -2),  # (n_heads, n_queries, head_dim, n_keys_per_query)
     ).squeeze(-2)                  # (n_heads, n_queries, n_keys_per_query)
     # fmt: on
+
+    # Apply dropout to attn_weights if it was done in the forward pass
+    if training and dropout_p > 0.0:
+        assert attn_dropout_mask is not None
+        dropout_scale = 1.0 / (1.0 - dropout_p)
+        attn_weights = attn_weights.masked_fill(attn_dropout_mask, 0.0) * dropout_scale
 
     # softmax gradient: dL/dz = S * (dL/dS - sum_j(S_j * dL/dS_j))
     # where z = attn_scores, S = softmax(z), dL/dS = grad_attn_weights
@@ -797,7 +844,7 @@ def _compute_grad_query(grad_attn_scores: Tensor, keys: Tensor, scale_factor: fl
     grad_queries *= scale_factor
 
     # Flip dims back and stack heads
-     # (n_queries, n_heads, head_dim)
+    # (n_queries, n_heads, head_dim)
     grad_queries = permute_for_attention_backward(grad_queries)
 
     grad_query = grad_queries.flatten(-2, -1)  # (n_queries, embed_dim)
@@ -852,8 +899,20 @@ def _compute_grads_keys_and_rope_encoding(
 
 
 @torch.jit.script
-def _compute_grad_values(attn_weights: Tensor, grad_output: Tensor) -> Tensor:
+def _compute_grad_values(
+    attn_weights: Tensor,
+    grad_output: Tensor,
+    dropout_p: float,
+    training: bool,
+    attn_dropout_mask: Optional[Tensor] = None,
+) -> Tensor:
     """Computes value gradients by propagating output gradients through attention weights."""
+    # Apply dropout to attn_weights if it was done in the forward pass
+    if training and dropout_p > 0.0:
+        assert attn_dropout_mask is not None
+        dropout_scale = 1.0 / (1.0 - dropout_p)
+        attn_weights = attn_weights.masked_fill(attn_dropout_mask, 0.0) * dropout_scale
+
     # fmt: off
     grad_values = torch.matmul(
         attn_weights.unsqueeze(-1), # (n_heads, n_queries, n_keys_per_query, 1)

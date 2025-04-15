@@ -25,6 +25,8 @@ def traceable_sparse_attention(
     key_positions: Optional[Tensor] = None,
     rope_freqs: Optional[Tensor] = None,
     scale_factor: Optional[float] = None,
+    dropout_p: float = 0.0,
+    training: bool = True,
 ):
     """Traceable implementation of sparse attention using standard Pytorch ops.
 
@@ -83,6 +85,8 @@ def traceable_sparse_attention(
     attn_scores = attn_scores.masked_fill(~is_specified_mask, -torch.inf)
     attn_weights = attn_scores.softmax(-1)
     attn_weights = attn_weights.nan_to_num(0.0)
+
+    attn_weights = F.dropout(attn_weights, dropout_p, training)
 
     # Apply attention weights to values
     output = torch.matmul(

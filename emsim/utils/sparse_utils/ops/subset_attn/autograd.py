@@ -3,18 +3,18 @@ from typing import Optional, Union
 import torch
 from torch import Tensor
 
-from .rotary_encoding import (
-    calculate_rope,
-    rotate_embeddings,
-    rotate_embeddings_backward,
-    calculate_rope_backward,
-)
 from .autograd_helpers import (
-    select_values_and_project_kv,
     linear_grads,
-    split_heads,
     permute_for_attention,
     permute_for_attention_backward,
+    select_values_and_project_kv,
+    split_heads,
+)
+from .rotary_encoding import (
+    calculate_rope,
+    calculate_rope_backward,
+    rotate_embeddings,
+    rotate_embeddings_backward,
 )
 
 
@@ -351,7 +351,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # nans expected if all of the keys that a query tried to attend to were unspecified
         attn_weights.nan_to_num_(0.0)
 
-        ctx.attn_weights = attn_weights
+        ctx.attn_weights = attn_weights  # save pre-dropout weights
 
         #### Step 8.5: Apply dropout if in training mode
         attn_dropout_mask = None
@@ -360,9 +360,13 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             attn_dropout_mask = torch.empty_like(attn_weights, dtype=torch.bool)
             attn_dropout_mask.bernoulli_(dropout_p)  # 1 means drop this element
             dropout_scale = 1.0 / (1.0 - dropout_p)
-            attn_weights = (
-                attn_weights.masked_fill(attn_dropout_mask, 0.0) * dropout_scale
-            )
+
+            attn_weights_dropped = attn_weights.clone()
+            attn_weights_dropped.masked_fill_(attn_dropout_mask, 0.0)
+            attn_weights_dropped *= dropout_scale
+
+            attn_weights = attn_weights_dropped
+
         ctx.attn_dropout_mask = attn_dropout_mask
 
         #### Step 9: Compute the output values

@@ -14,7 +14,6 @@ def attention_inputs(
     embed_dim: int = 16,
     n_heads: int = 4,
     n_keys_per_query: int = 5,
-    stacked_query_format: bool = True,  # set to False for functions that expect a batch dim
     use_biases: bool = True,
     use_rope: Union[
         Literal["none"], Literal["precomputed", Literal["from_freqs"]]
@@ -36,7 +35,85 @@ def attention_inputs(
     seed: Optional[int] = None,
     **kwargs,
 ):
-    """Generate test inputs for subset_attn"""
+    """Generate test inputs for sparse attention mechanisms.
+
+    This function creates a comprehensive set of tensors needed for testing
+    sparse attention implementations. It supports both batched and stacked formats,
+    different forms of positional encodings, and configurable sparsity patterns.
+
+    Args:
+        n_queries (Union[int, list[int]]): Number of queries per batch. If an integer,
+            creates a single-element batch with that many queries. If a list, each
+            element specifies the number of queries for the corresponding batch.
+        embed_dim (int): Embedding dimension for queries, keys, and values.
+        n_heads (int): Number of attention heads. Must divide embed_dim evenly.
+        n_keys_per_query (int): Number of keys each query attends to.
+        use_biases (bool): Whether to include bias terms for key and value projections.
+        use_rope (Union[Literal["none"], Literal["precomputed"], Literal["from_freqs"]]):
+            Rotary positional encoding mode. Options:
+            - "none": No positional encoding
+            - "precomputed": Use precomputed RoPE values
+            - "from_freqs": Generate RoPE from frequency components
+        position_dim (int): Number of dimensions for positional encoding (when using RoPE).
+        n_freq_groups (int): Number of frequency groups for RoPE.
+        sparse_height (int): Height dimension of the sparse spatial grid.
+        sparse_width (int): Width dimension of the sparse spatial grid.
+        sparse_levels (int): Number of hierarchical levels in the sparse grid.
+        sparsity (float): Target sparsity (proportion of empty entries) in the sparse
+            tensor.
+        index_hit_rate (float): Proportion of indexed values that actually exist in the
+            sparse tensor.
+        unspecified_query_indices (Optional[Union[int, list[int]]]): Indices of queries
+            that should have no valid keys (all misses). Can be a single index or list
+            of indices.
+        use_2d_sparse_features (bool): If True, use [n_heads, head_dim] for sparse tensor
+            feature dims.
+        generate_linear_sparse_tensor_directly (bool): If True, generate linearized
+            sparse tensors directly without creating intermediate spatial tensors.
+        device (Union[str, torch.device]): Device on which to create tensors.
+        dtype (torch.dtype): Data type for tensor values.
+        dropout_p (float): Dropout probability for attention.
+        training (bool): Whether the model is in training mode.
+        seed (Optional[int]): Random seed for reproducibility. Original RNG state is restored after use.
+        **kwargs: Additional arguments passed to helper functions.
+
+    Returns:
+        dict: A dictionary containing all tensors needed for testing sparse attention:
+            - query_tensor: Query tensor in stacked format
+            - batched_query_tensor: Query tensor in batched format with padding
+            - sparse_tensor: Sparse COO tensor containing key/value features (may be None)
+            - index_tensor: Query-to-key mapping indices in stacked format (may be None)
+            - batched_index_tensor: Query-to-key mapping indices in batched format
+                (may be None)
+            - attn_mask: Attention mask in batched format (may be None)
+            - query_padding_mask: Boolean mask indicating padding in batched tensors
+            - query_batch_offsets: Offsets for each batch in stacked format
+            - n_heads: Number of attention heads
+            - sparse_tensor_values: Values of the sparse tensor
+            - linear_index_tensor: Linearized indices for sparse tensor lookup
+            - is_specified_mask: Boolean mask indicating valid indices
+            - key_weight: Key projection weight matrix
+            - value_weight: Value projection weight matrix
+            - key_bias: Key projection bias (None if use_biases=False)
+            - value_bias: Value projection bias (None if use_biases=False)
+            - key_rope_encoding: RoPE encoding for keys in stacked format (if applicable)
+            - batched_key_rope_encoding: RoPE encoding for keys in batched format
+                (if applicable)
+            - key_positions: Key positions for RoPE in stacked format (if applicable)
+            - batched_key_positions: Key positions for RoPE in batched format
+                (if applicable)
+            - rope_freqs: RoPE frequency components (if applicable)
+            - scale_factor: Optional scale factor for attention scores
+            - dropout_p: Dropout probability
+            - training: Training mode flag
+            - metadata: Dictionary with configuration parameters
+
+    Note:
+        The function preserves the random state by saving and restoring it when a seed is
+            provided.
+        The generated tensors are compatible with both batched and stacked computation
+            approaches.
+    """
 
     torch_rng_state = torch.get_rng_state()
     np_rng_state = np.random.get_state()
@@ -60,7 +137,7 @@ def attention_inputs(
     # Generate the sparse tensor inputs, either in the form of the sparse tensor
     # itself or in the form of the outputs of get_sparse_index_mapping directly
     if not generate_linear_sparse_tensor_directly:
-        sparse_tensor, index_tensor = create_sparse_and_index_tensor(
+        sparse_tensor, batched_index_tensor = create_sparse_and_index_tensor(
             n_queries=n_queries,
             height=sparse_height,
             width=sparse_width,
@@ -76,9 +153,10 @@ def attention_inputs(
             dtype=dtype,
             seed=None,  # seeding done in the current function
         )
+        batched_attn_mask = create_batched_attn_mask(sparse_tensor, batched_index_tensor)
 
         stacked_index_tensor, query_batch_offsets_2 = remove_batch_dim_and_concat(
-            index_tensor, query_padding_mask
+            batched_index_tensor, query_padding_mask
         )
         assert torch.equal(query_batch_offsets, query_batch_offsets_2)  # sanity check
 
@@ -88,11 +166,6 @@ def attention_inputs(
         sparse_tensor_values = sparse_tensor.values()
 
     else:
-        if stacked_query_format:
-            raise ValueError(
-                "stacked query format incompatible with direct generation of linear "
-                "sparse tensor"
-            )
         total_spatial_indices = (
             len(n_queries) * sparse_height * sparse_width * sparse_levels
         )
@@ -108,7 +181,8 @@ def attention_inputs(
             )
         )
         sparse_tensor = None
-        index_tensor = None
+        batched_index_tensor = None
+        batched_attn_mask = None
         query_padding_mask = None
         stacked_index_tensor = None
 
@@ -142,8 +216,8 @@ def attention_inputs(
     )
 
     # Handle RoPE encodings
-    key_rope_encoding: Optional[torch.Tensor] = None
-    key_positions: Optional[torch.Tensor] = None
+    batched_key_rope_encoding: Optional[torch.Tensor] = None
+    batched_key_positions: Optional[torch.Tensor] = None
     rope_freqs: Optional[torch.Tensor] = None
 
     stacked_key_rope_encoding: Optional[Tensor] = None
@@ -151,7 +225,7 @@ def attention_inputs(
 
     if use_rope == "precomputed":
         # Precomputed RoPE encoding
-        key_rope_encoding = torch.randn(
+        batched_key_rope_encoding = torch.randn(
             len(n_queries),
             max(n_queries),
             n_keys_per_query,
@@ -161,11 +235,11 @@ def attention_inputs(
             dtype=dtype,
         )
         stacked_key_rope_encoding, _ = remove_batch_dim_and_concat(
-            key_rope_encoding, query_padding_mask
+            batched_key_rope_encoding, query_padding_mask
         )
     elif use_rope == "from_freqs":
         # On-the-fly RoPE encoding with key positions and frequencies
-        key_positions = torch.randn(
+        batched_key_positions = torch.randn(
             len(n_queries),
             max(n_queries),
             n_keys_per_query,
@@ -174,7 +248,7 @@ def attention_inputs(
             dtype=dtype,
         )
         stacked_key_positions, _ = remove_batch_dim_and_concat(
-            key_positions, query_padding_mask
+            batched_key_positions, query_padding_mask
         )
         rope_freqs = torch.rand(
             position_dim,
@@ -212,9 +286,12 @@ def attention_inputs(
         np.random.set_state(np_rng_state)
 
     return {
-        "query_tensor": stacked_query_tensor if stacked_query_format else query_tensor,
+        "query_tensor": stacked_query_tensor,
+        "batched_query_tensor": query_tensor,
         "sparse_tensor": sparse_tensor,
-        "index_tensor": stacked_index_tensor if stacked_query_format else index_tensor,
+        "index_tensor": stacked_index_tensor,
+        "batched_index_tensor": batched_index_tensor,
+        "attn_mask": batched_attn_mask,
         "query_padding_mask": query_padding_mask,
         "query_batch_offsets": query_batch_offsets,
         "n_heads": n_heads,
@@ -225,12 +302,10 @@ def attention_inputs(
         "value_weight": value_weight,
         "key_bias": key_bias,
         "value_bias": value_bias,
-        "key_rope_encoding": (
-            stacked_key_rope_encoding if stacked_query_format else key_rope_encoding
-        ),
-        "key_positions": (
-            stacked_key_positions if stacked_query_format else key_positions
-        ),
+        "key_rope_encoding": stacked_key_rope_encoding,
+        "batched_key_rope_encoding": batched_key_rope_encoding,
+        "key_positions": stacked_key_positions,
+        "batched_key_positions": batched_key_positions,
         "rope_freqs": rope_freqs,
         "scale_factor": scale_factor,
         "dropout_p": dropout_p,
@@ -402,10 +477,6 @@ def create_sparse_and_index_tensor(
 
         index_tensor[b, hits_this_batch] = sampled_hits.T
 
-    # double-check all the hits were selected from nonzero indices correctly
-    all_hits = index_tensor[is_hit]
-    assert (all_hits.unsqueeze(-1) == selected_indices.unsqueeze(0)).all(1).any(1).all()
-
     # Fill in indices past the specified number of queries per batch with -1 pad value
     for i, n_queries_i in enumerate(n_queries):
         index_tensor[i, n_queries_i:] = -1
@@ -424,6 +495,41 @@ def create_sparse_and_index_tensor(
             index_tensor[b, unspecified_b] = -1
 
     return sparse_tensor, index_tensor
+
+
+def create_batched_attn_mask(sparse_tensor: Tensor, index_tensor: Tensor) -> Tensor:
+    """Create a boolean attention mask tensor for batched attention based on
+    index_tensor
+
+    Args:
+        sparse_tensor (Tensor): Sparse tensor output from create_sparse_and_index_tensors
+        index_tensor (Tensor): Index tensor output from create_sparse_and_index_tensors
+
+    Returns:
+        Tensor: A boolean tensor of shape [batch_size, n_queries, height, width, level]
+            that is True at positions where a query attends to a spatial key.
+    """
+    batch_size, max_queries, _, _ = index_tensor.shape
+    _, height, width, levels = sparse_tensor.shape[: sparse_tensor.sparse_dim()]
+
+    nonpad_index_mask = index_tensor[..., 0] != -1  # (batch, query, key)
+
+    batch_indices, query_indices, key_indices = nonpad_index_mask.nonzero(as_tuple=True)
+
+    h, w, lev = index_tensor[batch_indices, query_indices, key_indices, 1:].unbind(-1)
+
+    attn_mask_indices = torch.stack([batch_indices, query_indices, h, w, lev], dim=0)
+
+    values = attn_mask_indices.new_ones(attn_mask_indices.shape[1], dtype=torch.bool)
+
+    attn_mask = torch.sparse_coo_tensor(
+        indices=attn_mask_indices,
+        values=values,
+        size=(batch_size, max_queries, height, width, levels),
+        device=index_tensor.device,
+    ).coalesce()
+
+    return attn_mask
 
 
 def create_linear_sparse_values_and_index_tensor_directly(

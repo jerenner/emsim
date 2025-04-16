@@ -10,7 +10,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
 )
 
 from ..input_generation import attention_inputs
-from ..traceable_sparse_attn import traceable_sparse_attention
+from ..traceable_attn import traceable_subset_attention
 from .conftest import (
     exhaustive_attention_input_configs,
     ordered_autograd_inputs,
@@ -58,7 +58,7 @@ def test_forward_against_traceable(device: str, input_params: dict[str, Any]):
     inputs = ordered_autograd_inputs(inputs)
 
     optimized_output = GatherAndSubsetAttentionFunction.apply(*inputs)
-    reference_output = traceable_sparse_attention(*inputs)
+    reference_output = traceable_subset_attention(*inputs, batch_kv_projection=False)
 
     abs_difference = torch.abs(optimized_output - reference_output)
     print(f"Biggest absolute difference: {abs_difference.max().item()}")
@@ -94,7 +94,9 @@ def test_gradients_against_traceable(device: str, input_params: dict[str, Any]):
 
     # get outputs
     optimized_output = GatherAndSubsetAttentionFunction.apply(*optimized_inputs)
-    reference_output = traceable_sparse_attention(*reference_inputs)
+    reference_output = traceable_subset_attention(
+        *reference_inputs, batch_kv_projection=False
+    )
 
     # check outputs match
     assert torch.allclose(optimized_output, reference_output, rtol=1e-4, atol=1e-5)

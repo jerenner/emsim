@@ -10,31 +10,54 @@ from torch import Tensor, nn
 
 def init_2d_freqs(
     head_dim: int,
-    num_heads: int,
+    n_heads: int,
     theta: float = 10.0,
     rotate: bool = True,
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
 ) -> Tensor:
-    freqs_x = []
-    freqs_y = []
-    mag = 1 / (
-        theta ** (torch.arange(0, head_dim, 4, dtype=dtype, device=device) / head_dim)
-    )
-    for _ in range(num_heads):
-        angles = (
-            torch.rand(1, device=device) * 2 * torch.pi
-            if rotate
-            else torch.zeros(1, device=device)
-        )
-        fx = torch.cat(
-            [mag * torch.cos(angles), mag * torch.cos(torch.pi / 2 + angles)], dim=-1
-        )
-        fy = torch.cat(
-            [mag * torch.sin(angles), mag * torch.sin(torch.pi / 2 + angles)], dim=-1
-        )
-        freqs_x.append(fx)
-        freqs_y.append(fy)
+    """Initializes frequency parameters for 2D rotary position embeddings.
+
+    Generates the frequencies used for RoPE (Rotary Position Embeddings) in two dimensions.
+    For each head, creates frequency vectors that incorporate both magnitude decay based
+    on theta and optional random rotation angles.
+
+    Args:
+        head_dim (int): Dimension size of each attention head. Must be divisible by 4.
+        n_heads (int): Number of attention heads.
+        theta (float): Base value for frequency scaling. Larger values result in longer
+            period sinusoids. Default: 10.0
+        rotate (bool): Whether to apply random rotation to the frequency vectors.
+            When True, each head gets different random rotations. Default: True
+        dtype (Optional[torch.dtype]): Data type for the output tensor. Default: None
+        device (Optional[torch.device]): Device for the output tensor. Default: None
+
+    Returns:
+        Tensor: Frequency parameter tensor of shape [n_head, head_dim/2, 2], containing
+            the frequency parameters for x and y dimensions for each attention head.
+    """
+    if head_dim % 2 != 0:
+        raise ValueError(f"head_dim must be even, got {head_dim}")
+
+    # Create frequency magnitudes that decay with head_dim index
+    dim_t = torch.arange(0, head_dim, 2, dtype=dtype, device=device)
+    dim_t = theta ** (dim_t / head_dim)
+
+    freqs_list = []
+    for dim_index in range(2):
+        dim_freqs = []
+        for head_index in range(n_heads):
+            angle = torch.rand(1, device=device) * 2 * torch.pi if rotate else 0
+
+
+            fx = torch.cat(
+                [mag * torch.cos(angles), mag * torch.cos(torch.pi / 2 + angles)], dim=-1
+            )
+            fy = torch.cat(
+                [mag * torch.sin(angles), mag * torch.sin(torch.pi / 2 + angles)], dim=-1
+            )
+            freqs_x.append(fx)
+            freqs_y.append(fy)
     freqs_x = torch.stack(freqs_x, dim=0)
     freqs_y = torch.stack(freqs_y, dim=0)
     freqs = torch.stack([freqs_x, freqs_y], dim=-1)
@@ -50,6 +73,29 @@ def init_nd_freqs(
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
 ) -> Tensor:
+    """Initializes frequency parameters for N-dimensional rotary position embeddings.
+
+    Generates the frequencies used for RoPE (Rotary Position Embeddings) in N dimensions.
+    For each head and position dimension, creates frequency vectors with magnitude decay
+    based on theta values and optional random rotation angles.
+
+    Args:
+        position_dim (int): Number of position dimensions (e.g., 2 for 2D, 3 for 3D).
+        head_dim (int): Dimension size of each attention head. Must be divisible by 4.
+        num_heads (int): Number of attention heads.
+        thetas (Union[Tensor, list[float], float]): Base value(s) for frequency scaling.
+            Can be a single float (applied to all dimensions), a list of floats, or a tensor
+            of shape [position_dim]. Larger values result in longer period sinusoids.
+            Default: 10.0
+        rotate (bool): Whether to apply random rotation to the frequency vectors. When True,
+            each head gets different random rotations. Default: True
+        dtype (Optional[torch.dtype]): Data type for the output tensor. Default: None
+        device (Optional[torch.device]): Device for the output tensor. Default: None
+
+    Returns:
+        Tensor: Frequency tensor of shape [n_head, head_dim/(2 * n_groups), pos_dim],
+            containing the frequency parameters for each dimension and attention head.
+    """
     thetas: Tensor = torch.as_tensor(thetas, dtype=dtype, device=device)
     if thetas.numel() == 1:
         thetas = thetas.expand(position_dim)
@@ -83,6 +129,20 @@ def init_nd_freqs(
 
 
 class RoPEEncodingND(nn.Module):
+    """N-dimensional Rotary Position Embedding (RoPE) module.
+
+    Implements rotary position embeddings for arbitrary dimensional positional inputs.
+    This module applies RoPE to queries and keys in attention mechanisms, enabling
+    position-aware attention across N spatial dimensions.
+
+    Args:
+        position_dim (int): Number of position dimensions (e.g., 2 for 2D, 3 for 3D).
+        embed_dim (int): Total embedding dimension, must be divisible by n_heads.
+        n_heads (int): Number of attention heads.
+        rope_base_theta (float): Base value for frequency scaling in RoPE. Default: 10.0
+        dtype (torch.dtype): Data type for the internal parameters. Default: torch.float
+    """
+
     def __init__(
         self,
         position_dim: int,
@@ -91,26 +151,32 @@ class RoPEEncodingND(nn.Module):
         rope_base_theta: float = 10.0,
         dtype=torch.float,
     ):
+        """Initialize the module"""
         super().__init__()
         self.embed_dim = embed_dim
         if embed_dim % n_heads != 0:
             raise ValueError(
-                "Expected d_model to be divisible by n_heads, got "
+                "Expected embed_dim to be divisible by n_heads, got "
                 f"{embed_dim} and {n_heads}"
             )
         self.head_dim = embed_dim // n_heads
         if self.head_dim % 2 != 0:
             raise ValueError(
-                f"Expected head dim to be divisible by 2, got {self.head_dim}"
+                f"Expected head_dim to be divisible by 2, got {self.head_dim}"
             )
         self.pos_dim = position_dim
-        self.d_model = embed_dim
+        self.embed_dim = embed_dim
         self.n_heads = n_heads
         self._base_theta = torch.as_tensor(rope_base_theta)
         self.dtype = dtype
         self._init_freq_param()
 
     def _init_freq_param(self):
+        """Initialize the frequency parameters for the RoPE module.
+
+        Creates and stores the frequency parameters as a trainable parameter.
+        """
+
         freqs = init_nd_freqs(
             self.pos_dim,
             self.head_dim,
@@ -123,6 +189,21 @@ class RoPEEncodingND(nn.Module):
 
     @staticmethod
     def real_to_complex(tensor: Tensor) -> Tensor:
+        """Converts a real tensor to complex representation.
+
+        Reshapes a real tensor of shape [..., 2*N] or shape [..., N, 2] to a
+        complex tensor of shape [..., N]. If the last dimension is 2, it is taken
+        as representing the real and imaginary parts. If the last dimension is not
+        2, it is interpreted as interleaved real and imaginary parts and implicitly
+        reshaped to [..., N, 2]
+
+        Args:
+            tensor (Tensor): Real-valued tensor to convert, with last dimension
+                having an even number of elements or 2.
+
+        Returns:
+            Tensor: Complex-valued tensor.
+        """
         assert not tensor.is_complex()
         if not tensor.size(-1) == 2:
             assert tensor.size(-1) % 2 == 0, "Last dim must be divisible by 2"
@@ -132,8 +213,20 @@ class RoPEEncodingND(nn.Module):
 
     @staticmethod
     def complex_to_real(tensor: Tensor) -> Tensor:
+        """Converts a complex tensor to real representation.
+
+        Reshapes a complex tensor of shape [..., N] to a real tensor of shape [..., 2*N].
+        The complex values are flattened into interleaved real and imaginary parts.
+
+        Args:
+            tensor (Tensor): Complex-valued tensor to convert.
+
+        Returns:
+            Tensor: Real-valued tensor with the last dimension size doubled.
+        """
         assert tensor.is_complex()
         tensor_real = torch.view_as_real(tensor)
+        assert tensor_real.size(-1) == 2
         tensor_real = tensor_real.flatten(-2, -1)  # flatten out new trailing dim of 2
         assert tensor_real.ndim == tensor.ndim
         return tensor_real
@@ -146,31 +239,72 @@ class RoPEEncodingND(nn.Module):
         key: Optional[Tensor] = None,
         key_pos: Optional[Tensor] = None,
     ) -> Union[Tensor, tuple[Tensor, Tensor]]:
+        """Apply rotary position embeddings to query and optionally key tensors.
+
+        Applies position-dependent rotations to query and key tensors based on
+        their associated position information.
+
+        Args:
+            query (Tensor): Query tensor of shape [..., embed_dim].
+            query_pos (Tensor): Position tensor for query of shape
+                [..., position_dim]. The leading dimensions must match those of query.
+                It is assumed that the positions are NOT normalized to the standard
+                [0, 1] range and are instead the true positions.
+            key (Optional[Tensor]): Key tensor of shape [..., embed_dim]. Default: None
+            key_pos (Optional[Tensor]): Position tensor for key of shape
+                [..., position_dim]. If None and key is provided, query_pos will be
+                used. It is assumed that the positions are NOT normalized to the
+                standard [0, 1] range and are instead the true positions. Default: None
+
+        Returns:
+            Union[Tensor, tuple[Tensor, Tensor]]:
+                - If key is None: Rotated query tensor of same shape as input query.
+                - If key is provided: Tuple of (rotated query, rotated key) tensors.
+
+        Raises:
+            ValueError: If the tensor shapes are incompatible or
+
+        Warns:
+            UserWarning: If position coordinates appear to be normalized
+                (in [0,1] range).
+        """
+
         self.shape_check(query, query_pos)
         if query_pos.numel() > 0 and query_pos.max() <= 1.0:
             warnings.warn(
                 "Expected un-normalized (i.e., not inside [0,1]) coordinates "
                 "for position but found potentially normalized coordinates. "
                 "Did you accidentally pass in normalized coordinates?\n"
-                f"(Your coord range: [{query_pos.min(), query_pos.max()}])"
+                f"(Your coord range: [{query_pos.min(), query_pos.max()}])",
+                UserWarning,
             )
         if key_pos is not None:
             self.shape_check(key, key_pos)
-        query_rot_vec = self.make_complex_rotation_vector(query_pos)
+        query_rot_vec = self.calculate_rope(query_pos)
         query_rotated = self.apply_rotation(query, query_rot_vec)
 
         if key is None:
             return query_rotated
 
         if key_pos is not None:
-            key_rot_vec = self.make_complex_rotation_vector(key_pos)
+            key_rot_vec = self.calculate_rope(key_pos)
         else:
             key_rot_vec = query_rot_vec
         key_rotated = self.apply_rotation(key, key_rot_vec)
 
         return query_rotated, key_rotated
 
-    def make_complex_rotation_vector(self, positions: Tensor) -> Tensor:
+    def calculate_rope(self, positions: Tensor) -> Tensor:
+        """Creates complex rotation vectors from position coordinates.
+
+        Transforms positional information into complex rotation vectors for RoPE.
+
+        Args:
+            positions (Tensor): Position tensor of shape [..., position_dim].
+
+        Returns:
+            Tensor: Complex-valued rotation vectors of shape [..., embed_dim/2].
+        """
         leading_dims = positions.shape[:-1]
         rot_vec = torch.mm(
             positions.view(-1, self.pos_dim).to(self.freqs),
@@ -183,6 +317,19 @@ class RoPEEncodingND(nn.Module):
 
     @staticmethod
     def apply_rotation(query_or_key: Tensor, rot_vec: Tensor) -> Tensor:
+        """Applies rotary embeddings to query or key tensor using complex
+        multiplication.
+
+        Rotates the query or key tensor using the rotation vectors via complex
+            multiplication.
+
+        Args:
+            query_or_key (Tensor): Query or key tensor of shape [..., embed_dim].
+            rot_vec (Tensor): Complex rotation vector of shape [..., embed_dim/2].
+
+        Returns:
+            Tensor: Rotated query or key tensor of same shape as input query_or_key.
+        """
         if not query_or_key.is_complex():
             query_or_key = RoPEEncodingND.real_to_complex(query_or_key)
         if not rot_vec.is_complex():
@@ -193,15 +340,24 @@ class RoPEEncodingND(nn.Module):
         return RoPEEncodingND.complex_to_real(query_or_key_rotated)
 
     def shape_check(self, query_or_key: Tensor, query_or_key_pos: Tensor):
-        if query_or_key.ndim != query_or_key_pos.ndim:  # ..., seq_len, d_model
+        """Validates the shapes of query/key and their position tensors.
+
+        Args:
+            query_or_key (Tensor): Query or key tensor of shape [..., embed_dim].
+            query_or_key_pos (Tensor): Position tensor of shape [..., position_dim].
+
+        Raises:
+            ValueError: If tensor shapes are incompatible.
+        """
+        if query_or_key.ndim != query_or_key_pos.ndim:  # ..., seq_len, embed_dim
             raise ValueError(
                 "Expected query_or_key and query_or_key_pos to have same number "
                 f"of dimensions, got {query_or_key.ndim} and {query_or_key_pos.ndim}"
             )
-        if query_or_key.shape[-1] != self.d_model:
+        if query_or_key.shape[-1] != self.embed_dim:
             raise ValueError(
-                "Expected query_or_key to have last dim equal to d_model "
-                f"(={self.d_model}), got {query_or_key.shape[-1]}"
+                "Expected query_or_key to have last dim equal to embed_dim "
+                f"(={self.embed_dim}), got {query_or_key.shape[-1]}"
             )
         if query_or_key_pos.shape[-1] != self.pos_dim:
             raise ValueError(
@@ -215,6 +371,7 @@ class RoPEEncodingND(nn.Module):
             )
 
     def reset_parameters(self):
+        """Resets frequency parameters"""
         freqs = init_nd_freqs(
             self.pos_dim,
             self.head_dim,
@@ -228,10 +385,26 @@ class RoPEEncodingND(nn.Module):
 
 
 class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
+    """N-dimensional Rotary Position Embedding with grouped frequencies.
+
+    Extends RoPEEncodingND by allowing position dimensions to share frequency groups.
+    This can be useful for handling heterogeneous position representations where
+    some dimensions should use the same frequency bands.
+
+    Args:
+        position_dim (int): Number of position dimensions.
+        embed_dim (int): Total embedding dimension, must be divisible by n_heads.
+        n_heads (int): Number of attention heads.
+        pos_dim_to_rope_group (Union[Tensor, list[int]]): Mapping from position
+            dimensions to frequency groups. Each element indicates which group a
+            position dimension belongs to. Length must equal position_dim.
+        rope_base_theta (float): Base value for frequency scaling in RoPE. Default: 10.0
+        dtype (torch.dtype): Data type for the internal parameters. Default: torch.float
+    """
     def __init__(
         self,
         position_dim: int,
-        d_model: int,
+        embed_dim: int,
         n_heads: int,
         pos_dim_to_rope_group: Union[Tensor, list[int]],
         rope_base_theta: float = 10.0,
@@ -248,7 +421,7 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
                 f" got {len(self.pos_dim_to_rope_group)} and {position_dim}"
             )
         self.n_freq_groups = len(self.pos_dim_to_rope_group.unique())
-        super().__init__(position_dim, d_model, n_heads, rope_base_theta, dtype)
+        super().__init__(position_dim, embed_dim, n_heads, rope_base_theta, dtype)
         if self.head_dim % self.n_freq_groups != 0:
             raise ValueError(
                 "head_dim must be divisible by number of freq groups, got "
@@ -256,6 +429,10 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
             )
 
     def _init_freq_param(self):
+        """Intializes frequency parameters, accounting for frequency groups.
+
+        Creates frequency parameters shared within each frequency group.
+        """
         freqs = init_nd_freqs(
             self.pos_dim,
             self.head_dim // self.n_freq_groups,
@@ -270,7 +447,18 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
         )
         self.freqs = nn.Parameter(freqs)
 
-    def make_complex_rotation_vector(self, positions: Tensor):
+    def calculate_rope(self, positions: Tensor):
+        """Creates complex rotation vectors using the grouped frequency parameters.
+
+        Applies appropriate frequency parameters to each position dimension based on
+        their assigned frequency group.
+
+        Args:
+            positions (Tensor): Position tensor of shape [..., position_dim].
+
+        Returns:
+            Tensor: Complex-valued rotation vectors of shape [..., embed_dim/2].
+        """
         leading_dims = positions.shape[:-1]
         assert positions.shape[-1] == self.pos_dim
         unique_indices, index_counts = torch.unique(
@@ -312,11 +500,27 @@ class RoPEEncodingNDGroupedFreqs(RoPEEncodingND):
 
 
 def prep_multilevel_positions(bijl_indices: Tensor, spatial_shapes: Tensor):
-    """
-    Converts indices or positions of form (batch, i, j, level) to standardized
-    spatial coordinates across levels. This function rescales each (i, j) position
-    to the maximum (finest) spatial scale across levels.
+    """Standardizes positional coordinates across multiple resolution levels.
 
+    Converts indices or positions from multiple resolution levels to a standardized
+    coordinate system by rescaling each level to match the finest level's resolution.
+    This enables consistent position encoding across hierarchical feature maps.
+
+    Args:
+        bijl_indices (Tensor): Indices or positions of shape [num_points, 4], where
+            each row contains (batch_idx, i, j, level_idx). If i,j are floating point,
+            they're treated as coordinates; if integer, they're treated as indices.
+        spatial_shapes (Tensor): Tensor of shape [num_levels, 2] or
+            [batch_size, num_levels, 2] specifying the spatial dimensions
+            (height, width) of each level.
+
+    Returns:
+        Tensor: Rescaled positions of shape [num_points, 4] with the same dtype as
+            bijl_indices, where the i,j coordinates are standardized to the finest
+            resolution level.
+
+    Raises:
+        ValueError: If bijl_indices doesn't have the expected shape or dimensions.
     """
     if bijl_indices.ndim != 2:
         raise ValueError(

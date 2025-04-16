@@ -8,6 +8,31 @@ from . import utils
 _pytorch_atleast_2_5 = utils.check_pytorch_version("2.5")
 
 
+@torch.jit.script
+def sparse_tensor_to_dense_with_mask(sparse_tensor: Tensor) -> tuple[Tensor, Tensor]:
+    """
+    Convert a sparse tensor to dense with a mask indicating stored indices.
+
+    Args:
+        sparse_tensor: A PyTorch sparse tensor (can be hybrid with dense dimensions)
+
+    Returns:
+        dense_tensor: The dense version of the input tensor
+        mask: A boolean tensor with True at sparse indices where values were stored
+    """
+    sparse_tensor = sparse_tensor.coalesce()
+    dense_tensor = sparse_tensor.to_dense()
+
+    indices = sparse_tensor.indices()
+
+    mask = torch.sparse_coo_tensor(
+        indices,
+        indices.new_ones(indices.size(1), dtype=torch.bool),
+        sparse_tensor.shape[: sparse_tensor.sparse_dim()],
+    ).to_dense()
+    return dense_tensor, mask
+
+
 def unpack_sparse_tensors(batch: dict[str, Tensor]) -> dict[str, Tensor]:
     """
     Takes in a batch dict and converts packed sparse tensors (with separate

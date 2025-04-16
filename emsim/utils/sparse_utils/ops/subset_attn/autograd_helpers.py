@@ -89,54 +89,31 @@ def permute_for_attention_backward(tensor: Tensor) -> Tensor:
         return tensor.transpose(-2, -3).contiguous()
     else:
         # For key/value: n_heads, n_queries, n_keys_per_query, head_dim]
-        # -> [n_queries, n_keys_per_query, n_heads, head_dim] ->
+        # -> [n_queries, n_keys_per_query, n_heads, head_dim]
         return tensor.permute(1, 2, 0, 3).contiguous()
 
 
 @torch.jit.script
-def select_values_and_project_kv(
-    sparse_tensor_values: Tensor,
-    index_tensor: Tensor,
-    is_specified_mask: Tensor,
+def project_kv(
+    source_elements: Tensor,
     key_weight: Tensor,
     value_weight: Tensor,
-    key_bias: Optional[Tensor],
-    value_bias: Optional[Tensor],
-) -> tuple[Tensor, Tensor, Tensor]:
-    """Retrieves source sequence elements and computes the key and value tensors for
-    multi-head attention
+    key_bias: Optional[Tensor] = None,
+    value_bias: Optional[Tensor] = None,
+) -> tuple[Tensor, Tensor]:
+    """Efficiently computes the key and value tensors for attention.
 
     Args:
-        sparse_tensor_values (Tensor): Values from sparse tensor of shape
-            [num_sparse_values, embed_dim]
-        index_tensor (Tensor): Long tensor of shape [n_queries, n_keys_per_query]
-            with elements corresponding to the indices of each key along
-            sparse_tensor_values's first dimension. If created by
-            get_sparse_index_mapping, indices of unspecified keys will be
-            masked to 0 to potentially speed up lookup.
-        is_specified_mask (Tensor): Boolean mask of shape
-            [n_queries, n_keys_per_query] indicating which indices are
-            specified in the sparse tensor
+        source_elements (Tensor): Source elements (pre-kv projection) for attention
+            with shape [..., embed_dim], where ... are arbitrary leading batch dims.
         key_weight (Tensor): Key projection matrix of shape [embed_dim, embed_dim]
         value_weight (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
         key_bias (Optional[Tensor]): Key projection bias of shape [embed_dim]
         value_bias (Optional[Tensor]): Value projection bias of shape [embed_dim]
-        n_heads (int): Number of attention heads
-        head_dim (int): Dimension of each attention head
 
     Returns:
-        - keys (Tensor): Key tensor of shape
-            [n_queries, n_keys_per_query, embed_dim]
-        - values (Tensor): Value tensor of shape
-            [n_queries, n_keys_per_query, embed_dim]
-        - selected (Tensor): Selected features from sparse tensor before keys and values
-            projections, of shape [n_queries, n_keys_per_query, embed_dim]
-    """
-    assert index_tensor.ndim == 2
-    assert sparse_tensor_values.ndim == 2
-
-    selected = gather_and_mask(sparse_tensor_values, index_tensor, is_specified_mask)
-
+        - keys (Tensor): Key tensor of shape [..., embed_dim]
+        - values (Tensor): Value tensor of shape [..., embed_dim]"""
     # Stack weight matrices to batch the keys and values projections
     weights_stacked = torch.cat([key_weight, value_weight])  # (2*embed_dim, embed_dim)
 
@@ -156,12 +133,57 @@ def select_values_and_project_kv(
     else:
         biases_stacked = None
 
-    # (n_queries, n_keys_per_query, 2*embed_dim)
-    kv = F.linear(selected, weights_stacked, biases_stacked)
-    keys, values = kv.chunk(2, -1)  # (n_queries, n_keys_per_query, embed_dim) * 2
+    # (..., 2*embed_dim)
+    kv = F.linear(source_elements, weights_stacked, biases_stacked)
+    keys, values = kv.chunk(2, dim=-1)  # (..., embed_dim) * 2
 
+    return keys, values
+
+
+@torch.jit.script
+def select_values_and_project_kv(
+    sparse_tensor_values: Tensor,
+    linear_index_tensor: Tensor,
+    is_specified_mask: Tensor,
+    key_weight: Tensor,
+    value_weight: Tensor,
+    key_bias: Optional[Tensor],
+    value_bias: Optional[Tensor],
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Retrieves source sequence elements and computes the key and value tensors for
+    multi-head attention
+
+    Args:
+        sparse_tensor_values (Tensor): Values from sparse tensor of shape
+            [num_sparse_values, embed_dim]
+        linear_index_tensor (Tensor): Long tensor of shape [n_queries, n_keys_per_query]
+            with elements corresponding to the indices of each key along
+            sparse_tensor_values's first dimension. If created by
+            get_sparse_index_mapping, indices of unspecified keys will be
+            masked to 0 to potentially speed up lookup.
+        is_specified_mask (Tensor): Boolean mask of shape
+            [n_queries, n_keys_per_query] indicating which indices are
+            specified in the sparse tensor
+        key_weight (Tensor): Key projection matrix of shape [embed_dim, embed_dim]
+        value_weight (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
+        key_bias (Optional[Tensor]): Key projection bias of shape [embed_dim]
+        value_bias (Optional[Tensor]): Value projection bias of shape [embed_dim]
+
+    Returns:
+        - keys (Tensor): Key tensor of shape
+            [n_queries, n_keys_per_query, embed_dim]
+        - values (Tensor): Value tensor of shape
+            [n_queries, n_keys_per_query, embed_dim]
+        - selected (Tensor): Selected features from sparse tensor before keys and values
+            projections, of shape [n_queries, n_keys_per_query, embed_dim]
+    """
+    assert linear_index_tensor.ndim == 2
+    assert sparse_tensor_values.ndim == 2
+
+    selected = gather_and_mask(sparse_tensor_values, linear_index_tensor, is_specified_mask)
+
+    keys, values = project_kv(selected, key_weight, value_weight, key_bias, value_bias)
     return keys, values, selected
-
 
 @torch.jit.script
 def linear_grads(

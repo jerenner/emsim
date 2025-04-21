@@ -96,18 +96,19 @@ def calculate_rope(positions: Tensor, rope_freqs: Tensor) -> Tensor:
     position_dim = positions.size(-1)
     _, n_freq_groups, n_heads, half_head_dim = rope_freqs.shape
 
-    # [batch_size, position_dim]
+    # flatten batch dimensions
     positions_flat = positions.reshape(-1, position_dim)
 
     # [position_dim, n_freq_groups*n_heads*head_dim/2]
     rope_freqs_flat = rope_freqs.reshape(position_dim, -1)
 
-    output_shape = batch_dims + (n_freq_groups, n_heads, half_head_dim)
     # Compute position encoding
-    rope_encoding = torch.mm(
-        positions_flat,
-        rope_freqs_flat,
-    ).view(output_shape)
+    rope_encoding = torch.mm(positions_flat, rope_freqs_flat)
+    # shape: [prod(batch_dims), n_freq_groups*n_heads*head_dim/2]
+
+    # reshape back to input batch dims
+    output_shape = batch_dims + (n_freq_groups, n_heads, half_head_dim)
+    rope_encoding = rope_encoding.view(output_shape)
 
     # Sum over frequency groups
     # [..., n_heads, head_dim/2]
@@ -173,10 +174,7 @@ def rotate_embeddings(
     embeddings_complex = torch.view_as_complex(
         embeddings.view(embeddings_complex_shape)
     )
-    rope_encoding_complex = torch.polar(
-        torch.ones_like(rope_encoding),
-        rope_encoding,
-    )
+    rope_encoding_complex = torch.polar(torch.ones_like(rope_encoding), rope_encoding)
 
     # multiply and convert back to real
     if needs_autograd:
@@ -284,10 +282,7 @@ def rotate_embeddings_backward(
 
     # Unconditionally recompute complex version of rope_encoding tensor since it's
     # required by both branches
-    rope_encoding_complex = torch.polar(
-        torch.ones_like(rope_encoding),
-        rope_encoding,
-    )
+    rope_encoding_complex = torch.polar(torch.ones_like(rope_encoding), rope_encoding)
 
     # Gradient for embeddings tensor
     if needs_grad_embeddings:

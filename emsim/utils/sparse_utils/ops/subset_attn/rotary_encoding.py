@@ -111,7 +111,7 @@ def calculate_rope(positions: Tensor, rope_freqs: Tensor) -> Tensor:
     rope_encoding = rope_encoding.view(output_shape)
 
     # Sum over frequency groups
-    # [..., n_heads, head_dim/2]
+    # [*batch_dims, n_heads, head_dim/2]
     rope_encoding = rope_encoding.sum(dim=-3)
     return rope_encoding
 

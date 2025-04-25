@@ -271,7 +271,9 @@ class TestRemoveBatchDimAndConcat:
         assert result.shape == (4, 2)
 
         # Should be just a view when all sequences are equal length
-        assert result.storage().data_ptr() == tensor.storage().data_ptr()
+        assert result[0, 0] == 1.0
+        tensor[0, 0, 0] = 9.9
+        assert result[0, 0] == 9.9
 
         # Check batch offsets
         expected_offsets = torch.tensor([0, 2], device=device)

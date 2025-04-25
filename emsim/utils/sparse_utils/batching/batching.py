@@ -4,8 +4,78 @@ import torch
 from torch import Tensor
 
 
-def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor):
-    return torch.tensor_split(tensor, batch_offsets[1:].cpu())
+@torch.jit.script
+def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor) -> list[Tensor]:
+    """Split a batch-concatenated tensor based on batch offsets.
+
+    Args:
+        tensor (Tensor): Tensor to split
+        batch_offsets (Tensor): Tensor containing offsets where each batch starts
+            May or may not include 0 as the first element
+            May or may not include len(tensor) as the last element
+
+    Returns:
+        List of tensors, one for each batch
+    """
+    if batch_offsets[0] == 0:
+        batch_offsets = batch_offsets[1:]
+
+    # cpu transfer required for tensor_split
+    split_tensor = torch.tensor_split(tensor, batch_offsets.cpu())
+
+    # Check for empty last tensor (if batch_offsets[-1] == len(tensor))
+    if split_tensor[-1].size(0) == 0:
+        split_tensor = split_tensor[:-1]
+
+    return split_tensor
+
+
+@torch.jit.script
+def normalize_batch_offsets(batch_offsets: Tensor, total_length: int) -> Tensor:
+    """Ensures batch_offsets ends with the expected total length."""
+    total_length_tensor = torch.tensor(
+        [total_length], device=batch_offsets.device, dtype=batch_offsets.dtype
+    )
+    if batch_offsets[-1] != total_length_tensor[0]:
+        assert batch_offsets[-1] < total_length_tensor[0]
+        return torch.cat(
+            [
+                batch_offsets,
+                total_length_tensor,
+            ]
+        )
+    return batch_offsets
+
+
+@torch.jit.script
+def compute_seq_lengths(batch_offsets: Tensor) -> Tensor:
+    """Computes sequence lengths from batch offsets."""
+    return batch_offsets[1:] - batch_offsets[:-1]
+
+
+@torch.jit.script
+def validate_tensor_dims(tensor: Tensor, min_dims: int, name: str = "tensor") -> None:
+    """Validates that a tensor has at least min_dims dimensions."""
+    if tensor.ndim < min_dims:
+        raise ValueError(
+            "Expected " f"{name} with at least {min_dims} dimensions, got {tensor.ndim}"
+        )
+
+
+@torch.jit.script
+def batch_offsets_to_indices(
+    batch_offsets: Tensor, total_seq_length: Optional[int] = None
+) -> Tensor:
+    """Converts batch offsets to batch indices,
+    e.g. [0, 5, 9] -> [0, 0, 0, 0, 0, 1, 1, 1, 1]"""
+    # Normalize batch_offsets
+    if total_seq_length is not None:
+        batch_offsets = normalize_batch_offsets(batch_offsets, total_seq_length)
+
+    seq_lengths = compute_seq_lengths(batch_offsets)
+    values = torch.arange(batch_offsets.size(0) - 1, device=batch_offsets.device)
+    out = torch.repeat_interleave(values, seq_lengths)
+    return out
 
 
 # @torch.compiler.disable
@@ -26,27 +96,14 @@ def deconcat_add_batch_dim(
         padding_mask (Tensor): A boolean tensor of shape (batch_size, max_sequence_length)
             that is True at locations where `out` is padding
     """
-    if not tensor.ndim >= 2:
-        raise ValueError(
-            f"Expected tensor with at least 2 dimensions, got {tensor.ndim}"
-        )
+    validate_tensor_dims(tensor, 2)
     if not batch_offsets.ndim == 1:
         raise ValueError(f"Expected batch_offsets to be 1D, got {batch_offsets.ndim}")
 
     # add the total length to the end of the batch offsets if needed
-    if batch_offsets[-1] != tensor.shape[0]:
-        assert batch_offsets[-1] < tensor.shape[0]
-        batch_offsets = torch.cat(
-            [
-                batch_offsets,
-                torch.tensor(
-                    [len(tensor)],
-                    dtype=batch_offsets.dtype,
-                    device=batch_offsets.device,
-                ),
-            ]
-        )
-    seq_lens = batch_offsets[1:] - batch_offsets[:-1]
+    batch_offsets = normalize_batch_offsets(batch_offsets, tensor.shape[0])
+
+    seq_lens = compute_seq_lengths(batch_offsets)
     batchsize = batch_offsets.shape[0] - 1
     max_len = int(torch.max(seq_lens))
 
@@ -94,9 +151,7 @@ def remove_batch_dim_and_concat(
         out (Tensor): A tensor of shape (total_seq_length, D1, D2, ..., Dn)
         batch_offsets (Tensor): A 1D tensor indicating where each batch element starts
     """
-    assert (
-        tensor.ndim >= 3
-    ), f"Expected tensor with at least 3 dimensions; got {tensor.ndim}"
+    validate_tensor_dims(tensor, 3)
     batch_size = tensor.shape[0]
     max_len = tensor.shape[1]
     feature_dims = tensor.shape[2:]
@@ -146,7 +201,7 @@ def remove_batch_dim_and_concat(
 def batch_dim_to_leading_index(tensor: Tensor) -> Tensor:
     batch_size = tensor.shape[0]
     last_dim = tensor.shape[-1]
-    other_dims = torch._shape_as_tensor(tensor)[1:-1]
+    other_dims = torch._shape_as_tensor(tensor)[1:-1].to(tensor.device)
     batch_index = torch.repeat_interleave(
         torch.arange(batch_size, device=tensor.device), torch.prod(other_dims), 0
     )
@@ -165,8 +220,8 @@ def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor) -> Tensor:
     Args:
         indices_tensor (torch.Tensor): A tensor of shape (M x nnz), where M is
         the number of dimensions of the underlying sparse tensor and nnz is the
-        # number of nonzero elements in the sparse tensor. Assumes the sparse
-        # tensor has been coalesce()d.
+        number of nonzero elements in the sparse tensor. Assumes the sparse
+        tensor has been coalesce()d.
 
     Returns:
         torch.Tensor: A 1D tensor with elements corresponding the the first
@@ -174,12 +229,22 @@ def batch_offsets_from_sparse_tensor_indices(indices_tensor: Tensor) -> Tensor:
         i.e., the batch offsets if the first element is the batch index.
     """
     assert not torch.is_floating_point(indices_tensor)
+
+    if indices_tensor.shape[1] == 0:  # empty case
+        return torch.zeros(1, device=indices_tensor.device, dtype=indices_tensor.dtype)
+
     batch_indices = indices_tensor[0]
     max_batch_index = batch_indices.max()
-    matching_indices = batch_indices.unsqueeze(-1) == torch.arange(
-        max_batch_index + 1, device=batch_indices.device, dtype=batch_indices.dtype
+    batch_size = max_batch_index + 1
+
+    counts = torch.bincount(batch_indices, minlength=batch_size)
+
+    # convert counts to offsets with cumsum
+    out = torch.zeros(
+        batch_size, device=indices_tensor.device, dtype=indices_tensor.dtype
     )
-    out = matching_indices.to(torch.uint8).argmax(0)
+    out[1:] = torch.cumsum(counts[:-1], dim=0)
+
     return out
 
 

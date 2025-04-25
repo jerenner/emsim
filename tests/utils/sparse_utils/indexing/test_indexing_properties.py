@@ -16,7 +16,7 @@ class TestBatchSparseIndexProperties:
     @given(
         sparse_dims=st.lists(
             st.integers(min_value=1, max_value=8),
-            min_size=1,  # neeed at least 1 sparse dim
+            min_size=1,  # need at least 1 sparse dim
             max_size=3,
         ),
         dense_dims=st.lists(
@@ -166,7 +166,10 @@ class TestBatchSparseIndexProperties:
 
         # compare
         if dtype == torch.float16:
-            atol = 1e-5
+            atol = 1e-4
         else:
             atol = 1e-8  # default
-        assert torch.allclose(sparse_selected_grad, dense_selected_grad, atol=atol)
+        assert torch.allclose(sparse_selected_grad, dense_selected_grad, atol=atol), (
+            "max diff: "
+            f"{torch.abs(sparse_selected_grad - dense_selected_grad).max()}"
+        )

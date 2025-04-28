@@ -163,7 +163,7 @@ def traceable_batched_attention(
 
     # Apply Rope if provided
     if key_rope_encoding is not None:
-        keys = rotate_embeddings(keys, key_rope_encoding, needs_autograd=True)
+        keys: Tensor = rotate_embeddings(keys, key_rope_encoding, needs_autograd=True)
 
     # (batch_size, n_heads, seq_len, head_dim)
     queries = queries.transpose(1, 2)

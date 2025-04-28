@@ -5,6 +5,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
     calculate_rope,
     rotate_embeddings,
 )
+from emsim.utils.sparse_utils.validation import validate_nd, validate_dim_size
 
 import torch
 from torch import Tensor, nn
@@ -387,7 +388,14 @@ class RoPEEncodingND(nn.Module):
             indices_list.append(indices)
 
         # Concatenate all indices
-        self.register_buffer("indices", torch.cat(indices_list, dim=1))
+        indices = torch.cat(indices_list, dim=1)
+
+        # store indices for construction ofm freq tensor in forward pass
+        pos_indices, group_indices, head_indices, enc_indices = indices.unbind(0)
+        self.register_buffer("freq_pos_indices", pos_indices)
+        self.register_buffer("freq_group_indices", group_indices)
+        self.register_buffer("freq_head_indices", head_indices)
+        self.register_buffer("freq_enc_indices", enc_indices)
 
     def validate_freq_group_pattern(self, freq_group_pattern: Tensor):
         if freq_group_pattern.ndim != 2:
@@ -630,7 +638,15 @@ class RoPEEncodingND(nn.Module):
 
         values = torch.cat([fg.flatten() for fg in grouped_rope_freqs])
 
-        rope_freqs.index_put_(tuple(self.indices), values)
+        rope_freqs.index_put_(
+            (
+                self.freq_pos_indices,
+                self.freq_group_indices,
+                self.freq_head_indices,
+                self.freq_enc_indices,
+            ),
+            values,
+        )
 
         return rope_freqs
 
@@ -718,7 +734,9 @@ class RoPEEncodingND(nn.Module):
                 param.copy_(init)
 
 
-def prep_multilevel_positions(bijl_indices: Tensor, spatial_shapes: Tensor):
+def prep_multilevel_positions(
+    spatial_positions: Tensor, batch_level_indices: Tensor, level_spatial_shapes: Tensor
+):
     """Standardizes positional coordinates across multiple resolution levels.
 
     Converts indices or positions from multiple resolution levels to a standardized
@@ -726,48 +744,95 @@ def prep_multilevel_positions(bijl_indices: Tensor, spatial_shapes: Tensor):
     This enables consistent position encoding across hierarchical feature maps.
 
     Args:
-        bijl_indices (Tensor): Indices or positions of shape [num_points, 4], where
-            each row contains (batch_idx, i, j, level_idx). If i,j are floating point,
+        spatial_positions (Tensor): Indices or positions of shape [num_points, position_dim],
+            where each row contains the N-D position of each point. If floating point,
             they're treated as coordinates; if integer, they're treated as indices.
-        spatial_shapes (Tensor): Tensor of shape [num_levels, 2] or
+        batch_level_indices (Tensor): Integer tensor of shape [num_points, 2], where
+            each row contains the corresponding batch and level index for each position
+            in spatial_positions.
+        level_spatial_shapes (Tensor): Tensor of shape [num_levels, 2] or
             [batch_size, num_levels, 2] specifying the spatial dimensions
             (height, width) of each level.
 
     Returns:
-        Tensor: Rescaled positions of shape [num_points, 4] with the same dtype as
-            bijl_indices, where the i,j coordinates are standardized to the finest
-            resolution level.
+        Tensor: Rescaled positions of shape [num_points, position_dim + 1] with floating
+            point dtype, where the second dimension has the level index concatenated onto
+            the end of the spatial coordinates, and the spatial coordinates are
+            standardized to the finest resolution level.
 
     Raises:
-        ValueError: If bijl_indices doesn't have the expected shape or dimensions.
+        ValueError: If tensors don't have the expected shape, dimensions, or dtypes.
     """
-    if bijl_indices.ndim != 2:
-        raise ValueError(
-            "Expected bijl_indices to have 2 dimensions, got " f"{bijl_indices.ndim}"
-        )
-    if bijl_indices.shape[-1] != 4:
-        raise ValueError(
-            "Expected bijl_indices to have last dimension of 4 (batch, i, j, level),"
-            f" got {bijl_indices.shape[-1]}"
-        )
-    ij = bijl_indices[:, 1:-1]
-    if not torch.is_floating_point(ij):
+    validate_nd(spatial_positions, 2, "spatial_positions")
+    validate_nd(batch_level_indices, 2, "batch_level_indices")
+    if not torch.is_floating_point(spatial_positions):
         # convert from indices to coordinates of pixel centers
-        ij = ij + 0.5
-    batch_level = torch.stack([bijl_indices[:, 0], bijl_indices[:, -1]], -1)
-    assert ij.shape[-1] == spatial_shapes.shape[-1]
-    assert spatial_shapes.ndim in (2, 3)  # batch, level, 2 or level, 2
+        spatial_positions = spatial_positions + 0.5
 
-    if spatial_shapes.ndim == 2:
-        spatial_shapes = spatial_shapes.unsqueeze(0).expand(
-            torch.unique(batch_level[:, 0]).shape[0], -1, -1
+    # batch, level, pos_dim or level, pos_dim
+    assert level_spatial_shapes.ndim in (2, 3)
+
+    if level_spatial_shapes.ndim == 2:
+        level_spatial_shapes = level_spatial_shapes.unsqueeze(0).expand(
+            torch.max(batch_level_indices[:, 0]) + 1, -1, -1
         )
 
-    max_spatial_shape = spatial_shapes.max(-2)[0][batch_level[:, 0]]
-    spatial_shapes = spatial_shapes[batch_level.unbind(-1)]
+    batch_max_spatial_shape = level_spatial_shapes.max(-2)[0]
+    max_spatial_shapes = batch_max_spatial_shape[batch_level_indices[:, 0]]
+    indexed_spatial_shapes = level_spatial_shapes[batch_level_indices.unbind(-1)]
 
-    rescaled_positions = ij / (spatial_shapes / max_spatial_shape)
+    rescaled_positions = spatial_positions / (
+        indexed_spatial_shapes / max_spatial_shapes
+    )
 
-    positions = bijl_indices.clone().to(rescaled_positions)
-    positions[:, 1:3] = rescaled_positions
-    return positions
+    multilevel_positions = torch.cat(
+        [
+            rescaled_positions,
+            batch_level_indices[:, 1].view(-1, 1).to(rescaled_positions),
+        ],
+        dim=1,
+    )
+
+    return multilevel_positions
+
+
+def get_multilevel_freq_group_pattern(
+    position_dim: int, pattern_name: str, device=None
+) -> Tensor:
+    """Get a predefined frequency group pattern for RoPE encodings of multilevel features.
+
+    Creates a frequency group pattern tensor for use with RoPEEncodingND based on
+    predefined patterns that determine how spatial and level dimensions are encoded.
+
+    Args:
+        position_dim (int): Spatial dimension of the features to be encoded (2 for 2D
+            images, etc.). The output tensor will have this many spatial dimensions
+            plus 1 dimension for the feature level
+        pattern_name (str): Name of the pattern to use. Options:
+            - "single": All dimensions (*spatial, level) in a single frequency group
+            - "partition": Spatial dimensions and level in separate groups
+            - "closure": Three groups - Spatial, level, and (*spatial, level)
+        device (torch.device, optional): Device for the created tensor. Defaults to None.
+
+    Returns:
+        Tensor: Boolean tensor encoding the frequency group pattern, of shape
+            [n_freq_groups, position_dim + 1]
+
+    Raises:
+        ValueError: If an unrecognized pattern name is provided.
+    """
+    if pattern_name == "single":
+        out = torch.ones(1, position_dim + 1, device=device)
+    elif pattern_name == "partition":
+        out = torch.zeros(2, position_dim + 1, device=device)
+        out[0, :-1] = True  # Spatial dimensions in one group
+        out[1, -1] = True  # Level dimension in second group
+    elif pattern_name == "closure":
+        out = torch.zeros(3, position_dim + 1, device=device)
+        out[0, :-1] = True  # Spatial dimensions in one group
+        out[1, -1] = True  # Level dimension in second group
+        out[2, :] = True  # Third group has all dimensions
+    else:
+        raise ValueError(f"Unrecognized pattern_name {pattern_name}")
+
+    return out

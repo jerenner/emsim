@@ -7,6 +7,7 @@ from emsim.networks.positional_encoding.rope import (
     init_2d_freqs_rope_mixed,
     init_nd_freqs,
     prep_multilevel_positions,
+    get_multilevel_freq_group_pattern,
 )
 
 
@@ -540,13 +541,23 @@ class TestInitNDFreqs:
 @pytest.mark.cuda_if_available
 class TestPrepMultilevelPositions:
     def test_prep_multilevel_positions(self, device):
-        # Sample batch of indices (batch, i, j, level)
-        bijl_indices = torch.tensor(
+        # Sample batch of indices (i, j)
+        spatial_indices = torch.tensor(
             [
-                [0, 10, 20, 0],  # batch 0, level 0
-                [0, 5, 15, 1],  # batch 0, level 1
-                [1, 8, 12, 0],  # batch 1, level 0
-                [1, 3, 7, 1],  # batch 1, level 1
+                [10, 20],  # batch 0, level 0
+                [5, 15],  # batch 0, level 1
+                [8, 12],  # batch 1, level 0
+                [3, 7],  # batch 1, level 1
+            ],
+            dtype=torch.long,
+            device=device,
+        )
+        batch_level_indices = torch.tensor(
+            [
+                [0, 0],
+                [0, 1],
+                [1, 0],
+                [1, 1],
             ],
             dtype=torch.long,
             device=device,
@@ -562,9 +573,11 @@ class TestPrepMultilevelPositions:
             device=device,
         )
 
-        positions = prep_multilevel_positions(bijl_indices, spatial_shapes)
+        positions = prep_multilevel_positions(
+            spatial_indices, batch_level_indices, spatial_shapes
+        )
 
-        assert positions.shape == bijl_indices.shape
+        assert positions.shape == (spatial_indices.size(0), spatial_indices.size(1) + 1)
         assert torch.is_floating_point(positions)
 
         # Verify scaling for a level 1 position (should be scaled up relative to level 0)
@@ -572,18 +585,26 @@ class TestPrepMultilevelPositions:
         scale_factor = 100 / 50  # max_shape / level_shape
         expected_i = (5 + 0.5) * scale_factor  # +0.5 for pixel center
         assert torch.isclose(
-            positions[1, 1], torch.tensor(expected_i, dtype=torch.float, device=device)
+            positions[1, 0], torch.tensor(expected_i, dtype=torch.float, device=device)
         )
 
     def test_prep_multilevel_positions_batched_shapes(self, device):
         # Sample indices
-        bijl_indices = torch.tensor(
+        spatial_indices = torch.tensor(
             [
-                [0, 10, 20, 0],  # batch 0, level 0
-                [1, 5, 15, 1],  # batch 1, level 1
+                [10, 20],  # batch 0, level 0
+                [5, 15],  # batch 1, level 1
             ],
             dtype=torch.long,
             device=device,
+        )
+        batch_level_indices = torch.tensor(
+            [
+                [0, 0],
+                [1, 1],
+            ],
+            dtype=torch.long,
+            device=device
         )
 
         # Batched spatial shapes (batch, level, 2)
@@ -602,5 +623,52 @@ class TestPrepMultilevelPositions:
             device=device,
         )
 
-        positions = prep_multilevel_positions(bijl_indices, spatial_shapes)
-        assert positions.shape == bijl_indices.shape
+        positions = prep_multilevel_positions(
+            spatial_indices, batch_level_indices, spatial_shapes
+        )
+        assert positions.shape == (spatial_indices.shape[0], spatial_indices.shape[1] + 1)
+
+
+@pytest.mark.cuda_if_available
+class TestMultilevelFreqGroupPattern:
+    @pytest.mark.parametrize(
+        "position_dim,pattern_name,expected_shape,expected_values",
+        [
+            (2, "single", (1, 3), [[True, True, True]]),
+            (2, "partition", (2, 3), [[True, True, False], [False, False, True]]),
+            (
+                2,
+                "closure",
+                (3, 3),
+                [[True, True, False], [False, False, True], [True, True, True]],
+            ),
+        ],
+        ids=["single", "partition", "closure"],
+    )
+    def test_valid_patterns(
+        self,
+        position_dim: int,
+        pattern_name: str,
+        expected_shape: tuple,
+        expected_values: list,
+        device: str,
+    ):
+        """Test that valid pattern names return the correct tensors."""
+        result = get_multilevel_freq_group_pattern(
+            position_dim, pattern_name, device=device
+        )
+
+        # Check shape
+        assert result.shape == expected_shape
+
+        # Check values
+        expected_tensor = torch.tensor(expected_values, device=device)
+        assert torch.equal(result, expected_tensor)
+
+        # Check device
+        assert result.device.type == device
+
+    def test_invalid_pattern(self, device: str):
+        """Test that invalid pattern names raise ValueError."""
+        with pytest.raises(ValueError, match="Unrecognized pattern_name"):
+            get_multilevel_freq_group_pattern(2, "invalid_pattern", device=device)

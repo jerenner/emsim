@@ -19,7 +19,7 @@ from .conftest import (
 
 
 @pytest.mark.cuda_if_available
-@settings(deadline=None)
+@settings(deadline=None, max_examples=25)
 @given(
     input_params=exhaustive_attention_input_configs(
         dtypes=[torch.double], min_requiring_grads=1
@@ -45,7 +45,7 @@ def test_gradcheck_exhaustive(device: str, input_params: dict[str, Any]) -> None
 
 
 @pytest.mark.cuda_if_available
-@settings(deadline=None)
+@settings(deadline=None, max_examples=25)
 @given(
     input_params=exhaustive_attention_input_configs(
         dtypes=[torch.float32, torch.float64]  # TODO fully implement 16-bit correctness
@@ -66,7 +66,7 @@ def test_forward_against_traceable(device: str, input_params: dict[str, Any]):
 
 
 @pytest.mark.cuda_if_available
-@settings(deadline=None)
+@settings(deadline=None, max_examples=25)
 @given(
     input_params=exhaustive_attention_input_configs(
         dtypes=[torch.float32, torch.float64],

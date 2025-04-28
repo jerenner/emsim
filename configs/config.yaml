@@ -20,7 +20,6 @@ transformer:
   neighborhood_sizes: [3, 5, 7 ,9]
   dropout: 0.1
   activation_fn: "gelu"
-  rope_base_theta: 10.0
   level_filter_ratio: [0.25, 0.5, 1.0, 1.0]
   layer_filter_ratio: [1.0, 0.8, 0.6, 0.6, 0.4, 0.2]
   max_tokens: 10000
@@ -39,6 +38,11 @@ transformer:
     detach_updated_positions: true
     look_forward_twice: true
     use_rope: true
+  rope:
+    spatial_base_theta: 100.0
+    level_base_theta: 1.0
+    share_heads: false
+    freq_group_pattern: "partition"  # single, partition, closure
 
 include_aux_outputs: false
 predict_box: false

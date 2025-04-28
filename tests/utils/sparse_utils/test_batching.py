@@ -5,14 +5,14 @@ from torch import Tensor
 from emsim.utils.sparse_utils.batching.batching import (
     split_batch_concatted_tensor,
     normalize_batch_offsets,
-    compute_seq_lengths,
-    validate_tensor_dims,
+    batch_offsets_to_seq_lengths,
     batch_offsets_to_indices,
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
     batch_dim_to_leading_index,
     batch_offsets_from_sparse_tensor_indices,
 )
+from emsim.utils.sparse_utils.validation import validate_atleast_nd
 
 
 @pytest.fixture
@@ -57,14 +57,14 @@ class TestComputeSeqLengths:
     def test_basic_functionality(self, device):
         """Test basic functionality of compute_seq_lengths."""
         batch_offsets = torch.tensor([0, 3, 7, 10], device=device)
-        result = compute_seq_lengths(batch_offsets)
+        result = batch_offsets_to_seq_lengths(batch_offsets)
         expected = torch.tensor([3, 4, 3], device=device)
         assert torch.equal(result, expected)
 
     def test_single_batch(self, device):
         """Test with a single batch."""
         batch_offsets = torch.tensor([0, 5], device=device)
-        result = compute_seq_lengths(batch_offsets)
+        result = batch_offsets_to_seq_lengths(batch_offsets)
         expected = torch.tensor([5], device=device)
         assert torch.equal(result, expected)
 
@@ -75,25 +75,25 @@ class TestValidateTensorDims:
         """Test with valid dimensions."""
         tensor = torch.rand(3, 4, 5, device=device)
         # Should not raise any exception
-        validate_tensor_dims(tensor, 3)
+        validate_atleast_nd(tensor, 3)
 
     def test_too_few_dims(self, device):
         """Test with too few dimensions."""
         tensor = torch.rand(3, 4, device=device)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected tensor with at least 3 dimensions",
+            match="Expected tensor to have at least 3 dimensions",
         ):
-            validate_tensor_dims(tensor, 3)
+            validate_atleast_nd(tensor, 3)
 
     def test_custom_name(self, device):
         """Test with custom tensor name."""
         tensor = torch.rand(3, device=device)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected custom_tensor with at least 2 dimensions",
+            match="Expected custom_tensor to have at least 2 dimensions",
         ):
-            validate_tensor_dims(tensor, 2, name="custom_tensor")
+            validate_atleast_nd(tensor, 2, name="custom_tensor")
 
 
 @pytest.mark.cpu_and_cuda
@@ -116,7 +116,9 @@ class TestBatchOffsetsToIndices:
 
 @pytest.mark.cpu_and_cuda
 class TestSplitBatchConcattedTensor:
-    def test_basic_functionality(self, simple_tensor: Tensor, simple_batch_offsets: Tensor, device):
+    def test_basic_functionality(
+        self, simple_tensor: Tensor, simple_batch_offsets: Tensor, device
+    ):
         """Test basic splitting functionality."""
         result = split_batch_concatted_tensor(simple_tensor, simple_batch_offsets)
 
@@ -222,7 +224,7 @@ class TestDeconcatAddBatchDim:
 
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected tensor with at least 2 dimensions",
+            match="Expected tensor to have at least 2 dimensions",
         ):
             deconcat_add_batch_dim(tensor_1d, batch_offsets)
 
@@ -256,7 +258,7 @@ class TestRemoveBatchDimAndConcat:
         assert torch.allclose(result, expected_values)
 
         # Check batch offsets
-        expected_offsets = torch.tensor([0, 3], device=device)
+        expected_offsets = torch.tensor([0, 3, 5], device=device)
         assert torch.equal(batch_offsets, expected_offsets)
 
     def test_without_padding_mask(self, device):
@@ -276,7 +278,39 @@ class TestRemoveBatchDimAndConcat:
         assert result[0, 0] == 9.9
 
         # Check batch offsets
-        expected_offsets = torch.tensor([0, 2], device=device)
+        expected_offsets = torch.tensor([0, 2, 4], device=device)
+        assert torch.equal(batch_offsets, expected_offsets)
+
+    def test_empty_batch(self, device):
+        """Test with an empty batch."""
+        # Create a batched tensor with padding
+        tensor = torch.tensor(
+            [
+                [[1.0, 1.1], [2.0, 2.1], [3.0, 3.1]],
+                [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                [[4.0, 4.1], [5.0, 5.1], [0.0, 0.0]],  # Last position is padding
+            ],
+            device=device,
+        )
+
+        padding_mask = torch.tensor(
+            [[False, False, False], [True, True, True], [False, False, True]],
+            device=device,
+        )
+
+        result, batch_offsets = remove_batch_dim_and_concat(tensor, padding_mask)
+
+        # Expected shape: [5, 2] (total non-padded elements, feature dim)
+        assert result.shape == (5, 2)
+
+        # Check values
+        expected_values = torch.tensor(
+            [[1.0, 1.1], [2.0, 2.1], [3.0, 3.1], [4.0, 4.1], [5.0, 5.1]], device=device
+        )
+        assert torch.allclose(result, expected_values)
+
+        # Check batch offsets
+        expected_offsets = torch.tensor([0, 3, 3, 5], device=device)
         assert torch.equal(batch_offsets, expected_offsets)
 
     def test_error_handling(self, device):
@@ -285,7 +319,7 @@ class TestRemoveBatchDimAndConcat:
         tensor_2d = torch.rand(3, 4, device=device)
         with pytest.raises(
             (ValueError, torch.jit.Error),
-            match="Expected tensor with at least 3 dimensions",
+            match="Expected tensor to have at least 3 dimensions",
         ):
             remove_batch_dim_and_concat(tensor_2d)
 
@@ -332,8 +366,8 @@ class TestBatchOffsetsFromSparseTensorIndices:
 
         result = batch_offsets_from_sparse_tensor_indices(indices)
 
-        # Expected: [0, 2, 4] - first index of each batch
-        expected = torch.tensor([0, 2, 4], device=device)
+        # Expected: [0, 2, 4, 6] - 3 batches of 2
+        expected = torch.tensor([0, 2, 4, 6], device=device)
         assert torch.equal(result, expected)
 
     def test_non_contiguous_batches(self, device):
@@ -350,5 +384,5 @@ class TestBatchOffsetsFromSparseTensorIndices:
         result = batch_offsets_from_sparse_tensor_indices(indices)
 
         # Each element is the first occurrence of that batch index
-        expected = torch.tensor([0, 2, 2, 4], device=device)
+        expected = torch.tensor([0, 2, 2, 4, 5], device=device)
         assert torch.equal(result, expected)

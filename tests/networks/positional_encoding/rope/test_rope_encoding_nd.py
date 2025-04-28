@@ -275,7 +275,7 @@ class TestRoPEEncodingNDForward:
         assert not torch.allclose(key_rotated, sample_data["key"])
 
     @pytest.mark.parametrize("share_heads", [True, False], ids=["shared", "not_shared"])
-    def test_share_heads(self, share_heads, base_config: dict[str, Any], device: str):
+    def test_share_heads(self, share_heads: bool, base_config: dict[str, Any], device: str):
         """Test initialization with head sharing enabled and disabled."""
         n_heads = base_config["n_heads"]
         rope = RoPEEncodingND(

@@ -85,7 +85,15 @@ def attention_inputs(
             - index_tensor: Query-to-key mapping indices in stacked format (may be None)
             - batched_index_tensor: Query-to-key mapping indices in batched format
                 (may be None)
-            - attn_mask: Attention mask in batched format (may be None)
+            - attn_mask_valid_indices: Tensor of shape (n_queries*n_keys_per_query) x 5,
+                where each row gives the indices corresponding to a valid (non-masked)
+                query-key interaction, the 5 dimensions being
+                (batch, query, height, width, level). To be used to create an attn_mask
+                tensor for batched attention. For example, Pytorch MultiHeadAttention
+                expects an attn_mask where True corresponds to attention interactions
+                that should be masked out, so attn_mask_valid_indices designates
+                the indices that should be False. Note that F.scaled_dot_product_attention
+                in particular expects a tensor where False means to mask out.
             - query_padding_mask: Boolean mask indicating padding in batched tensors
             - query_batch_offsets: Offsets for each batch in stacked format
             - n_heads: Number of attention heads
@@ -115,7 +123,11 @@ def attention_inputs(
             approaches.
     """
 
-    torch_rng_state = torch.get_rng_state()
+    device = torch.device(device)
+    if device.type == "cuda":
+        torch_rng_state = torch.cuda.get_rng_state(device)
+    else:
+        torch_rng_state = torch.get_rng_state()
     np_rng_state = np.random.get_state()
 
     if seed is not None:
@@ -132,7 +144,7 @@ def attention_inputs(
     for b, n_queries_b in enumerate(n_queries):
         query_padding_mask[b, n_queries_b:] = True
 
-    query_batch_offsets = torch.tensor(np.cumsum([0] + n_queries)[:-1], device=device)
+    query_batch_offsets = torch.tensor(np.cumsum([0] + n_queries), device=device)
 
     # Generate the sparse tensor inputs, either in the form of the sparse tensor
     # itself or in the form of the outputs of get_sparse_index_mapping directly
@@ -153,7 +165,9 @@ def attention_inputs(
             dtype=dtype,
             seed=None,  # seeding done in the current function
         )
-        batched_attn_mask = create_batched_attn_mask(sparse_tensor, batched_index_tensor)
+        attn_mask_valid_indices = batched_attn_mask_indices(
+            sparse_tensor, batched_index_tensor
+        )
 
         stacked_index_tensor, query_batch_offsets_2 = remove_batch_dim_and_concat(
             batched_index_tensor, query_padding_mask
@@ -182,7 +196,7 @@ def attention_inputs(
         )
         sparse_tensor = None
         batched_index_tensor = None
-        batched_attn_mask = None
+        attn_mask_valid_indices = None
         query_padding_mask = None
         stacked_index_tensor = None
 
@@ -224,32 +238,33 @@ def attention_inputs(
     stacked_key_positions: Optional[Tensor] = None
 
     if use_rope == "precomputed":
-        # Precomputed RoPE encoding
+        # Precomputed RoPE encoding: Need to generate for every key for batched
+        # then extract the targeted keys for stacked
+        # shape: # batch, height, width, level, n_heads, head_dim//2
         batched_key_rope_encoding = torch.randn(
-            len(n_queries),
-            max(n_queries),
-            n_keys_per_query,
-            n_heads,
-            head_dim // 2,
+            sparse_tensor.shape[:4] + (n_heads, head_dim // 2),
             device=device,
             dtype=dtype,
         )
-        stacked_key_rope_encoding, _ = remove_batch_dim_and_concat(
-            batched_key_rope_encoding, query_padding_mask
-        )
+
+        # shape: sum(n_queries), n_keys_per_query, n_heads, head_dim//2
+        stacked_key_rope_encoding = batched_key_rope_encoding[
+            stacked_index_tensor.unbind(-1)
+        ]
     elif use_rope == "from_freqs":
         # On-the-fly RoPE encoding with key positions and frequencies
+
+        # shape: (batch, height, width, level, position_dim)
         batched_key_positions = torch.randn(
-            len(n_queries),
-            max(n_queries),
-            n_keys_per_query,
-            position_dim,
+            sparse_tensor.shape[:4] + (position_dim,),
             device=device,
             dtype=dtype,
         )
-        stacked_key_positions, _ = remove_batch_dim_and_concat(
-            batched_key_positions, query_padding_mask
-        )
+
+        # shape: sum(n_queries), n_keys_per_query, position_dim
+        stacked_key_positions = batched_key_positions[
+            stacked_index_tensor.unbind(-1)
+        ]
         rope_freqs = torch.rand(
             position_dim,
             n_freq_groups,
@@ -258,7 +273,7 @@ def attention_inputs(
             device=device,
             dtype=dtype,
         )
-        # Scale with random magnitude (0-1000) for variety
+        # Scale with random magnitude (1-1000) for variety
         rope_freqs *= torch.randint(1, 1000, (1,), device=device)
 
         # Simple case for freq_groups: one group per position dim
@@ -282,7 +297,10 @@ def attention_inputs(
 
     # reset seed
     if seed is not None:
-        torch.set_rng_state(torch_rng_state)
+        if device.type == "cuda":
+            torch.cuda.set_rng_state(torch_rng_state, device)
+        else:
+            torch.set_rng_state(torch_rng_state)
         np.random.set_state(np_rng_state)
 
     return {
@@ -291,7 +309,7 @@ def attention_inputs(
         "sparse_tensor": sparse_tensor,
         "index_tensor": stacked_index_tensor,
         "batched_index_tensor": batched_index_tensor,
-        "attn_mask": batched_attn_mask,
+        "attn_mask_valid_indices": attn_mask_valid_indices,
         "query_padding_mask": query_padding_mask,
         "query_batch_offsets": query_batch_offsets,
         "n_heads": n_heads,
@@ -460,22 +478,27 @@ def create_sparse_and_index_tensor(
 
     is_hit = torch.rand(index_tensor_batch_shape, device=device) < index_hit_rate
 
-    # For hits, sample from existing indices with replacement
+    # For hits, sample from available indices without replacement up to amount of
+    # available indices
     for b in range(batch_size):
         indices_in_this_batch_mask = selected_indices[0] == b
         n_indices_in_this_batch = indices_in_this_batch_mask.sum()
 
         hits_this_batch = is_hit[b]
-        n_hits_this_batch = hits_this_batch.sum()
+        n_hits_this_batch = min(hits_this_batch.sum(), n_indices_in_this_batch)
 
-        sampling_indices = torch.randint(
-            0, n_indices_in_this_batch, (n_hits_this_batch,), device=device
-        )
+        perm_available_indices = torch.randperm(n_indices_in_this_batch, device=device)
+        sampling_indices = perm_available_indices[:n_hits_this_batch]
+
         sampled_hits = selected_indices[:, indices_in_this_batch_mask][
             :, sampling_indices
         ]
 
-        index_tensor[b, hits_this_batch] = sampled_hits.T
+        hits_nonzero = hits_this_batch.nonzero()
+        perm_hit_keys = torch.randperm(n_hits_this_batch, device=device)
+        hit_locations = hits_nonzero[perm_hit_keys]
+
+        index_tensor[b, *hit_locations.unbind(-1)] = sampled_hits.T
 
     # Fill in indices past the specified number of queries per batch with -1 pad value
     for i, n_queries_i in enumerate(n_queries):
@@ -497,17 +520,18 @@ def create_sparse_and_index_tensor(
     return sparse_tensor, index_tensor
 
 
-def create_batched_attn_mask(sparse_tensor: Tensor, index_tensor: Tensor) -> Tensor:
-    """Create a boolean attention mask tensor for batched attention based on
-    index_tensor
+def batched_attn_mask_indices(sparse_tensor: Tensor, index_tensor: Tensor) -> Tensor:
+    """Create indices for a boolean attention mask tensor for batched attention
+    based on index_tensor
 
     Args:
         sparse_tensor (Tensor): Sparse tensor output from create_sparse_and_index_tensors
         index_tensor (Tensor): Index tensor output from create_sparse_and_index_tensors
 
     Returns:
-        Tensor: A boolean tensor of shape [batch_size, n_queries, height, width, level]
-            that is True at positions where a query attends to a spatial key.
+        Tensor: Index tensor of shape [N x 5], where each row is an index of dimension
+            [batch, query, i, j, level] corresponding to positions where a query
+            attends to a spatial key.
     """
     batch_size, max_queries, _, _ = index_tensor.shape
     _, height, width, levels = sparse_tensor.shape[: sparse_tensor.sparse_dim()]
@@ -518,18 +542,9 @@ def create_batched_attn_mask(sparse_tensor: Tensor, index_tensor: Tensor) -> Ten
 
     h, w, lev = index_tensor[batch_indices, query_indices, key_indices, 1:].unbind(-1)
 
-    attn_mask_indices = torch.stack([batch_indices, query_indices, h, w, lev], dim=0)
+    attn_mask_indices = torch.stack([batch_indices, query_indices, h, w, lev], dim=1)
 
-    values = attn_mask_indices.new_ones(attn_mask_indices.shape[1], dtype=torch.bool)
-
-    attn_mask = torch.sparse_coo_tensor(
-        indices=attn_mask_indices,
-        values=values,
-        size=(batch_size, max_queries, height, width, levels),
-        device=index_tensor.device,
-    ).coalesce()
-
-    return attn_mask
+    return attn_mask_indices
 
 
 def create_linear_sparse_values_and_index_tensor_directly(

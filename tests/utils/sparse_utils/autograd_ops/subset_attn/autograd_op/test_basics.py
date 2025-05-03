@@ -443,7 +443,10 @@ class TestAgainstReference:
         uses padding instead of stacking the queries, and masking instead of key
         subsets
         """
-        inputs = attention_inputs(use_rope=use_rope, device=device, dropout_p=0.0)
+        inputs = attention_inputs(
+            device=device,
+            dropout_p=0.0,
+        )
         ordered_inputs = ordered_autograd_inputs(inputs)
         batched_inputs = prep_batched_attention(inputs)
 
@@ -456,31 +459,137 @@ class TestAgainstReference:
 
         assert torch.allclose(optimized_output, stacked_reference_output)
 
-
-    # @pytest.mark.parametrize(
-    #     "use_rope",
-    #     ["none", "precomputed", "from_freqs"],
-    #     ids=["rope=none", "rope=precomputed", "rope=from_freqs"],
-    # )
+    @pytest.mark.parametrize(
+        "use_rope",
+        ["none", "precomputed", "from_freqs"],
+        ids=["rope=none", "rope=precomputed", "rope=from_freqs"],
+    )
     def test_traceables_against_each_other(
-        self, device: str,
-        # use_rope: str,
+        self,
+        device: str,
+        use_rope: str,
     ) -> None:
         """Test equivalence of the two traceable implementations."""
-        inputs = attention_inputs(use_rope="none", device=device, dropout_p=0.0)
+        inputs = attention_inputs(
+            use_rope="none", device=device, dropout_p=0.0, training=False
+        )
         ordered_inputs = ordered_autograd_inputs(inputs)
         batched_inputs = prep_batched_attention(inputs)
 
-        subset_output = traceable_subset_attention(*ordered_inputs)
-        batched_output = traceable_batched_attention(**batched_inputs)
+        subset_output = traceable_subset_attention(
+            *ordered_inputs, return_extended_outputs=True
+        )
+        batched_output = traceable_batched_attention(
+            **batched_inputs, return_extended_outputs=True
+        )
 
-        batched_output_stacked = remove_batch_dim_and_concat(
-            batched_output, inputs["query_padding_mask"]
+        subset_attn_out = subset_output["attn_output"]
+        batched_attn_out = batched_output["attn_output"]
+
+        batched_attn_out_stacked = remove_batch_dim_and_concat(
+            batched_attn_out, inputs["query_padding_mask"]
         )[0]
 
-        assert subset_output.shape == batched_output_stacked.shape
+        assert subset_attn_out.shape == batched_attn_out_stacked.shape
 
-        abs_difference = torch.abs(subset_output - batched_output_stacked)
+        # check equality of intermediate values
+        bsz, sparse_height, sparse_width, n_levels, embed_dim = inputs[
+            "sparse_tensor"
+        ].shape
+        n_heads = inputs["metadata"]["n_heads"]
+        n_queries = max(inputs["metadata"]["n_queries"])
+
+        # get indexing tuple for going from all keys to keys per query
+        key_b, key_i, key_j, key_l = inputs["index_tensor"].unbind(-1)
+        key_q = torch.cat(
+            [
+                torch.arange(q, device=key_b.device)
+                .unsqueeze(1)
+                .expand(-1, inputs["metadata"]["n_keys_per_query"])
+                for q in inputs["metadata"]["n_queries"]
+            ]
+        )
+
+        # Gather keys
+        batched_keys = batched_output["keys"].view(
+            bsz, sparse_height, sparse_width, n_levels, embed_dim
+        )
+        stacked_keys_from_batched = batched_keys[key_b, key_i, key_j, key_l]
+        assert torch.allclose(
+            stacked_keys_from_batched,
+            subset_output["keys"].reshape_as(stacked_keys_from_batched),
+        )
+
+        # same for values...
+        batched_values = batched_output["values"].view(
+            bsz, sparse_height, sparse_width, n_levels, embed_dim
+        )
+        stacked_values_from_batched = batched_values[key_b, key_i, key_j, key_l]
+        assert torch.allclose(
+            stacked_values_from_batched,
+            subset_output["values"].reshape_as(stacked_values_from_batched),
+        )
+
+        # attention scores
+        batched_attn_scores_bqhwlh = (
+            batched_output["attn_scores"]
+            .permute(0, 2, 3, 1)
+            .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+        )
+        # query, key, head
+        stacked_attn_scores_from_batched = batched_attn_scores_bqhwlh[
+            key_b, key_q, key_i, key_j, key_l
+        ]
+        subset_attn_scores = subset_output["attn_scores"].transpose(-1, -2)
+        assert torch.allclose(
+            subset_attn_scores, stacked_attn_scores_from_batched, atol=1e-6
+        )
+
+        # masked attention scores
+        batched_attn_scores_masked_bqhwlh = (
+            batched_output["attn_scores_masked"]
+            .permute(0, 2, 3, 1)
+            .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+        )
+        # query, key, head
+        stacked_attn_scores_masked_from_batched = batched_attn_scores_masked_bqhwlh[
+            key_b, key_q, key_i, key_j, key_l
+        ]
+        subset_attn_scores_masked = subset_output["attn_scores_masked"].transpose(
+            -1, -2
+        )
+        assert torch.allclose(
+            subset_attn_scores_masked,
+            stacked_attn_scores_masked_from_batched,
+            atol=1e-6,
+        )
+
+        batched_attn_mask_bqhwl = batched_output["attn_mask"].view(
+            bsz, n_queries, sparse_height, sparse_width, n_levels
+        )
+        nonmask_b, nonmask_q, nonmask_i, nonmask_j, nonmask_l = (
+            batched_attn_mask_bqhwl.logical_not().nonzero(as_tuple=True)
+        )
+
+        # attention weights
+        batched_attn_weights_bqhwlh = (
+            batched_output["attn_weights"]
+            .permute(0, 2, 3, 1)
+            .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+        )
+        # query, key, head
+        stacked_attn_weights_from_batched = batched_attn_weights_bqhwlh[
+            key_b, key_q, key_i, key_j, key_l
+        ]
+        subset_attn_weights = subset_output["attn_weights"].transpose(-1, -2)
+        assert torch.allclose(
+            subset_attn_weights, stacked_attn_weights_from_batched, atol=1e-6
+        ), (
+            "max attn_weight difference: "
+            f"{(subset_attn_weights - stacked_attn_weights_from_batched).abs().max()}"
+        )
+
+        abs_difference = torch.abs(subset_attn_out - batched_attn_out_stacked)
         print(f"Biggest absolute difference: {abs_difference.max().item()}")
 
-        assert torch.allclose(subset_output, batched_output_stacked)
+        assert torch.allclose(subset_attn_out, batched_attn_out_stacked, atol=1e-6)

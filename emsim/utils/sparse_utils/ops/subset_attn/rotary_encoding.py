@@ -31,7 +31,7 @@ def _validate_same_ndims(
 ) -> None:
     if tensor_1.ndim != tensor_2.ndim:
         raise ValueError(
-            "Expected " + name_1 + " and " + name_2 + " to have the same number of ",
+            "Expected " + name_1 + " and " + name_2 + " to have the same number of "
             f"dims, got shapes {tensor_1.shape} and {tensor_2.shape}",
         )
 

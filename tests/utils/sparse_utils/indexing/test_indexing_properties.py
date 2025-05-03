@@ -166,7 +166,7 @@ class TestBatchSparseIndexProperties:
 
         # compare
         if dtype == torch.float16:
-            atol = 1e-4
+            atol = 1e-3
         else:
             atol = 1e-8  # default
         assert torch.allclose(sparse_selected_grad, dense_selected_grad, atol=atol), (

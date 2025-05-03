@@ -67,20 +67,12 @@ class EMTransformer(nn.Module):
         decoder_detach_updated_positions: bool = True,
         decoder_use_rope: bool = True,
         neighborhood_sizes: list[int] = [3, 5, 7, 9],
-        sparse_library: str = "minkowskiengine",
         dimension: int = 2,
         mask_main_queries_from_denoising: bool = False,
     ):
         super().__init__()
         self.two_stage_num_proposals = n_query_embeddings
-        if sparse_library == "spconv":
-            from ..salience_mask_predictor import SpconvSparseMaskPredictor
-
-            self.salience_mask_predictor = SpconvSparseMaskPredictor(d_model, d_model)
-        elif sparse_library == "minkowskiengine":
-            self.salience_mask_predictor = MESparseMaskPredictor(d_model, d_model)
-        else:
-            raise ValueError(f"Unrecognized sparse_library: `{sparse_library=}`")
+        self.salience_mask_predictor = MESparseMaskPredictor(d_model, d_model)
         self.use_rope = encoder_use_rope
         if encoder_use_rope:
             self.pos_embedding = RoPEEncodingND(

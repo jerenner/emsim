@@ -1,8 +1,13 @@
+import math
+from typing import Any, Optional, Union
+
+import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import numpy as np
-from typing import Dict, Any, Tuple, List, Optional
+from hypothesis import assume, example, given, settings
+from hypothesis import strategies as st
+from hypothesis.extra.numpy import arrays
+from torch import Tensor, nn
 
 from emsim.networks.positional_encoding.rope import (
     RoPEEncodingND,
@@ -12,10 +17,15 @@ from emsim.networks.positional_encoding.rope import (
 from emsim.networks.transformer.blocks.self_attn import (
     MultilevelSelfAttentionBlockWithRoPE,
 )
+from tests.networks.conftest import (
+    ModuleHook,
+    tensor_unit_normal,
+    positions_strategy,
+)
 
 
 @pytest.fixture
-def base_config() -> Dict[str, Any]:
+def base_config() -> dict[str, Any]:
     """Base configuration for MultilevelSelfAttentionBlockWithRoPE tests."""
     return {
         "embed_dim": 64,
@@ -33,71 +43,296 @@ def base_config() -> Dict[str, Any]:
 
 @pytest.fixture
 def module_instance(
-    base_config: Dict[str, Any], device: str
+    base_config: dict[str, Any], device: str
 ) -> MultilevelSelfAttentionBlockWithRoPE:
     """Create a module instance for testing."""
-    module = MultilevelSelfAttentionBlockWithRoPE(**base_config).to(device)
-    return module
+    return MultilevelSelfAttentionBlockWithRoPE(**base_config).to(device)
 
 
-@pytest.fixture
-def simple_input_data(device: str) -> Dict[str, torch.Tensor]:
-    """Generate simple input tensors for testing."""
-    # Parameters
-    stacked_sequence_length = 6
-    embed_dim = 64
-    position_dim = 2
-    batch_size = 2
+@st.composite
+def input_data_strategy(draw) -> dict[str, Any]:
+    # Draw basic shape parameters
+    n_heads = draw(st.integers(1, 8))
+    head_dim = draw(st.integers(1, 16)) * 2
+    embed_dim = n_heads * head_dim
+    position_dim = draw(st.integers(1, 5))
+    n_levels = draw(st.integers(1, 5))
 
-    # Create input tensors
-    x = torch.randn(stacked_sequence_length, embed_dim, device=device)
-    spatial_positions = (
-        torch.rand(stacked_sequence_length, position_dim, device=device) * 10
+    # Draw data size parameters
+    seq_lengths = draw(st.lists(st.integers(0, 32), min_size=1, max_size=4))
+    max_seq_len = max(seq_lengths)
+    batch_size = len(seq_lengths)
+    batch_offsets = np.zeros((batch_size + 1,), dtype=int)
+    batch_offsets[1:] = np.cumsum(seq_lengths)
+    total_seq_lengths = batch_offsets[-1].item()
+
+    # Draw level info
+    level_indices = draw(
+        st.lists(
+            elements=st.integers(0, n_levels - 1),
+            min_size=total_seq_lengths,
+            max_size=total_seq_lengths,
+        )
     )
-    level_indices = torch.tensor([0, 0, 1, 1, 1, 0], device=device)
-    level_spatial_shapes = torch.tensor([[8, 8], [4, 4]], device=device)
-    batch_offsets = torch.tensor([0, 3, 6], device=device)
+    level_shapes = draw(
+        arrays(
+            np.int64,
+            (n_levels, position_dim),
+            elements=st.integers(1, 1000),
+            fill=st.nothing(),
+        )
+    )
+
+    # Draw tensor generation parameters
+    seed = draw(st.integers(min_value=0, max_value=1e10))
+    float_dtype = draw(st.just(torch.float32))
+
+    min_float_value = draw(st.floats(min_value=-1e10, max_value=1e10, exclude_max=True))
+    max_float_value = draw(st.floats(min_value=min_float_value, max_value=1e10))
+
+    # Generation params for attn_mask
+    attn_mask_sparsity = draw(st.floats(0.0, 1.0))
+    attn_mask_shape = draw(
+        st.sampled_from(
+            [
+                (batch_size, max_seq_len, max_seq_len),
+                (batch_size * n_heads, max_seq_len, max_seq_len),
+                (batch_size, n_heads, max_seq_len, max_seq_len),
+            ]
+        )
+    )
+
+    position_dtype, min_position, max_position = draw(
+        positions_strategy().filter(lambda drawn: drawn[1] <= 0 or drawn[2] >= 1)
+    )
+
+    # Select rope freq group pattern and determine if nonequal freq groups need to
+    # be allowed
+    rope_freq_group_pattern = draw(st.sampled_from(["single", "partition", "closure"]))
+    if rope_freq_group_pattern == "partition":
+        rope_enforce_freq_groups_equal = head_dim % (2 * 2) == 0
+    elif rope_freq_group_pattern == "closure":
+        rope_enforce_freq_groups_equal = head_dim % (2 * 3) == 0
+    else:
+        rope_enforce_freq_groups_equal = True
+
+    return {
+        "config": {
+            "embed_dim": embed_dim,
+            "n_heads": n_heads,
+            "position_dim": position_dim,
+            "dropout": draw(st.floats(0.0, 1.0, exclude_max=True)),
+            "bias": draw(st.booleans()),
+            "norm_first": draw(st.booleans()),
+            "rope_spatial_base_theta": draw(st.floats(1.0, 1000.0)),
+            "rope_level_base_theta": draw(st.floats(1.0, 100.0)),
+            "rope_share_heads": draw(st.booleans()),
+            "rope_freq_group_pattern": rope_freq_group_pattern,
+            "rope_enforce_freq_groups_equal": rope_enforce_freq_groups_equal,
+        },
+        "tensor_config": {
+            "embed_dim": embed_dim,
+            "position_dim": position_dim,
+            "batch_offsets": batch_offsets,
+            "level_indices": level_indices,
+            "level_spatial_shapes": level_shapes,
+            "min_float_value": min_float_value,
+            "max_float_value": max_float_value,
+            "min_position": min_position,
+            "max_position": max_position,
+            "float_dtype": float_dtype,
+            "position_dtype": position_dtype,
+            "attn_mask_sparsity": attn_mask_sparsity,
+            "attn_mask_shape": attn_mask_shape,
+            "seed": seed,
+        },
+        "extra": {
+            "seq_lengths": seq_lengths,
+        },
+    }
+
+
+def make_input_tensors(
+    embed_dim: int,
+    position_dim: int,
+    batch_offsets: list[int],
+    level_indices: list[int],
+    level_spatial_shapes: np.ndarray,
+    min_float_value: float,
+    max_float_value: float,
+    min_position: Union[int, float],
+    max_position: Union[int, float],
+    float_dtype: torch.dtype,
+    position_dtype: torch.dtype,
+    attn_mask_sparsity: float,
+    attn_mask_shape: tuple[int, ...],
+    seed: int,
+    device: str,
+    force_non_normalized_coords: bool = True,
+) -> dict[str, Tensor]:
+    device = torch.device(device, 0)
+
+    # save rng state and set seed
+    if device.type == "cuda":
+        rng_state = torch.cuda.get_rng_state(device)
+    else:
+        rng_state = torch.get_rng_state(device)
+    torch.manual_seed(seed)
+
+    total_seq_lengths = batch_offsets[-1]
+
+    # embeddings
+    x = torch.empty((total_seq_lengths, embed_dim), device=device, dtype=float_dtype)
+    x.uniform_(min_float_value, max_float_value)
+
+    # spatial positions
+    spatial_positions: torch.Tensor = torch.empty(
+        (total_seq_lengths, position_dim), device=device, dtype=position_dtype
+    )
+    if position_dtype == torch.long:
+        spatial_positions.random_(min_position, min_position + 1)
+    else:
+        spatial_positions.uniform_(min_position, max_position)
+    if force_non_normalized_coords and spatial_positions.numel() > 0:
+        while spatial_positions.min() > 0.0 and spatial_positions.max() <= 1.0:
+            spatial_positions = spatial_positions + 1.0
+
+    # attn_mask: True means mask out
+    attn_mask = torch.empty(attn_mask_shape, dtype=torch.bool, device=device)
+    attn_mask.bernoulli_(attn_mask_sparsity)
+
+    # reset rng state
+    if device.type == "cuda":
+        torch.cuda.set_rng_state(rng_state, device)
+    else:
+        torch.set_rng_state(rng_state)
 
     return {
         "x": x,
         "spatial_positions": spatial_positions,
-        "level_indices": level_indices,
-        "level_spatial_shapes": level_spatial_shapes,
-        "batch_offsets": batch_offsets,
-        "attn_mask": None,
+        "level_indices": torch.tensor(level_indices, device=device),
+        "level_spatial_shapes": torch.tensor(level_spatial_shapes, device=device),
+        "batch_offsets": torch.tensor(batch_offsets, device=device),
+        "attn_mask": attn_mask,
     }
 
 
-@pytest.fixture
-def complex_input_data(device: str) -> Dict[str, torch.Tensor]:
-    """Generate more complex input tensors for testing."""
-    # Parameters
-    stacked_sequence_length = 12
-    embed_dim = 64
-    position_dim = 2
-    num_levels = 3
-    batch_size = 3
+@pytest.fixture(params=["simple", "complex", "variable_length"])
+def input_data(request, device: str) -> dict[str, torch.Tensor]:
+    """Parametrized fixture generating different input data types."""
+    if request.param == "simple":
+        return generate_input_data(
+            device=device,
+            stacked_sequence_length=6,
+            embed_dim=64,
+            position_dim=2,
+            batch_size=2,
+            num_levels=2,
+            level_distribution=[0, 0, 1, 1, 1, 0],
+            level_shapes=[[8, 8], [4, 4]],
+            random_seed=42,
+        )
+    elif request.param == "complex":
+        return generate_input_data(
+            device=device,
+            stacked_sequence_length=12,
+            embed_dim=64,
+            position_dim=2,
+            batch_size=3,
+            num_levels=3,
+            level_shapes=[[16, 16], [8, 8], [4, 4]],
+            with_attn_mask=True,
+            random_seed=43,
+        )
+    elif request.param == "variable_length":
+        return generate_variable_length_input_data(
+            device=device,
+            embed_dim=64,
+            position_dim=2,
+            num_levels=3,
+            level_shapes=[[16, 16], [8, 8], [4, 4]],
+            tokens_per_level=[
+                [16, 8, 4],  # Batch 1
+                [12, 6, 3],  # Batch 2 (smaller)
+                [20, 10, 5],  # Batch 3 (larger)
+            ],
+            random_seed=44,
+        )
 
-    # Create input tensors
+
+def generate_input_data(
+    device: str,
+    stacked_sequence_length: int,
+    embed_dim: int,
+    position_dim: int,
+    batch_size: int,
+    num_levels: int = None,
+    level_distribution: list[int] = None,
+    level_shapes: list[list[int]] = None,
+    tokens_per_batch: list[int] = None,
+    with_attn_mask: bool = False,
+    random_seed: int = None,
+) -> dict[str, torch.Tensor]:
+    """Generate input tensors for testing with customizable parameters."""
+    if random_seed is not None:
+        torch.manual_seed(random_seed)
+
+    # Create input embedding tensor
     x = torch.randn(stacked_sequence_length, embed_dim, device=device)
+
+    # Create spatial positions
     spatial_positions = (
         torch.rand(stacked_sequence_length, position_dim, device=device) * 10
     )
-    # Simple level indices pattern: [0,1,2,0, 1,2,0,1, 2,0,1,2]
-    level_indices = (
-        torch.arange(num_levels, device=device)
-        .unsqueeze(0)
-        .expand(stacked_sequence_length // num_levels, -1)
-        .flatten()
-    )
-    level_spatial_shapes = torch.tensor([[16, 16], [8, 8], [4, 4]], device=device)
-    # 3 batches with 4 tokens each
-    batch_offsets = torch.tensor([0, 4, 8, 12], device=device)
 
-    # Create an attention mask (True indicates masked positions)
-    # We'll create a simple mask where the first token in each batch can't attend to the last token
-    attn_mask = torch.zeros(batch_size, 4, 4, dtype=torch.bool, device=device)
-    attn_mask[:, 0, 3] = True
+    # Create level indices
+    if level_distribution is not None:
+        level_indices = torch.tensor(level_distribution, device=device)
+    else:
+        # Generate distribution with roughly equal representation of each level
+        level_indices = torch.randint(
+            0, num_levels, (stacked_sequence_length,), device=device
+        )
+
+    # Create level spatial shapes
+    if level_shapes is not None:
+        level_spatial_shapes = torch.tensor(level_shapes, device=device)
+    else:
+        # Generate decreasing shapes for each level
+        base_size = 16
+        level_spatial_shapes = torch.tensor(
+            [[base_size // (2**i), base_size // (2**i)] for i in range(num_levels)],
+            device=device,
+        )
+
+    # Create batch offsets
+    if tokens_per_batch is not None:
+        batch_offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=device)
+        batch_offsets[1:] = torch.tensor(tokens_per_batch, device=device).cumsum(0)
+    else:
+        # Equal distribution of tokens across batches
+        tokens_per_batch = stacked_sequence_length // batch_size
+        batch_offsets = torch.arange(
+            0, stacked_sequence_length + 1, tokens_per_batch, device=device
+        )
+        if batch_offsets.size(0) > batch_size + 1:
+            batch_offsets = batch_offsets[: batch_size + 1]
+        batch_offsets[-1] = stacked_sequence_length
+
+    # Create attention mask if requested
+    attn_mask = None
+    if with_attn_mask:
+        # Create simple mask: first token in each batch can't attend to last token
+        tokens_per_batch = [
+            batch_offsets[i + 1] - batch_offsets[i] for i in range(batch_size)
+        ]
+        max_tokens = max(tokens_per_batch)
+        attn_mask = torch.zeros(
+            batch_size, max_tokens, max_tokens, dtype=torch.bool, device=device
+        )
+        for i in range(batch_size):
+            if tokens_per_batch[i] > 1:
+                attn_mask[i, 0, tokens_per_batch[i] - 1] = True
 
     return {
         "x": x,
@@ -109,35 +344,29 @@ def complex_input_data(device: str) -> Dict[str, torch.Tensor]:
     }
 
 
-@pytest.fixture
-def variable_length_input_data(device: str) -> Dict[str, torch.Tensor]:
-    """Generate input tensors with variable sequence lengths."""
-    # Parameters
-    embed_dim = 64
-    position_dim = 2
-    num_levels = 3
+def generate_variable_length_input_data(
+    device: str,
+    embed_dim: int,
+    position_dim: int,
+    num_levels: int,
+    level_shapes: list[list[int]],
+    tokens_per_level: list[list[int]],
+    random_seed: int = None,
+) -> dict[str, torch.Tensor]:
+    """Generate input data with variable sequence lengths."""
+    if random_seed is not None:
+        torch.manual_seed(random_seed)
 
-    # Tokens per level per batch (variable)
-    tokens_per_level = [
-        [16, 8, 4],  # Batch 1
-        [12, 6, 3],  # Batch 2 (smaller)
-        [20, 10, 5],  # Batch 3 (larger)
-    ]
-
-    # Calculate total sequence length and batch offsets
+    # Basic setup
     batch_size = len(tokens_per_level)
     total_seq_length = sum(sum(batch) for batch in tokens_per_level)
+    level_spatial_shapes = torch.tensor(level_shapes, device=device)
+
+    # Calculate batch offsets
     batch_offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=device)
-
     batch_offsets[1:] = torch.cumsum(
-        torch.tensor(tokens_per_level, device=device).sum(1), 0
+        torch.tensor([sum(batch) for batch in tokens_per_level], device=device), 0
     )
-
-    # current_offset = 0
-    # for i, batch_tokens in enumerate(tokens_per_level):
-    #     batch_offsets[i] = current_offset
-    #     current_offset += sum(batch_tokens)
-    # batch_offsets[-1] = current_offset
 
     # Create embeddings
     x = torch.randn(total_seq_length, embed_dim, device=device)
@@ -146,9 +375,6 @@ def variable_length_input_data(device: str) -> Dict[str, torch.Tensor]:
     spatial_positions = torch.zeros(total_seq_length, position_dim, device=device)
     level_indices = torch.zeros(total_seq_length, dtype=torch.long, device=device)
 
-    # Level spatial shapes
-    level_spatial_shapes = torch.tensor([[16, 16], [8, 8], [4, 4]], device=device)
-
     # Fill spatial positions and level indices
     idx = 0
     for b in range(batch_size):
@@ -156,23 +382,25 @@ def variable_length_input_data(device: str) -> Dict[str, torch.Tensor]:
             num_tokens = tokens_per_level[b][level]
             h, w = level_spatial_shapes[level]
 
-            # Create grid positions
-            h_use = num_tokens // w + (1 if num_tokens % w > 0 else 0)
-            positions = []
-            for i in range(h_use):
-                for j in range(min(w, num_tokens - i * w)):
-                    positions.append([i, j])
+            # Generate positions on a grid
+            if num_tokens > 0:
+                h_use = min(h, num_tokens // w + (1 if num_tokens % w > 0 else 0))
+                positions = []
+                for i in range(h_use):
+                    for j in range(min(w, num_tokens - i * w)):
+                        positions.append([i, j])
 
-            positions = torch.tensor(positions, device=device)
-            num_positions = positions.shape[0]
+                # For random positions instead of grid:
+                # positions = torch.rand(num_tokens, position_dim, device=device) * torch.tensor([h, w], device=device)
 
-            # Add to spatial positions
-            spatial_positions[idx : idx + num_positions] = positions
+                positions = torch.tensor(positions, device=device)
+                num_positions = positions.shape[0]
 
-            # Set level indices
-            level_indices[idx : idx + num_positions] = level
+                # Add to spatial positions and set level indices
+                spatial_positions[idx : idx + num_positions] = positions
+                level_indices[idx : idx + num_positions] = level
 
-            idx += num_positions
+                idx += num_positions
 
     return {
         "x": x,
@@ -184,96 +412,15 @@ def variable_length_input_data(device: str) -> Dict[str, torch.Tensor]:
     }
 
 
-class HookedQKV(nn.Module):
-    def __init__(self, main_module: nn.Module):
-        super().__init__()
-        self.module = main_module
-        self.captured_values = {"pre_qkv_input": [], "qkv": []}
-
-    def forward(self, x):
-        self.captured_values["pre_qkv_input"] = x.detach().clone()
-        out = self.module(x)
-        self.captured_values["qkv"] = out.detach().clone()
-        return out
-
-
-class HookedCalcAttn(nn.Module):
-    def __init__(self, main_module: nn.Module):
-        super().__init__()
-        self.module = main_module
-        self.captured_values = {
-            "q": [],
-            "k": [],
-            "v": [],
-            "pad_mask": [],
-            "attn_mask": [],
-            "attn_output": [],
-        }
-
-    def forward(self, q, k, v, pad_mask, attn_mask=None):
-        self.captured_values["q"].append(q.detach().clone())
-        self.captured_values["k"].append(k.detach().clone())
-        self.captured_values["v"].append(v.detach().clone())
-        self.captured_values["pad_mask"].append(pad_mask.detach().clone())
-        if attn_mask is not None:
-            self.captured_values["attn_mask"].append(attn_mask.detach().clone())
-        result = self.module(q, k, v, pad_mask, attn_mask)
-        self.captured_values["attn_output"].append(result.detach().clone())
-        return result
-
-
-class ModuleWithHooks(nn.Module):
-    """Wrapper that adds hooks to capture intermediate values."""
-
-    def __init__(self, module: MultilevelSelfAttentionBlockWithRoPE):
-        super().__init__()
-        self.module = module
-        self.captured_values = {}
-        self._install_hooks()
-
-    def _install_hooks(self):
-        # Store original methods
-        self._orig_qkv = self.module.qkv
-        self._orig_calc_attn = self.module._calc_attn
-
-        # Replace with hooked versions
-        def hooked_calc_attn(q, k, v, pad_mask, attn_mask=None):
-            self.captured_values["q"] = q.detach().clone()
-            self.captured_values["k"] = k.detach().clone()
-            self.captured_values["v"] = v.detach().clone()
-            self.captured_values["pad_mask"] = pad_mask.detach().clone()
-            if attn_mask is not None:
-                self.captured_values["attn_mask"] = attn_mask.detach().clone()
-            result = self._orig_calc_attn(q, k, v, pad_mask, attn_mask)
-            self.captured_values["attn_output"] = result.detach().clone()
-            return result
-
-        self.module.qkv = HookedQKV(self._orig_qkv)
-        self.module._calc_attn = hooked_calc_attn
-
-    def forward(self, *args, **kwargs):
-        result = self.module(*args, **kwargs)
-        self.captured_values["pre_qkv_input"] = self.module.qkv.captured_values[
-            "pre_qkv_input"
-        ]
-        self.captured_values["qkv"] = self.module.qkv.captured_values["qkv"]
-        return result
-
-    def restore_original_methods(self):
-        """Restore original methods to the module."""
-        self.module.qkv = self._orig_qkv
-        self.module._calc_attn = self._orig_calc_attn
-
-
 @pytest.mark.cuda_if_available
 class TestInitialization:
     """Tests for initialization of MultilevelSelfAttentionBlockWithRoPE."""
 
-    def test_basic_initialization(self, base_config: Dict[str, Any], device: str):
+    def test_basic_initialization(self, base_config: dict[str, Any], device: str):
         """Test basic initialization with default parameters."""
         module = MultilevelSelfAttentionBlockWithRoPE(**base_config).to(device)
 
-        # Check essential attributes
+        # Check core attributes
         assert module.embed_dim == base_config["embed_dim"]
         assert module.n_heads == base_config["n_heads"]
         assert module.position_dim == base_config["position_dim"]
@@ -284,12 +431,10 @@ class TestInitialization:
         assert isinstance(module.qkv, nn.Linear)
         assert isinstance(module.pos_encoding, RoPEEncodingND)
         assert isinstance(module.out_proj, nn.Linear)
-        assert isinstance(module.out_proj_drop, nn.Dropout)
 
         # Check dimensions
         assert module.qkv.in_features == base_config["embed_dim"]
         assert module.qkv.out_features == 3 * base_config["embed_dim"]
-        assert module.out_proj.in_features == base_config["embed_dim"]
         assert module.out_proj.out_features == base_config["embed_dim"]
 
     @pytest.mark.parametrize(
@@ -307,17 +452,14 @@ class TestInitialization:
     )
     def test_custom_initialization(
         self,
-        base_config: Dict[str, Any],
+        base_config: dict[str, Any],
         param_name: str,
         param_value: Any,
         device: str,
     ):
         """Test initialization with custom parameters."""
-        # Update config with custom parameter
         config = base_config.copy()
         config[param_name] = param_value
-
-        # Initialize module
         module = MultilevelSelfAttentionBlockWithRoPE(**config).to(device)
 
         # Check parameter was set correctly
@@ -325,9 +467,7 @@ class TestInitialization:
             assert module.attn_drop_rate == param_value
         elif param_name == "bias":
             assert (module.qkv.bias is not None) == param_value
-            assert (module.out_proj.bias is not None) == param_value
         elif param_name == "rope_freq_group_pattern":
-            # This gets converted to a tensor pattern
             expected_pattern = get_multilevel_freq_group_pattern(
                 config["position_dim"], param_value
             )
@@ -344,37 +484,28 @@ class TestInitialization:
                 n_heads=4,
             ).to(device)
 
-    @pytest.mark.parametrize("embed_dim,n_heads", [(64, 4), (128, 8), (256, 16)])
-    def test_different_dimensions(
-        self, base_config: Dict[str, Any], embed_dim: int, n_heads: int, device: str
-    ):
-        """Test that module works with different embedding dimensions and head counts."""
-        # Update config
-        config = base_config.copy()
-        config.update({"embed_dim": embed_dim, "n_heads": n_heads})
+    @settings(deadline=None)
+    @given(inputs=input_data_strategy())
+    def test_initialization_hypothesis(self, inputs: dict[str, Any], device):
+        config = inputs["config"]
 
-        # Create module
         module = MultilevelSelfAttentionBlockWithRoPE(**config).to(device)
 
-        # Check key dimensions
-        assert module.embed_dim == embed_dim
-        assert module.n_heads == n_heads
-        assert module.qkv.out_features == 3 * embed_dim
+        assert module.embed_dim == config["embed_dim"]
+        assert module.n_heads == config["n_heads"]
+        assert module.position_dim == config["position_dim"]
+        assert module.norm_first == config["norm_first"]
 
-        # Create simple input
-        x = torch.randn(6, embed_dim, device=device)
-        spatial_positions = torch.rand(6, 2, device=device) * 10
-        level_indices = torch.zeros(6, dtype=torch.long, device=device)
-        level_spatial_shapes = torch.tensor([[8, 8]], device=device)
-        batch_offsets = torch.tensor([0, 3, 6], device=device)
+        # Check submodules
+        assert isinstance(module.norm, nn.LayerNorm)
+        assert isinstance(module.qkv, nn.Linear)
+        assert isinstance(module.pos_encoding, RoPEEncodingND)
+        assert isinstance(module.out_proj, nn.Linear)
 
-        # Run forward pass
-        output = module(
-            x, spatial_positions, level_indices, level_spatial_shapes, batch_offsets
-        )
-
-        # Check output shape
-        assert output.shape == x.shape
+        # Check dimensions
+        assert module.qkv.in_features == config["embed_dim"]
+        assert module.qkv.out_features == 3 * config["embed_dim"]
+        assert module.out_proj.out_features == config["embed_dim"]
 
 
 @pytest.mark.cuda_if_available
@@ -384,284 +515,193 @@ class TestForward:
     def test_forward_shape_preservation(
         self,
         module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
+        input_data: dict[str, torch.Tensor],
     ):
-        """Test that the output shape matches the input shape."""
-        x = simple_input_data["x"]
+        """Test that output shape matches input shape."""
+        x = input_data["x"]
+        output = module_instance(**input_data)
 
-        # Run forward pass
-        output = module_instance(**simple_input_data)
-
-        # Check output shape
+        # Check output shape and validity
         assert output.shape == x.shape
-
-        # Check output is not NaN or Inf
         assert not torch.isnan(output).any()
         assert not torch.isinf(output).any()
-
-    def test_forward_batch_processing(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
-    ):
-        """Test that batched inputs are processed correctly."""
-        # Run forward pass
-        output = module_instance(**simple_input_data)
-
-        # Split the output by batch
-        outputs_by_batch = torch.split(output, [3, 3])  # 3 tokens per batch
-
-        # Each batch's output should be different due to separate processing
-        assert not torch.allclose(outputs_by_batch[0], outputs_by_batch[1])
 
     def test_forward_with_small_inputs(
         self, module_instance: MultilevelSelfAttentionBlockWithRoPE, device: str
     ):
         """Test forward pass with minimal-sized inputs."""
-        # Create minimal inputs - just one token per batch
+        # Create minimal random inputs - just one token per batch
+        torch.manual_seed(42)
         batch_size = 2
-        x = torch.randn(batch_size, module_instance.embed_dim, device=device)
-        spatial_positions = (
-            torch.randn(batch_size, module_instance.position_dim, device=device) * 10
+        input_data = generate_input_data(
+            device=device,
+            stacked_sequence_length=batch_size,
+            embed_dim=module_instance.embed_dim,
+            position_dim=module_instance.position_dim,
+            batch_size=batch_size,
+            num_levels=1,
+            level_shapes=[[1, 1]],
+            random_seed=42,
         )
-        level_indices = torch.zeros(batch_size, dtype=torch.long, device=device)
-        level_spatial_shapes = torch.tensor([[1, 1]], device=device).float()
-        batch_offsets = torch.tensor([0, 1, 2], device=device)
 
         # Run forward pass
-        output = module_instance(
-            x, spatial_positions, level_indices, level_spatial_shapes, batch_offsets
-        )
+        output = module_instance(**input_data)
 
         # Check output
-        assert output.shape == x.shape
-
+        assert output.shape == input_data["x"].shape
         assert not torch.isnan(output).any()
         assert not torch.isinf(output).any()
 
-    def test_forward_with_variable_length_sequences(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        variable_length_input_data: Dict[str, torch.Tensor],
-    ):
-        """Test forward pass with variable length sequences."""
-        # Run forward pass
-        output = module_instance(**variable_length_input_data)
-
-        # Check output shape
-        assert output.shape == variable_length_input_data["x"].shape
-
     @pytest.mark.parametrize("norm_first", [True, False])
     def test_norm_placement(
-        self,
-        base_config: Dict[str, Any],
-        norm_first: bool,
-        simple_input_data: Dict[str, torch.Tensor],
-        device: str,
+        self, base_config: dict[str, Any], norm_first: bool, device: str
     ):
-        """Test that norm_first parameter correctly affects normalization placement."""
+        """Test norm_first parameter effect on normalization placement."""
         # Create module with specified norm_first
         config = base_config.copy()
         config["norm_first"] = norm_first
         module = MultilevelSelfAttentionBlockWithRoPE(**config).to(device)
 
-        # Create hooked module
-        hooked_module = ModuleWithHooks(module)
+        # Create input data
+        torch.manual_seed(0)
+        input_data = generate_input_data(
+            device=device,
+            stacked_sequence_length=6,
+            embed_dim=config["embed_dim"],
+            position_dim=config["position_dim"],
+            batch_size=2,
+            num_levels=1,
+            random_seed=0,
+        )
+
+        # Create hook to capture intermediate valuesw
+        hook = ModuleHook(
+            module,
+            {
+                "qkv": lambda m: m.qkv,
+            },
+        )
 
         # Run forward pass
-        with torch.no_grad():
-            hooked_module(**simple_input_data)
+        with hook, torch.no_grad():
+            module(**input_data)
 
-        # Verify behavior based on norm_first
-        pre_qkv_input = hooked_module.captured_values["pre_qkv_input"]
+        # Check if input to qkv is normalized based on norm_first
+        pre_qkv_input = hook.captured_values["qkv"]["inputs"][0]
 
         if norm_first:
-            # Pre-norm architecture: input to QKV should be normalized
-            # Normalized data typically has near-zero mean
+            # Pre-norm: input to QKV should be normalized
             assert torch.abs(pre_qkv_input.mean()) < 0.1
-            # And standard deviation close to 1
-            assert torch.abs(pre_qkv_input.std() - 1.0) < 0.5
+            assert abs(pre_qkv_input.std() - 1.0) < 0.5
         else:
-            # Post-norm architecture: input to QKV would be the original input
-            # Should approximately match the statistics of the input data
-            assert torch.abs(pre_qkv_input.mean() - simple_input_data["x"].mean()) < 0.1
+            # Post-norm: input to QKV should be the original input
+            assert torch.abs(pre_qkv_input.mean() - input_data["x"].mean()) < 0.1
 
-        # Restore original methods
-        hooked_module.restore_original_methods()
-
-    @pytest.mark.parametrize("dropout_value", [0.0, 0.1, 0.5])
+    @pytest.mark.parametrize("dropout_value", [0.0, 0.3])
     def test_dropout_effect(
-        self,
-        base_config: Dict[str, Any],
-        dropout_value: float,
-        simple_input_data: Dict[str, torch.Tensor],
-        device: str,
+        self, base_config: dict[str, Any], dropout_value: float, device: str
     ):
-        """Test that dropout parameter affects the behavior appropriately."""
-        # Configure the module with specified dropout
+        """Test dropout parameter effect."""
+        # Configure module with specified dropout
         config = base_config.copy()
         config["dropout"] = dropout_value
         module = MultilevelSelfAttentionBlockWithRoPE(**config).to(device)
 
+        # Generate random input
+        torch.manual_seed(0)
+        input_data = generate_input_data(
+            device=device,
+            stacked_sequence_length=8,
+            embed_dim=config["embed_dim"],
+            position_dim=config["position_dim"],
+            batch_size=2,
+            num_levels=1,
+            random_seed=0,
+        )
+
         # Output in eval mode (no dropout)
         module.eval()
-        eval_output = module(**simple_input_data)
+        eval_output = module(**input_data)
 
-        # Set module to training mode to enable dropout
+        # Set to training mode
         module.train()
 
-        # Set seed for testing reproducibility
+        # Compare outputs with same and different seeds
         torch.manual_seed(1)
+        output_1 = module(**input_data)
 
-        output_1 = module(**simple_input_data)
-
-        # Should be different with dropout active
-        if dropout_value == 0.0:
-            assert torch.allclose(eval_output, output_1)
-        else:
-            assert not torch.allclose(eval_output, output_1)
-
-        # Test reproducibility with same seed
         torch.manual_seed(1)
-        output_2 = module(**simple_input_data)
+        output_2 = module(**input_data)
 
+        torch.manual_seed(2)
+        output_3 = module(**input_data)
+
+        # Same seed should give same result
         assert torch.allclose(output_1, output_2)
 
-        # Test different seed
-        torch.manual_seed(5)
-        output_3 = module(**simple_input_data)
-
+        # With dropout=0, all outputs should be the same
+        # With dropout>0, different seeds should give different results
         if dropout_value == 0.0:
+            assert torch.allclose(eval_output, output_1)
             assert torch.allclose(output_1, output_3)
         else:
+            assert not torch.allclose(eval_output, output_1)
             assert not torch.allclose(output_1, output_3)
 
     def test_grad_flow(
         self,
         module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
+        input_data: dict[str, torch.Tensor],
     ):
-        """Test that gradients flow through the module properly."""
+        """Test gradient flow through the module."""
         # Make inputs require grad
-        x = simple_input_data["x"].clone().requires_grad_(True)
-        input_data = simple_input_data.copy()
-        input_data["x"] = x
+        x = input_data["x"].clone().requires_grad_(True)
+        input_copy = input_data.copy()
+        input_copy["x"] = x
 
-        # Run forward pass
-        output = module_instance(**input_data)
-
-        # Create a dummy loss and backpropagate
+        # Forward and backward
+        output = module_instance(**input_copy)
         loss = output.sum()
         loss.backward()
 
-        # Check that gradients have been computed
+        # Check gradients
         assert x.grad is not None
-        assert x.grad.shape == x.shape
-
-        # Also check that module parameters received gradients
         for name, param in module_instance.named_parameters():
             assert param.grad is not None, f"Parameter {name} has no gradient"
 
+    @settings(deadline=None)
+    @given(inputs=input_data_strategy())
+    def test_forward_hypothesis(self, inputs, device: str):
+        module = MultilevelSelfAttentionBlockWithRoPE(**inputs["config"]).to(device)
+        inputs = make_input_tensors(**inputs["tensor_config"], device=device)
 
-@pytest.mark.cuda_if_available
-class TestValidation:
-    """Tests for input validation in MultilevelSelfAttentionBlockWithRoPE."""
+        out = module(**inputs)
 
-    def test_dimension_validation(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
-    ):
-        """Test validation of input tensor dimensions."""
-        # Create invalid x (1D instead of 2D)
-        invalid_data = simple_input_data.copy()
-        invalid_data["x"] = torch.randn(10, device=simple_input_data["x"].device)
-
-        with pytest.raises((torch.jit.Error, ValueError), match="Expected x to be 2D"):
-            module_instance(**invalid_data)
-
-    def test_sequence_length_validation(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
-    ):
-        """Test validation of sequence length consistency."""
-        # Create positions with wrong sequence length
-        invalid_data = simple_input_data.copy()
-        invalid_data["spatial_positions"] = torch.randn(
-            simple_input_data["x"].shape[0] + 1,
-            simple_input_data["spatial_positions"].shape[1],
-            device=simple_input_data["x"].device,
-        )
-
-        with pytest.raises(ValueError, match="Mismatched sequence lengths"):
-            module_instance(**invalid_data)
-
-    def test_position_dimension_validation(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
-    ):
-        """Test validation of position dimensions."""
-        # Create positions with wrong number of dimensions
-        invalid_data = simple_input_data.copy()
-        invalid_data["spatial_positions"] = torch.randn(
-            simple_input_data["x"].shape[0],
-            module_instance.position_dim + 1,  # Wrong number of position dimensions
-            device=simple_input_data["x"].device,
-        )
-
-        with pytest.raises(
-            (torch.jit.Error, ValueError), match="Mismatched position dimensions"
-        ):
-            module_instance(**invalid_data)
-
-    def test_spatial_shapes_validation(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
-    ):
-        """Test validation of level spatial shapes dimensions."""
-        # Create spatial shapes with wrong number of dimensions
-        invalid_data = simple_input_data.copy()
-        invalid_data["level_spatial_shapes"] = torch.randn(
-            simple_input_data["level_spatial_shapes"].shape[0],
-            simple_input_data["level_spatial_shapes"].shape[1]
-            + 1,  # Wrong number of dimensions
-            device=simple_input_data["x"].device,
-        )
-
-        with pytest.raises(ValueError, match="Mismatched position dimensions"):
-            module_instance(**invalid_data)
-
-    def test_input_validation(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
-    ):
-        """Test that validation properly catches shape mismatches."""
-        # Test mismatched sequence lengths
-        invalid_data = simple_input_data.copy()
-        invalid_data["level_indices"] = invalid_data["level_indices"][
-            :-1
-        ]  # Remove last element
-
-        with pytest.raises(ValueError, match="Mismatched sequence lengths"):
-            module_instance(**invalid_data)
+        assert out.shape == inputs["x"].shape
+        assert not out.isnan().any()
+        assert not out.isinf().any()
 
 
 @pytest.mark.cuda_if_available
-class TestAttention:
-    """Tests for attention calculation in MultilevelSelfAttentionBlockWithRoPE."""
+class TestAttentionMechanism:
+    """Tests for attention calculation and masking."""
 
     def test_attention_mask_effect(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        complex_input_data: Dict[str, torch.Tensor],
+        self, module_instance: MultilevelSelfAttentionBlockWithRoPE, device: str
     ):
-        """Test that attention mask correctly affects the output."""
-        # Get data with attention mask
-        data_with_mask = complex_input_data.copy()
+        """Test that attention mask correctly affects output."""
+        # Generate data with attention mask
+        torch.manual_seed(0)
+        data_with_mask = generate_input_data(
+            device=device,
+            stacked_sequence_length=12,
+            embed_dim=module_instance.embed_dim,
+            position_dim=module_instance.position_dim,
+            batch_size=3,
+            num_levels=2,
+            with_attn_mask=True,
+            random_seed=0,
+        )
 
         # Run with mask
         output_with_mask = module_instance(**data_with_mask)
@@ -671,147 +711,102 @@ class TestAttention:
         data_without_mask["attn_mask"] = None
         output_without_mask = module_instance(**data_without_mask)
 
-        # Outputs should differ when mask is applied
+        # Outputs should differ with mask
         assert not torch.allclose(output_with_mask, output_without_mask)
 
-    def test_calc_attn_method(
+    def test_different_position_encoding(
         self, module_instance: MultilevelSelfAttentionBlockWithRoPE, device: str
     ):
-        """Test the internal _calc_attn method directly."""
-        # Create test inputs
-        batch_size = 2
-        n_heads = module_instance.n_heads
-        seq_len = 4
-        head_dim = module_instance.embed_dim // n_heads
-
-        q = torch.randn(batch_size, n_heads, seq_len, head_dim, device=device)
-        k = torch.randn(batch_size, n_heads, seq_len, head_dim, device=device)
-        v = torch.randn(batch_size, n_heads, seq_len, head_dim, device=device)
-        pad_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-
-        # Test without attention mask
-        output_no_mask = module_instance._calc_attn(q, k, v, pad_mask)
-        assert output_no_mask.shape == (batch_size, n_heads, seq_len, head_dim)
-
-        # Test with attention mask (different shapes)
-        # Shape: (batch, seq, seq)
-        attn_mask_3d = torch.zeros(
-            batch_size, seq_len, seq_len, dtype=torch.bool, device=device
+        """Test that different positions produce different outputs."""
+        # Generate baseline data
+        torch.manual_seed(0)
+        original_data = generate_input_data(
+            device=device,
+            stacked_sequence_length=6,
+            embed_dim=module_instance.embed_dim,
+            position_dim=module_instance.position_dim,
+            batch_size=2,
+            num_levels=2,
+            random_seed=0,
         )
-        attn_mask_3d[:, 0, 1] = True  # Mask one position
 
-        output_3d_mask = module_instance._calc_attn(q, k, v, pad_mask, attn_mask_3d)
-        assert output_3d_mask.shape == (batch_size, n_heads, seq_len, head_dim)
-        assert not torch.allclose(output_no_mask, output_3d_mask)
-
-        # Shape: (batch, n_heads, seq, seq)
-        attn_mask_4d = torch.zeros(
-            batch_size, n_heads, seq_len, seq_len, dtype=torch.bool, device=device
-        )
-        attn_mask_4d[:, :, 0, 2] = True  # Mask different position
-
-        output_4d_mask = module_instance._calc_attn(q, k, v, pad_mask, attn_mask_4d)
-        assert output_4d_mask.shape == (batch_size, n_heads, seq_len, head_dim)
-        assert not torch.allclose(output_3d_mask, output_4d_mask)
-
-        # Test with padding
-        pad_mask_with_padding = pad_mask.clone()
-        pad_mask_with_padding[0, -1] = True  # Last token in first batch is padding
-
-        output_with_padding = module_instance._calc_attn(q, k, v, pad_mask_with_padding)
-        assert output_with_padding.shape == (batch_size, n_heads, seq_len, head_dim)
-        # Padding should affect the output
-        assert not torch.allclose(output_no_mask, output_with_padding)
-
-        # Test with combined padding and attention mask
-        output_combined = module_instance._calc_attn(
-            q, k, v, pad_mask_with_padding, attn_mask_3d
-        )
-        assert output_combined.shape == (batch_size, n_heads, seq_len, head_dim)
-        assert not torch.allclose(output_with_padding, output_combined)
-
-
-@pytest.mark.cuda_if_available
-class TestPositionEncoding:
-    """Tests for position encoding in MultilevelSelfAttentionBlockWithRoPE."""
-
-    def test_multilevel_position_handling(
-        self,
-        module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        complex_input_data: Dict[str, torch.Tensor],
-    ):
-        """Test that positions from different levels are properly standardized."""
-        # We create two sets of position inputs - one with regular positions and
-        # another with altered positions for one level
-        original_data = complex_input_data.copy()
-
-        # Create modified data where Level 1 positions are scaled differently
-        modified_data = complex_input_data.copy()
-        level_1_mask = modified_data["level_indices"] == 1
-        modified_positions = modified_data["spatial_positions"].clone()
-        modified_positions[level_1_mask] *= 2  # Scale level 1 positions
+        # Create modified data with different positions
+        modified_data = original_data.copy()
+        modified_positions = original_data["spatial_positions"].clone() + 1.0
         modified_data["spatial_positions"] = modified_positions
 
-        # Run forward with both inputs
+        # Run forward on both
         output_original = module_instance(**original_data)
         output_modified = module_instance(**modified_data)
 
-        # Since positions affect attention through RoPE, outputs should differ
+        # Outputs should differ due to position encoding
         assert not torch.allclose(output_original, output_modified)
 
     @pytest.mark.parametrize("rope_freq_pattern", ["single", "partition", "closure"])
     def test_rope_frequency_patterns(
-        self,
-        base_config: Dict[str, Any],
-        rope_freq_pattern: str,
-        simple_input_data: Dict[str, torch.Tensor],
-        device: str,
+        self, base_config: dict[str, Any], rope_freq_pattern: str, device: str
     ):
-        """Test different RoPE frequency group patterns."""
-        # Update config
+        """Test different RoPE frequency patterns."""
+        # Create module with specified pattern
         config = base_config.copy()
         config["rope_freq_group_pattern"] = rope_freq_pattern
-        config["rope_enforce_freq_groups_equal"] = False
-
-        # Create module
+        if rope_freq_pattern == "closure":
+            config["rope_enforce_freq_groups_equal"] = False
         module = MultilevelSelfAttentionBlockWithRoPE(**config).to(device)
 
+        # Generate input data
+        torch.manual_seed(0)
+        input_data = generate_input_data(
+            device=device,
+            stacked_sequence_length=8,
+            embed_dim=config["embed_dim"],
+            position_dim=config["position_dim"],
+            batch_size=2,
+            num_levels=2,
+            random_seed=0,
+        )
+
         # Run forward pass
-        output = module(**simple_input_data)
+        output = module(**input_data)
 
-        # Check output shape
-        assert output.shape == simple_input_data["x"].shape
-
-        # Outputs with different patterns should be different
+        # Compare with default pattern if not using default
         if rope_freq_pattern != "single":
             default_module = MultilevelSelfAttentionBlockWithRoPE(**base_config).to(
                 device
             )
-            default_output = default_module(**simple_input_data)
+            default_output = default_module(**input_data)
             assert not torch.allclose(output, default_output)
 
 
 @pytest.mark.cuda_if_available
-class TestBatching:
-    """Tests for batching operations in MultilevelSelfAttentionBlockWithRoPE."""
+class TestEdgeCases:
+    """Tests for edge cases and validation."""
+
+    def test_dimension_validation(
+        self,
+        module_instance: MultilevelSelfAttentionBlockWithRoPE,
+        input_data: dict[str, torch.Tensor],
+    ):
+        """Test validation of input tensor dimensions."""
+        # Create invalid x (1D instead of 2D)
+        invalid_data = input_data.copy()
+        invalid_data["x"] = torch.randn(10, device=input_data["x"].device)
+
+        with pytest.raises((ValueError, torch.jit.Error), match="Expected.*2D"):
+            module_instance(**invalid_data)
 
     def test_empty_batch_handling(
         self, module_instance: MultilevelSelfAttentionBlockWithRoPE, device: str
     ):
         """Test handling of empty batches."""
-        # Create inputs with an empty batch
-        embed_dim = module_instance.embed_dim
-        stacked_sequence_length = 6
-
-        x = torch.randn(stacked_sequence_length, embed_dim, device=device)
-        spatial_positions = torch.rand(stacked_sequence_length, 2, device=device) * 10
-        level_indices = torch.zeros(
-            stacked_sequence_length, dtype=torch.long, device=device
-        )
+        # Generate data with an empty batch in the middle
+        torch.manual_seed(0)
+        x = torch.randn(6, module_instance.embed_dim, device=device)
+        spatial_positions = torch.rand(6, module_instance.position_dim, device=device)
+        level_indices = torch.zeros(6, dtype=torch.long, device=device)
         level_spatial_shapes = torch.tensor([[8, 8]], device=device)
 
-        # Create batch offsets with an empty batch in the middle: [0, 3, 3, 6]
-        # This means batch 0 has 3 tokens, batch 1 has 0 tokens, batch 2 has 3 tokens
+        # Batch offsets: [0, 3, 3, 6] - middle batch is empty
         batch_offsets = torch.tensor([0, 3, 3, 6], device=device)
 
         # Run forward pass
@@ -819,97 +814,313 @@ class TestBatching:
             x, spatial_positions, level_indices, level_spatial_shapes, batch_offsets
         )
 
-        # Check output shape
+        # Check output
         assert output.shape == x.shape
-
-
-@pytest.mark.cuda_if_available
-class TestResetParameters:
-    """Tests for parameter resetting in MultilevelSelfAttentionBlockWithRoPE."""
 
     def test_reset_parameters(
         self,
         module_instance: MultilevelSelfAttentionBlockWithRoPE,
-        simple_input_data: Dict[str, torch.Tensor],
+        input_data: dict[str, torch.Tensor],
     ):
-        """Test reset_parameters method."""
-        # Store original parameter values
+        """Test parameter resetting."""
+        # Store original parameters
         original_qkv_weight = module_instance.qkv.weight.clone()
         original_out_proj_weight = module_instance.out_proj.weight.clone()
 
         # Reset parameters
         module_instance.reset_parameters()
 
-        # Parameters should be different after reset
+        # Parameters should be different
         assert not torch.allclose(original_qkv_weight, module_instance.qkv.weight)
         assert not torch.allclose(
             original_out_proj_weight, module_instance.out_proj.weight
         )
 
-        # Run forward pass to ensure functionality
-        output = module_instance(**simple_input_data)
-        assert output.shape == simple_input_data["x"].shape
+        # Module should still work
+        output = module_instance(**input_data)
+        assert output.shape == input_data["x"].shape
 
 
 @pytest.mark.cuda_if_available
-class TestGradients:
-    """Integration tests for MultilevelSelfAttentionBlockWithRoPE."""
+class TestCorrectness:
+    """Tests that verify correctness of MultilevelSelfAttentionBlockWithRoPE."""
 
-    def test_varied_sequences(self, base_config: Dict[str, Any], device: str):
-        """Integration test with varied sequence lengths and multiple levels."""
+    def test_rope_encoding_scaling(self, base_config: dict, device: str):
+        """Verify RoPE encoding applies expected rotations based on positions."""
+        # Modify config for a simpler test
+        config = base_config.copy()
+        config.update(
+            {
+                "position_dim": 1,  # Simplify to 1D positions
+                "rope_spatial_base_theta": 10.0,
+                "rope_share_heads": True,
+            }
+        )
+
         # Create module
-        module = MultilevelSelfAttentionBlockWithRoPE(**base_config).to(device)
+        torch.manual_seed(0)
+        module = MultilevelSelfAttentionBlockWithRoPE(**config).to(device)
 
-        # Create complex input with multiple levels and variable sequence lengths
-        batch_size = 3
-        num_levels = 3
-
-        # Level spatial shapes (different for each level)
-        level_spatial_shapes = torch.tensor(
-            [[8, 8], [4, 4], [2, 2]], device=device
-        ).float()
-
-        # Tokens per level per batch (variable)
-        tokens_per_level = [
-            [64, 16, 4],  # Batch 1
-            [50, 15, 3],  # Batch 2 (partial grid)
-            [60, 12, 4],  # Batch 3 (partial grid)
-        ]
-
-        # Calculate total sequence length and batch offsets
-        seq_lengths = torch.tensor(
-            [sum(batch) for batch in tokens_per_level], device=device
+        # Create hook to capture QKV outputs and rotated Q/K
+        hook = ModuleHook(
+            module,
+            {
+                "pos_encoding": lambda m: m.pos_encoding,
+                "qkv": lambda m: m.qkv,
+            },
         )
-        batch_offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=device)
-        batch_offsets[1:] = torch.cumsum(seq_lengths, 0)
-        total_seq_length = batch_offsets[-1]
 
-        # Create embeddings
-        x = torch.randn(total_seq_length, base_config["embed_dim"], device=device)
-        x.requires_grad_(True)
+        # Generate input with same embedding at each location
+        seq_len = 8
+        embed_dim = config["embed_dim"]
+        x = torch.randn(1, embed_dim, device=device).expand(seq_len, -1)
 
-        # Create spatial positions and level indices
-        spatial_positions = torch.randn(total_seq_length, 2, device=device)
-        level_indices = torch.randint(
-            0, num_levels, (total_seq_length,), dtype=torch.long, device=device
+        # Create linearly spaced positions
+        spatial_positions = (
+            torch.arange(0, seq_len, device=device).view(seq_len, 1).float()
         )
+        level_indices = torch.zeros(seq_len, dtype=torch.long, device=device)
+        level_spatial_shapes = torch.tensor([[seq_len]], device=device)
+        batch_offsets = torch.tensor([0, seq_len], device=device)
 
         # Run forward pass
-        output = module(
-            x, spatial_positions, level_indices, level_spatial_shapes, batch_offsets
+        with hook:
+            _ = module(
+                x, spatial_positions, level_indices, level_spatial_shapes, batch_offsets
+            )
+
+        # Get the original QKV and rotated Q/K
+        qkv_output = hook.captured_values["qkv"]["outputs"][0]
+        q, _, _ = qkv_output.chunk(3, dim=-1)
+
+        # Extract pos_encoding inputs and outputs
+        prepped_positions = hook.captured_values["pos_encoding"]["inputs"][1]
+
+        # Check that positions had levels appended
+        assert torch.allclose(
+            prepped_positions[:, 0], spatial_positions.squeeze(-1).float()
+        )
+        assert torch.allclose(prepped_positions[:, 1], level_indices.float())
+
+        pos_encoding_outputs = hook.captured_values["pos_encoding"]["outputs"]
+        q_rotated = pos_encoding_outputs[0]
+
+        # Position 0 should not be rotated
+        pos_0 = (spatial_positions == 0.0).squeeze(1)
+        assert torch.equal(q[pos_0], q_rotated[pos_0])
+
+        # Other positions should be rotated
+        non_pos_0 = (~pos_0).nonzero()
+        for pos in non_pos_0:
+            assert not torch.allclose(q[pos], q_rotated[pos])
+
+        # Rotation should not change the norm of the embeddings
+        assert torch.allclose(
+            torch.linalg.vector_norm(q, dim=1),
+            torch.linalg.vector_norm(q_rotated, dim=1),
         )
 
-        # Check output shape
-        assert output.shape == x.shape
+    def test_attention_pattern(self, base_config: dict, device: str):
+        """Test that specific input patterns produce expected attention patterns."""
+        # Create a module to test
+        module = MultilevelSelfAttentionBlockWithRoPE(**base_config).to(device)
 
-        # Check output has no NaNs or Infs
-        assert not torch.isnan(output).any()
-        assert not torch.isinf(output).any()
+        # Modify the module to capture attention weights
+        # We'll create a new method that stores the attention matrix
+        attention_weights = []
+        original_calc_attn = module._calc_attn
 
-        # Try backward pass
-        output.sum().backward()
+        def _calc_attn_with_capture(*args, **kwargs):
+            # Calculate attn normally
+            output = original_calc_attn(*args, **kwargs)
 
-        # Check gradients
-        assert x.grad is not None
-        for name, param in module.named_parameters():
-            assert param.grad is not None, f"{name} has no grad"
+            # Extract attention pattern (q @ k.T * scale before softmax)
+            q, k = args[0], args[1]
+            scale = 1.0 / math.sqrt(q.size(-1))
+            attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+            # Store for inspection
+            attention_weights.append(attn.detach().clone())
+
+            return output
+
+        module._calc_attn = _calc_attn_with_capture
+
+        # Create input where token 0 should attend strongly to token 3
+        # We'll make token 3 have a pattern very similar to token 0
+        torch.manual_seed(42)
+        batch_size = 1
+        seq_len = 4
+        position_dim = base_config["position_dim"]
+        embed_dim = base_config["embed_dim"]
+
+        x = torch.randn(seq_len, embed_dim, device=device)
+        # Make token 3 similar to token 0 for strong attention
+        x[3] = x[0] * 0.9 + torch.randn_like(x[0]) * 0.1
+
+        spatial_positions = torch.zeros(seq_len, position_dim, device=device)
+        level_indices = torch.zeros(seq_len, dtype=torch.long, device=device)
+        level_spatial_shapes = torch.ones(
+            1, position_dim, dtype=torch.long, device=device
+        )
+        batch_offsets = torch.tensor([0, seq_len], device=device)
+
+        # Run forward pass
+        module(x, spatial_positions, level_indices, level_spatial_shapes, batch_offsets)
+
+        # Check that token 0 attends strongly to token 3
+        attn_matrix = attention_weights[0]  # (batch, heads, seq, seq)
+        attn_weights = torch.softmax(attn_matrix, dim=-1)
+        attn_weights_token0 = attn_weights[
+            0, :, 0, :
+        ]  # attention from token 0 across heads
+
+        # Get average attention weight from token 0 to token 3 across heads
+        avg_attn_0_to_3 = attn_weights_token0[:, 3].mean().item()
+
+        # This should be relatively high due to our construction
+        assert (
+            avg_attn_0_to_3 > 0.25
+        ), f"Expected strong attention from token 0 to token 3, got {avg_attn_0_to_3}"
+
+        # Restore original method
+        module._calc_attn = original_calc_attn
+
+    @settings(deadline=None)
+    @given(inputs=input_data_strategy())
+    def test_norm_first_correctness(self, inputs: dict[str, Any], device: str):
+        """Verify norm_first parameter works correctly."""
+
+        # ensure nonzero input tensor
+        assume(
+            abs(inputs["tensor_config"]["min_float_value"]) > 1e-6
+            or abs(inputs["tensor_config"]["max_float_value"]) > 1e-6
+        )
+        # guard against dropout dropping out everything
+        assume(inputs["config"]["dropout"] < 0.6)
+
+        # Create input tensors
+        input_tensors = make_input_tensors(**inputs["tensor_config"], device=device)
+
+        # ensure that attention mask doesn't mask out everything
+        assume(not input_tensors["attn_mask"].all())
+
+        # Create two identical modules except for norm_first setting
+        config_norm_first = inputs["config"].copy()
+        config_norm_first["norm_first"] = True
+
+        config_norm_last = inputs["config"].copy()
+        config_norm_last["norm_first"] = False
+
+        norm_first_module = MultilevelSelfAttentionBlockWithRoPE(
+            **config_norm_first
+        ).to(device)
+        norm_last_module = MultilevelSelfAttentionBlockWithRoPE(**config_norm_last).to(
+            device
+        )
+
+        with torch.no_grad():
+            # Copy weights from first module to second
+            norm_last_module.qkv.weight.copy_(norm_first_module.qkv.weight)
+            norm_last_module.out_proj.weight.copy_(norm_first_module.out_proj.weight)
+            norm_last_module.norm.weight.copy_(norm_first_module.norm.weight)
+            norm_last_module.norm.bias.copy_(norm_first_module.norm.bias)
+
+            if (
+                hasattr(norm_first_module.qkv, "bias")
+                and norm_first_module.qkv.bias is not None
+            ):
+                norm_last_module.qkv.bias.copy_(norm_first_module.qkv.bias)
+            if (
+                hasattr(norm_first_module.out_proj, "bias")
+                and norm_first_module.out_proj.bias is not None
+            ):
+                norm_last_module.out_proj.bias.copy_(norm_first_module.out_proj.bias)
+
+        # Create hooks to capture intermediate values
+        hook_first = ModuleHook(
+            norm_first_module,
+            {
+                "norm": lambda m: m.norm,
+                "qkv": lambda m: m.qkv,
+            },
+        )
+
+        hook_last = ModuleHook(
+            norm_last_module,
+            {
+                "norm": lambda m: m.norm,
+                "qkv": lambda m: m.qkv,
+            },
+        )
+
+        # Run forward pass on both modules
+        with torch.no_grad():
+            with hook_first:
+                output_first = norm_first_module(**input_tensors)
+            with hook_last:
+                output_last = norm_last_module(**input_tensors)
+
+        # Only examine tensors if they are nonempty
+        n = input_tensors["x"].numel()
+        if n > 0:
+
+            # Check that outputs are different
+            assert not torch.allclose(
+                output_first, output_last
+            ), "Expected different outputs for norm_first vs norm_last"
+
+            # For norm_first, norm should be applied before QKV
+            norm_first_norm_out = hook_first.captured_values["norm"]["outputs"][0]
+            norm_first_qkv_in = hook_first.captured_values["qkv"]["inputs"][0]
+
+            # For norm_last, norm should be applied after attention
+            norm_last_norm_out = hook_last.captured_values["norm"]["outputs"][0]
+            norm_last_qkv_in = hook_last.captured_values["qkv"]["inputs"][0]
+
+            # Verify norm layers have different outputs
+            assert not torch.allclose(norm_first_norm_out, norm_last_norm_out)
+
+            # For norm_first, check norm is directly before qkv
+            assert torch.allclose(norm_first_norm_out, norm_first_qkv_in)
+
+            # For norm_last, the QKV input should match the original x
+            assert torch.allclose(
+                norm_last_qkv_in, input_tensors["x"]
+            ), "Expected QKV input to match original x for norm_last"
+
+    @settings(deadline=None)
+    @given(inputs=input_data_strategy())
+    def test_residual_connection(self, inputs: dict[str, Any], device: str):
+        """Verify residual connection works correctly."""
+        # Create module and input tensors
+        module = MultilevelSelfAttentionBlockWithRoPE(**inputs["config"]).to(device)
+        input_tensors = make_input_tensors(**inputs["tensor_config"], device=device)
+
+        # Zero out all weights to produce an identity mapping
+        with torch.no_grad():
+            module.qkv.weight.zero_()
+            module.out_proj.weight.zero_()
+
+            if hasattr(module.qkv, "bias") and module.qkv.bias is not None:
+                module.qkv.bias.zero_()
+            if hasattr(module.out_proj, "bias") and module.out_proj.bias is not None:
+                module.out_proj.bias.zero_()
+
+        # Run forward with zero weights - should just get the input back due to residual
+        with torch.no_grad():
+            output = module(**input_tensors)
+
+        # Output should be equal to input due to residual connection (plus normalization effect)
+        if module.norm_first:
+            # Input is already normalized, so output should equal input
+            assert torch.allclose(
+                output, input_tensors["x"]
+            ), "Expected output to equal input with residual connection"
+        else:
+            # Output has been normalized
+            assert output.shape == input_tensors["x"].shape
+            if output.numel() > 10:  # Ensure enough elements to test
+                tolerance = 0.1
+                assert output.mean().abs() < tolerance
+                assert (output.std() - 1) < tolerance

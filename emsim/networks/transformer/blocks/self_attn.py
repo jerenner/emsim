@@ -229,12 +229,6 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
 
         Raises:
             ValueError: If tensor shapes are incompatible or position dimensions don't match.
-
-        Implementation Notes:
-            1. The module transforms flat sequences into batched format for attention
-               and then flattens them back to maintain efficiency with variable length inputs.
-            2. Positions from different resolution levels are standardized to the finest
-               level's resolution by prep_multilevel_positions before applying RoPE.
         """
         validate_nd(x, 2, "x")  # (stacked sequences x d_model)
         validate_nd(spatial_positions, 2, "spatial_positions")
@@ -265,10 +259,10 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         q, k, v = self.qkv(x).chunk(3, dim=-1)
 
         batch_indices: Tensor = batch_offsets_to_indices(batch_offsets, x.shape[0])
-        batch_level_indices = torch.stack([batch_indices, level_indices], 1)
 
+        # normalize spatial positions
         prepped_positions = prep_multilevel_positions(
-            spatial_positions, batch_level_indices, level_spatial_shapes
+            spatial_positions, batch_indices, level_indices, level_spatial_shapes
         )
 
         q, k = self.pos_encoding(q, prepped_positions, k)
@@ -345,16 +339,18 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
                 f"Expected 3D or 4D attn_mask, got shape {attn_mask.shape}"
             )
         pad_mask = pad_mask.bool()
+
+        # reshape attn_mask to proper shape if present
         if attn_mask is not None:
             attn_mask = attn_mask.bool()
+            assert attn_mask.size(0) in (bsz, bsz * n_heads)
+            if attn_mask.ndim == 3:
+                if attn_mask.size(0) == bsz:
+                    attn_mask = attn_mask.view(bsz, 1, seq_len, seq_len)
+                else:
+                    attn_mask = attn_mask.view(bsz, n_heads, seq_len, seq_len)
 
-        # handle masks
-        if attn_mask is not None and attn_mask.ndim == 3:
-            assert attn_mask.shape[0] in (bsz, bsz * n_heads)
-            if attn_mask.shape[0] == bsz:
-                attn_mask = attn_mask.view(bsz, 1, seq_len, seq_len)
-            else:
-                attn_mask = attn_mask.view(bsz, n_heads, seq_len, seq_len)
+        # combine masks
         if pad_mask.any():
             if attn_mask is None:
                 not_padding = pad_mask.logical_not()
@@ -386,6 +382,7 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
             attn_mask=attn_mask,
             dropout_p=self.attn_drop_rate if self.training else 0.0,
         )
+        x = torch.nan_to_num(x, 0.0)
         return x
 
     # not used, for reference
@@ -404,7 +401,7 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
             key (Tensor): Key tensor
             value (Tensor): Value tensor
             attn_mask (Optional[Tensor], optional): Attention mask where True indicates
-                positions to mask out. Defaults to None.
+                positions to keep. Defaults to None.
             dropout_p (float, optional): Dropout probability. Defaults to 0.0.
 
         Returns:
@@ -415,7 +412,7 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         query = query * scale_factor
         attn_weight = torch.matmul(query, key.transpose(-1, -2))
         if attn_mask is not None:
-            attn_weight = torch.masked_fill(attn_weight, attn_mask, -torch.inf)
+            attn_weight = torch.masked_fill(attn_weight, ~attn_mask, -torch.inf)
         attn_weight = torch.softmax(attn_weight, dim=-1)
         attn_weight = torch.dropout(attn_weight, dropout_p, train=self.training)
         return attn_weight @ value

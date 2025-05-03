@@ -45,7 +45,7 @@ def traceable_subset_attention(
     head_dim = embed_dim // n_heads
 
     if scale_factor is None:
-        scale_factor = embed_dim ** (-1 / 2)
+        scale_factor = head_dim ** (-1 / 2)
 
     # Gather values using the same helper as the custom op
     selected = gather_and_mask(

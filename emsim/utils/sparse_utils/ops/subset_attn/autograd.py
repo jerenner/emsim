@@ -163,7 +163,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 frequency group j, then rope_freqs[i, j] should be 0.
                 For traditional RoPE, keep n_freq_groups as 1.
             scale_factor (Optional[float]): Scaling factor for attention scores.
-                Default is 1/sqrt(embed_dim).
+                Default is 1/sqrt(head_dim).
             dropout_p (float): Dropout rate for attention weights.
             training (bool): Whether we are in training mode. If True, dropout is
                 applied.
@@ -291,7 +291,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         # default scale factor
         if scale_factor is None:
-            scale_factor = embed_dim ** (-1 / 2)
+            scale_factor = head_dim ** (-1 / 2)
         ctx.scale_factor = scale_factor
 
         # save tensors

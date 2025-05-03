@@ -531,8 +531,8 @@ class TestInitNDFreqs:
             device=device,
         )
 
-        # Group 2 (larger theta) should have larger magnitude frequencies
-        assert torch.mean(torch.abs(freqs_multi[0])) < torch.mean(
+        # Group 2 (larger theta) should have lower magnitude frequencies
+        assert torch.mean(torch.abs(freqs_multi[0])) > torch.mean(
             torch.abs(freqs_multi[1])
         )
 
@@ -552,16 +552,9 @@ class TestPrepMultilevelPositions:
             dtype=torch.long,
             device=device,
         )
-        batch_level_indices = torch.tensor(
-            [
-                [0, 0],
-                [0, 1],
-                [1, 0],
-                [1, 1],
-            ],
-            dtype=torch.long,
-            device=device,
-        )
+
+        batch_indices = torch.tensor([0, 0, 1, 1], device=device)
+        level_indices = torch.tensor([0, 1, 0, 1], device=device)
 
         # Spatial shapes (level, 2) - height and width for each level
         spatial_shapes = torch.tensor(
@@ -574,7 +567,7 @@ class TestPrepMultilevelPositions:
         )
 
         positions = prep_multilevel_positions(
-            spatial_indices, batch_level_indices, spatial_shapes
+            spatial_indices, batch_indices, level_indices, spatial_shapes
         )
 
         assert positions.shape == (spatial_indices.size(0), spatial_indices.size(1) + 1)
@@ -598,14 +591,9 @@ class TestPrepMultilevelPositions:
             dtype=torch.long,
             device=device,
         )
-        batch_level_indices = torch.tensor(
-            [
-                [0, 0],
-                [1, 1],
-            ],
-            dtype=torch.long,
-            device=device
-        )
+
+        batch_indices = torch.tensor([0, 1], device=device)
+        level_indices = torch.tensor([0, 1], device=device)
 
         # Batched spatial shapes (batch, level, 2)
         spatial_shapes = torch.tensor(
@@ -624,9 +612,12 @@ class TestPrepMultilevelPositions:
         )
 
         positions = prep_multilevel_positions(
-            spatial_indices, batch_level_indices, spatial_shapes
+            spatial_indices, batch_indices, level_indices, spatial_shapes
         )
-        assert positions.shape == (spatial_indices.shape[0], spatial_indices.shape[1] + 1)
+        assert positions.shape == (
+            spatial_indices.shape[0],
+            spatial_indices.shape[1] + 1,
+        )
 
 
 @pytest.mark.cuda_if_available

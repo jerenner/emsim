@@ -1,15 +1,24 @@
-from typing import Any
+from typing import Any, Union, Optional
 
 import pytest
 import torch
+from torch import Tensor
+import numpy as np
 from math import isclose
+from hypothesis import given, settings, example, assume, HealthCheck
+from hypothesis import strategies as st
+from hypothesis.extra.numpy import arrays, array_shapes
 
-from emsim.networks.positional_encoding.rope import RoPEEncodingND
+from emsim.networks.positional_encoding.rope import (
+    RoPEEncodingND,
+    get_multilevel_freq_group_pattern,
+)
 
 from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
     calculate_rope,
     rotate_embeddings,
 )
+from tests.networks.conftest import positions_strategy
 
 
 @pytest.fixture
@@ -63,18 +72,257 @@ def sample_data(base_config: dict[str, Any], device: str):
     }
 
 
+@st.composite
+def rope_config_strategy(draw):
+    position_dim = draw(st.integers(1, 4))
+    n_heads = draw(st.integers(1, 8))
+    embed_dim = draw(st.integers(1, 8)) * 2 * n_heads
+    share_heads = draw(st.booleans())
+    n_freq_groups = draw(st.integers(1, 4))
+    freq_group_pattern = draw(
+        arrays(
+            np.bool,
+            shape=(n_freq_groups, position_dim),
+            elements=st.booleans(),
+            fill=None,
+        ).filter(lambda x: x.any())
+    )
+    enforce_freq_groups_equal = (embed_dim // n_heads) % (n_freq_groups * 2) == 0
+    rope_base_theta = draw(
+        st.one_of(
+            st.floats(min_value=1.0, max_value=1e10, exclude_min=True),
+            arrays(
+                np.float32,
+                shape=(
+                    draw(st.sampled_from([1, n_freq_groups])),
+                    draw(st.sampled_from([1, position_dim])),
+                ),
+                elements=st.floats(min_value=1.0, max_value=1e10, exclude_min=True),
+                fill=None,
+            ),
+        )
+    )
+    dtype = draw(st.just(torch.float32))
+
+    # Tensor creation config
+    # Embedding value range
+    embedding_min_value = draw(st.floats(-1e15, 1e15, exclude_max=True))
+    embedding_max_value = draw(st.floats(embedding_min_value, 1e15))
+
+    # shared helper function for position grid shape
+    def _position_grid_shape() -> tuple[int, ...]:
+        return draw(
+            array_shapes(
+                min_dims=position_dim, max_dims=position_dim, min_side=2, max_side=8
+            )
+        )
+
+    # Query positions: Random or use grid
+    use_position_grid_query = draw(st.booleans())
+    if use_position_grid_query:
+        position_dtype_query = draw(st.none())
+        position_min_query = draw(st.none())
+        position_max_query = draw(st.none())
+        # Need to have at least position_dim dims before embed_dim when using
+        # position grid
+        position_shape_query = _position_grid_shape()
+        batch_shape_query = draw(array_shapes(min_side=0)) + position_shape_query
+    else:
+        position_dtype_query, position_min_query, position_max_query = draw(
+            positions_strategy().filter(lambda drawn: drawn[1] <= 0 or drawn[2] >= 1)
+        )
+        batch_shape_query = draw(array_shapes(min_side=0))
+
+    # Decide whether to include separate key embeddings
+    include_key = draw(st.booleans())
+    if include_key:
+        # Use separate position tensor for key or share query positions
+        include_key_pos = draw(st.booleans())
+        if include_key_pos:
+            # For generality, allow key tensor to have different shape from query
+            # Key positions: random or use grid
+            use_position_grid_key = draw(st.booleans())
+            if use_position_grid_key:
+                position_dtype_key = draw(st.none())
+                position_min_key = draw(st.none())
+                position_max_key = draw(st.none())
+                # Key tensor needs position_dim dims before embed_dim, like query
+                position_shape_key = _position_grid_shape()
+                batch_shape_key = draw(array_shapes(min_side=0)) + position_shape_key
+            else:  # non-grid positions
+                position_dtype_key, position_min_key, position_max_key = draw(
+                    positions_strategy().filter(
+                        lambda drawn: drawn[1] <= 0 or drawn[2] >= 1
+                    )
+                )
+                batch_shape_key = draw(array_shapes(min_side=0))
+        else:  # key_pos=None (reuse query positions)
+            batch_shape_key = draw(st.just(batch_shape_query))
+            use_position_grid_key = draw(st.just(False))
+            position_dtype_key = draw(st.none())
+            position_min_key = draw(st.none())
+            position_max_key = draw(st.none())
+    else:
+        include_key_pos = draw(st.just(False))
+        use_position_grid_key = draw(st.just(False))
+        batch_shape_key = draw(st.none())
+        position_dtype_key = draw(st.none())
+        position_min_key = draw(st.none())
+        position_max_key = draw(st.none())
+
+    seed = draw(st.integers(min_value=0, max_value=1e10))
+
+    return {
+        "config": {
+            "position_dim": position_dim,
+            "embed_dim": embed_dim,
+            "n_heads": n_heads,
+            "share_heads": share_heads,
+            "freq_group_pattern": freq_group_pattern,
+            "enforce_freq_groups_equal": enforce_freq_groups_equal,
+            "rope_base_theta": rope_base_theta,
+            "dtype": dtype,
+        },
+        "tensor_config": {
+            "embed_dim": embed_dim,
+            "embedding_min_value": embedding_min_value,
+            "embedding_max_value": embedding_max_value,
+            "position_dim": position_dim,
+            "batch_shape_query": batch_shape_query,
+            "use_position_grid_query": use_position_grid_query,
+            "position_dtype_query": position_dtype_query,
+            "position_min_query": position_min_query,
+            "position_max_query": position_max_query,
+            "include_key": include_key,
+            "batch_shape_key": batch_shape_key,
+            "include_key_pos": include_key_pos,
+            "use_position_grid_key": use_position_grid_key,
+            "position_dtype_key": position_dtype_key,
+            "position_min_key": position_min_key,
+            "position_max_key": position_max_key,
+            "seed": seed,
+        },
+    }
+
+
+def rope_input_tensors(
+    embed_dim: int,
+    embedding_min_value: float,
+    embedding_max_value: float,
+    position_dim: int,
+    batch_shape_query: tuple[int, ...],
+    use_position_grid_query: bool,
+    position_dtype_query: Optional[torch.dtype],
+    position_min_query: Optional[Union[int, float]],
+    position_max_query: Optional[Union[int, float]],
+    include_key: bool,
+    batch_shape_key: Optional[tuple[int, ...]],
+    include_key_pos: bool,
+    use_position_grid_key: Optional[bool],
+    position_dtype_key: Optional[torch.dtype],
+    position_min_key: Optional[Union[int, float]],
+    position_max_key: Optional[Union[int, float]],
+    seed: int,
+    device: str,
+    force_unnormalized_positions: bool = True,
+):
+    device = torch.device(device)
+
+    # save rng state and set seed
+    if device.type == "cuda":
+        rng_state = torch.cuda.get_rng_state(device)
+    else:
+        rng_state = torch.get_rng_state(device)
+    torch.manual_seed(seed)
+
+    # Helper function for creating non-grid position tensor
+    def _random_positions(
+        batch_shape: tuple[int, ...],
+        dtype: torch.dtype,
+        pos_min: Union[int, float],
+        pos_max: Union[int, float],
+    ):
+        pos_tensor = torch.empty(
+            batch_shape + (position_dim,),
+            device=device,
+            dtype=dtype,
+        )
+        if dtype == torch.float32:
+            pos_tensor.uniform_(pos_min, pos_max)
+        else:
+            pos_tensor.random_(pos_min, pos_max + 1)
+        if force_unnormalized_positions and pos_tensor.numel() > 0:
+            while pos_tensor.min() > 0.0 and pos_tensor.max() <= 1.0:
+                pos_tensor = pos_tensor + 1
+        return pos_tensor
+
+    # Create query embeddings and position tensor
+    query = torch.empty(batch_shape_query + (embed_dim,), device=device).uniform_(
+        embedding_min_value, embedding_max_value
+    )
+    if use_position_grid_query:
+        query_pos = RoPEEncodingND.position_grid(
+            query.shape, query.ndim - position_dim - 1, device=device
+        )
+        assert query_pos.size(-1) == position_dim
+    else:
+        query_pos = _random_positions(
+            batch_shape_query,
+            position_dtype_query,
+            position_min_query,
+            position_max_query,
+        )
+
+    # Create key embeddings and position tensor if needed
+    if include_key:
+        key = torch.empty(batch_shape_key + (embed_dim,), device=device).uniform_(
+            embedding_min_value,
+            embedding_max_value,
+        )
+        if include_key_pos:
+            if use_position_grid_key:
+                key_pos = RoPEEncodingND.position_grid(
+                    key.shape, key.ndim - position_dim - 1, device=device
+                )
+                assert key_pos.size(-1) == position_dim
+            else:
+                key_pos = _random_positions(
+                    batch_shape_key,
+                    position_dtype_key,
+                    position_min_key,
+                    position_max_key,
+                )
+        else:
+            key_pos = None
+    else:
+        key = None
+        key_pos = None
+
+    # reset rng state
+    if device.type == "cuda":
+        torch.cuda.set_rng_state(rng_state, device)
+    else:
+        torch.set_rng_state(rng_state)
+
+    return {
+        "query": query,
+        "query_pos": query_pos,
+        "key": key,
+        "key_pos": key_pos,
+    }
+
+
+def allclose_zero(tensor: Tensor):
+    return torch.allclose(tensor, torch.zeros_like(tensor))
+
+
 @pytest.mark.cuda_if_available
 class TestRoPEEncodingNDInitialization:
     """Tests for RoPEEncodingND initialization with various configurations."""
 
     def test_basic_initialization(self, base_config: dict[str, Any], device: str):
         """Test basic initialization with default parameters."""
-        rope = RoPEEncodingND(
-            position_dim=base_config["position_dim"],
-            embed_dim=base_config["embed_dim"],
-            n_heads=base_config["n_heads"],
-            dtype=base_config["dtype"],
-        ).to(device)
+        rope = RoPEEncodingND(**base_config).to(device)
 
         assert rope.position_dim == base_config["position_dim"]
         assert rope.embed_dim == base_config["embed_dim"]
@@ -224,6 +472,33 @@ class TestRoPEEncodingNDInitialization:
                 ),
             ).to(device)
 
+    @settings(deadline=None)
+    @given(inputs=rope_config_strategy())
+    def test_initialization_hypothesis(self, inputs: dict[str, Any], device: str):
+        config = inputs["config"]
+        rope = RoPEEncodingND(**config).to(device)
+
+        assert rope.position_dim == config["position_dim"]
+        assert rope.embed_dim == config["embed_dim"]
+        assert rope.n_heads == config["n_heads"]
+        assert rope.head_dim == config["embed_dim"] // config["n_heads"]
+        assert rope.dtype == config["dtype"]
+        n_freq_groups = config["freq_group_pattern"].shape[0]
+        assert config["freq_group_pattern"].shape[1] == config["position_dim"]
+        assert len(rope.freqs) == n_freq_groups
+        for i, freq in enumerate(rope.freqs):
+            if config["enforce_freq_groups_equal"]:
+                assert freq.shape == (
+                    config["freq_group_pattern"][i].sum(),
+                    config["n_heads"] if not config["share_heads"] else 1,
+                    rope.head_dim // n_freq_groups // 2,
+                )
+            else:
+                assert freq.shape[:-1] == (
+                    config["freq_group_pattern"][i].sum(),
+                    config["n_heads"] if not config["share_heads"] else 1,
+                )
+
 
 @pytest.mark.cuda_if_available
 class TestRoPEEncodingNDForward:
@@ -247,6 +522,46 @@ class TestRoPEEncodingNDForward:
 
         # Verify output is different from input
         assert not torch.allclose(query_rotated, sample_data["query"])
+
+    @settings(deadline=None)
+    @given(inputs=rope_config_strategy())
+    def test_forward_hypothesis(self, inputs: dict[str, Any], device: str):
+        """Test forward pass with Hypothesis-generated configs"""
+        rope = RoPEEncodingND(**inputs["config"]).to(device)
+        input_tensors = rope_input_tensors(**inputs["tensor_config"], device=device)
+
+        output = rope(**input_tensors)
+        if input_tensors["key"] is not None:
+            query_rotated, key_rotated = output
+        else:
+            query_rotated = output
+
+        # Test that rotation happened
+        query = input_tensors["query"]
+        query_pos = input_tensors["query_pos"]
+        key = input_tensors["key"]
+        if (
+            not allclose_zero(query)
+            and not allclose_zero(query_pos)
+            and rope.freq_group_pattern.any()
+        ):
+            assert not torch.allclose(query, query_rotated)
+        else:
+            assert torch.allclose(query, query_rotated)
+        if key is not None:
+            key_pos = (
+                input_tensors["key_pos"]
+                if input_tensors["key_pos"] is not None
+                else query_pos
+            )
+            if (
+                not allclose_zero(key)
+                and not allclose_zero(key_pos)
+                and rope.freq_group_pattern.any()
+            ):
+                assert not torch.allclose(key, key_rotated)
+            else:
+                assert torch.allclose(key, key_rotated)
 
     def test_forward_query_and_key(
         self, base_config: dict[str, Any], sample_data, device: str
@@ -275,7 +590,9 @@ class TestRoPEEncodingNDForward:
         assert not torch.allclose(key_rotated, sample_data["key"])
 
     @pytest.mark.parametrize("share_heads", [True, False], ids=["shared", "not_shared"])
-    def test_share_heads(self, share_heads: bool, base_config: dict[str, Any], device: str):
+    def test_share_heads(
+        self, share_heads: bool, base_config: dict[str, Any], device: str
+    ):
         """Test initialization with head sharing enabled and disabled."""
         n_heads = base_config["n_heads"]
         rope = RoPEEncodingND(
@@ -620,6 +937,109 @@ class TestRoPEEncodingNDFrequencyGroups:
         assert torch.allclose(
             current_result_shared, old_result_shared
         ), "Implementations produce different results with shared heads"
+
+    @settings(deadline=None)
+    @given(inputs=rope_config_strategy())
+    def test_grouped_rope_freqs_tensor_hypothesis(
+        self, inputs: dict[str, Any], device: str
+    ):
+        """Test structural properties of the grouped_rope_freqs_tensor method."""
+        rope = RoPEEncodingND(**inputs["config"]).to(device)
+
+        # Get the full frequency tensor
+        freq_tensor = rope.grouped_rope_freqs_tensor(rope.freqs)
+
+        # Verify shape
+        n_heads = 1 if rope.share_heads else rope.n_heads
+        expected_shape = (
+            rope.position_dim,
+            rope.n_freq_groups,
+            n_heads,
+            rope.head_dim // 2,
+        )
+        assert freq_tensor.shape == expected_shape
+
+        # Verify placement of frequencies
+        for g, freq_g in enumerate(rope.freqs):
+            range_start, range_end = rope.encoding_ranges[g]
+            pos_dims = torch.nonzero(rope.freq_group_pattern[g], as_tuple=True)[0]
+
+            for i, pos_dim in enumerate(pos_dims):
+                extracted = freq_tensor[pos_dim, g, :, range_start:range_end]
+                expected = freq_g[i, :, :]
+                assert torch.allclose(extracted, expected)
+
+        # Verify zeros where expected
+        for g in range(rope.n_freq_groups):
+            for pos_dim in range(rope.position_dim):
+                if not rope.freq_group_pattern[g, pos_dim]:
+                    # This position dimension should be zero in this frequency group
+                    assert torch.all(freq_tensor[pos_dim, g] == 0)
+
+        # Verify encoding ranges are contiguous and complete
+        assert rope.encoding_ranges[0, 0] == 0
+        assert rope.encoding_ranges[-1, 1] == rope.head_dim // 2
+        for i in range(len(rope.encoding_ranges) - 1):
+            assert rope.encoding_ranges[i, 1] == rope.encoding_ranges[i + 1, 0]
+
+        # Verify encoding dimension distribution
+        if rope.n_freq_groups > 1:
+            encoding_sizes = [
+                (end - start).item() for start, end in rope.encoding_ranges
+            ]
+            if rope.enforce_freq_groups_equal:
+                # All groups should have equal encoding dimensions
+                assert len(set(encoding_sizes)) == 1
+            else:
+                # For unequal distribution, the difference should be at most 1
+                assert max(encoding_sizes) - min(encoding_sizes) <= 1
+
+        # Verify all values are finite
+        assert torch.all(torch.isfinite(freq_tensor))
+
+        # Verify dtype and device match input
+        assert freq_tensor.dtype == rope.freqs[0].dtype
+        assert freq_tensor.device == rope.freqs[0].device
+
+    @settings(deadline=None)
+    @given(inputs=rope_config_strategy())
+    def test_grouped_rope_freqs_tensor_hypothesis_math(
+        self, inputs: dict[str, Any], device: str
+    ):
+        """Test mathematical properties of the grouped_rope_freqs_tensor method."""
+        rope = RoPEEncodingND(**inputs["config"]).to(device)
+        freq_tensor = rope.grouped_rope_freqs_tensor(rope.freqs)
+        n_heads = 1 if rope.share_heads else rope.n_heads
+
+        # Check magnitudes are monotonically decreasing
+        if rope.freqs[0].numel() > 0:
+            for g, ranges in enumerate(rope.encoding_ranges):
+                range_size = ranges[1] - ranges[0]
+                if range_size <= 1:
+                    continue  # Skip if not enough dimensions to compare
+
+                # Find any non-zero position dimension for this group
+                pos_dims = torch.nonzero(rope.freq_group_pattern[g], as_tuple=True)[0]
+                if len(pos_dims) == 0:
+                    continue
+
+                for pos_dim in pos_dims:
+                    for head_idx in range(n_heads):
+                        pos_dim = pos_dims[0]
+                        head_idx = 0
+
+                        # Extract frequencies and take absolute values
+                        freqs = freq_tensor[pos_dim, g, head_idx, ranges[0] : ranges[1]]
+                        magnitudes = torch.abs(freqs)
+
+                        if magnitudes.numel() >= 3:
+                            diffs = magnitudes[1:] - magnitudes[:-1]
+
+                            # Should be monotonic
+                            assert torch.all(diffs <= 0), (
+                                "Expected consistent geometric progression "
+                                "in frequency magnitudes"
+                            )
 
 
 @pytest.mark.cuda_if_available

@@ -168,7 +168,8 @@ def remove_batch_dim_and_concat(
     Args:
         tensor (Tensor): A tensor of shape (batch_size, max_seq_length, D1, D2, ..., Dn)
         padding_mask (Tensor, optional): Optional boolean tensor of shape
-            (batch_size, max_seq_length) where True indicates padded positions
+            (batch_size, max_seq_length) where True indicates padded positions. If None,
+            this function assumes that "tensor" has no padding.
 
     Returns:
         out (Tensor): A tensor of shape (total_seq_length, D1, D2, ..., Dn)
@@ -178,6 +179,12 @@ def remove_batch_dim_and_concat(
     batch_size = tensor.shape[0]
     max_len = tensor.shape[1]
     feature_dims = tensor.shape[2:]
+
+    if batch_size == 0 or max_len == 0:
+        # Early return for empty case
+        out = torch.empty((0,) + feature_dims, dtype=tensor.dtype, device=tensor.device)
+        batch_offsets = torch.zeros((batch_size + 1,), dtype=torch.long, device=tensor.device)
+        return out, batch_offsets
 
     if padding_mask is not None:
         if not padding_mask.ndim == 2:

@@ -23,8 +23,9 @@ from ..denoising_generator import DenoisingGenerator
 from ..me_salience_mask_predictor import MESparseMaskPredictor
 from ..positional_encoding import FourierEncoding
 from ..positional_encoding.rope import (
-    RoPEEncodingNDGroupedFreqs,
+    RoPEEncodingND,
     prep_multilevel_positions,
+    get_multilevel_freq_group_pattern,
 )
 from ..segmentation_map import PatchedSegmentationMapPredictor
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
@@ -49,7 +50,10 @@ class EMTransformer(nn.Module):
         predict_box: bool = False,
         level_filter_ratio: tuple = (0.25, 0.5, 1.0, 1.0),
         layer_filter_ratio: tuple = (1.0, 0.8, 0.6, 0.6, 0.4, 0.2),
-        rope_base_theta: float = 10.0,
+        rope_spatial_base_theta: float = 100.0,
+        rope_level_base_theta: float = 10.0,
+        rope_share_heads: bool = False,
+        rope_freq_group_pattern: str = "single",
         encoder_max_tokens: int = 10000,
         encoder_topk_sa: int = 10000,
         encoder_use_rope: bool = False,
@@ -79,12 +83,13 @@ class EMTransformer(nn.Module):
             raise ValueError(f"Unrecognized sparse_library: `{sparse_library=}`")
         self.use_rope = encoder_use_rope
         if encoder_use_rope:
-            self.pos_embedding = RoPEEncodingNDGroupedFreqs(
+            self.pos_embedding = RoPEEncodingND(
                 dimension + 1,
                 d_model,
                 n_heads,
-                [0] * dimension + [1],
-                [encoder_use_rope] * dimension + [rope_base_theta / 100],
+                rope_share_heads,
+                get_multilevel_freq_group_pattern(dimension, rope_freq_group_pattern),
+                rope_base_theta=[rope_spatial_base_theta] * 2 + [rope_level_base_theta],
             )
         else:
             self.pos_embedding = FourierEncoding(3, d_model, dtype=torch.double)
@@ -447,6 +452,7 @@ class EMTransformer(nn.Module):
         self, backbone_features: list[ME.SparseTensor], image_size: Tensor
     ):
         coords: list[Tensor] = [feat.C.clone() for feat in backbone_features]
+        # each tensor in coords is [n_pts, (batch,i,j)]
         spatial_shapes = []
         for feat, coord in zip(backbone_features, coords):
             stride = coord.new_tensor(feat.tensor_stride)
@@ -454,15 +460,19 @@ class EMTransformer(nn.Module):
             spatial_shapes.append(image_size // stride)
 
         stacked_feats = torch.cat([feat.F for feat in backbone_features])
-        stacked_coords = torch.cat(
-            [
-                torch.cat([coord, coord.new_full([coord.shape[0], 1], i)], 1)
-                for i, coord in enumerate(coords)
-            ]
+        stacked_coords = torch.cat([coord[:, :1] for coord in coords])
+
+        batch_indices = torch.cat([coord[:, 0] for coord in coords])
+        level_indices = torch.repeat_interleave(
+            torch.arange(len(coords), device=batch_indices.device),
+            torch.tensor(
+                [coord.size(0) for coord in coords], device=batch_indices.device
+            ),
         )
+
         spatial_shapes = torch.stack(spatial_shapes, -2)  # dim: batch, level, 2
-        prepped_coords = prep_multilevel_positions(stacked_coords, spatial_shapes)
-        pos_encoded_feats = self.pos_embedding(stacked_feats, prepped_coords[:, 1:])
+        prepped_coords = prep_multilevel_positions(stacked_coords, batch_indices, level_indices, spatial_shapes)
+        pos_encoded_feats = self.pos_embedding(stacked_feats, prepped_coords)
 
         batch_offsets = torch.cumsum(
             torch.tensor([feat.F.shape[0] for feat in backbone_features]), 0

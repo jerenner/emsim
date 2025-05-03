@@ -39,6 +39,32 @@ def inverse_sigmoid(x, eps: float = 1e-6):
     return torch.log(x1 / x2)
 
 
+@torch.jit.ignore
+def can_broadcast_shapes(*shapes) -> bool:
+    """
+    Returns True if the shapes can be broadcasted.
+
+    Args:
+        *shapes: Shapes to check.
+
+    Returns:
+        bool: True if shapes can be broadcasted, False if not
+    """
+    # Handle case where shapes is a single list of shapes
+    if (
+        len(shapes) == 1
+        and hasattr(shapes[0], "__iter__")
+        and not isinstance(shapes[0], (torch.Size, tuple))
+    ):
+        shapes = shapes[0]
+
+    try:
+        torch.broadcast_shapes(*shapes)
+        return True
+    except RuntimeError:
+        return False
+
+
 def _get_layer(layer: Union[str, type]):
     if isinstance(layer, type):
         return layer

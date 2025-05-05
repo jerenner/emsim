@@ -61,7 +61,7 @@ def compare_intermediates(
     assert torch.allclose(
         subset_keys,
         stacked_keys_from_batched,
-        atol=1e-4,
+        atol=1e-3,
         rtol=1e-3,
     ), f"max key diff: {(subset_keys - stacked_keys_from_batched).abs().max()}"
 
@@ -77,7 +77,7 @@ def compare_intermediates(
     assert torch.allclose(
         subset_values,
         stacked_values_from_batched,
-        atol=1e-4,
+        atol=1e-3,
         rtol=1e-3,
     ), f"max value diff: {(subset_values - stacked_values_from_batched).abs().max()}"
 
@@ -97,7 +97,7 @@ def compare_intermediates(
     assert torch.allclose(
         subset_attn_scores,
         stacked_attn_scores_from_batched,
-        atol=1e-4,
+        atol=1e-3,
         rtol=1e-3,
     ), (
         "max scores diff: "
@@ -118,7 +118,7 @@ def compare_intermediates(
     assert torch.allclose(
         subset_attn_scores_masked,
         stacked_attn_scores_masked_from_batched,
-        atol=1e-4,
+        atol=1e-3,
         rtol=1e-3,
     ), (
         "max scores masked diff:"

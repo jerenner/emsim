@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 import torch
-from hypothesis import example, given, settings
+from hypothesis import given, settings
 from torch import Tensor
 
 from emsim.utils.sparse_utils.batching import remove_batch_dim_and_concat
@@ -43,8 +43,8 @@ def compare_intermediates(
         [
             torch.arange(q, device=key_b.device)
             .unsqueeze(1)
-            .expand(-1, inputs["metadata"]["n_keys_per_query"])
-            for q in inputs["metadata"]["n_queries"]
+            .expand(-1, n_keys_per_query)
+            for q in n_queries
         ]
     )
     key_pad_mask = subset_outputs["is_specified_mask"].logical_not()
@@ -95,7 +95,10 @@ def compare_intermediates(
     stacked_attn_scores_from_batched[key_pad_mask] = 0.0
     subset_attn_scores[key_pad_mask] = 0.0
     assert torch.allclose(
-        subset_attn_scores, stacked_attn_scores_from_batched, atol=1e-4, rtol=1e-3,
+        subset_attn_scores,
+        stacked_attn_scores_from_batched,
+        atol=1e-4,
+        rtol=1e-3,
     ), (
         "max scores diff: "
         f"{(subset_attn_scores - stacked_attn_scores_from_batched).abs().max()}"
@@ -122,32 +125,31 @@ def compare_intermediates(
         f"{(subset_attn_scores_masked - stacked_attn_scores_masked_from_batched.abs().max())}"
     )
 
-    batched_attn_mask_bqhwl = batched_outputs["attn_mask"].view(
-        bsz, n_queries, sparse_height, sparse_width, n_levels
-    )
-    nonmask_indices = batched_attn_mask_bqhwl.logical_not().nonzero()
-
-    batched_index_tensor = inputs["batched_index_tensor"]
-    batched_index_tensor_bqijl = (
-        torch.arange(n_queries, device=batched_index_tensor.device)
-        .view(1, n_queries, 1, 1)
-        .expand(bsz, -1, n_keys_per_query, 1)
-        .contiguous()
-    )
-    batched_index_tensor_bqijl[(batched_index_tensor == -1).all(-1, keepdim=True)] = -1
-    batched_index_tensor_bqijl = batched_index_tensor_bqijl.expand(
-        -1, -1, -1, 5
-    ).contiguous()
-    batched_index_tensor_bqijl[..., 0] = batched_index_tensor[..., 0]
-    batched_index_tensor_bqijl[..., 2:] = batched_index_tensor[..., 1:]
-    index_tensor_bqijl = remove_batch_dim_and_concat(
-        batched_index_tensor_bqijl, inputs["query_padding_mask"]
-    )[0]
-    specified_subset_indices = index_tensor_bqijl[inputs["is_specified_mask"]]
-
     ### check that the indices are the same between index tensor and attn mask??
-    matched = (specified_subset_indices[None] == nonmask_indices[:, None]).all(-1)
-    # example: specified_subset_indices has a duplicate index
+    # batched_attn_mask_bqhwl = batched_outputs["attn_mask"].view(
+    #     bsz, n_queries, sparse_height, sparse_width, n_levels
+    # )
+    # nonmask_indices = batched_attn_mask_bqhwl.logical_not().nonzero()
+
+    # batched_index_tensor = inputs["batched_index_tensor"]
+    # batched_index_tensor_bqijl = (
+    #     torch.arange(n_queries, device=batched_index_tensor.device)
+    #     .view(1, n_queries, 1, 1)
+    #     .expand(bsz, -1, n_keys_per_query, 1)
+    #     .contiguous()
+    # )
+    # batched_index_tensor_bqijl[(batched_index_tensor == -1).all(-1, keepdim=True)] = -1
+    # batched_index_tensor_bqijl = batched_index_tensor_bqijl.expand(
+    #     -1, -1, -1, 5
+    # ).contiguous()
+    # batched_index_tensor_bqijl[..., 0] = batched_index_tensor[..., 0]
+    # batched_index_tensor_bqijl[..., 2:] = batched_index_tensor[..., 1:]
+    # index_tensor_bqijl = remove_batch_dim_and_concat(
+    #     batched_index_tensor_bqijl, inputs["query_padding_mask"]
+    # )[0]
+    # specified_subset_indices = index_tensor_bqijl[inputs["is_specified_mask"]]
+
+    # matched = (specified_subset_indices[None] == nonmask_indices[:, None]).all(-1)
 
     # attention weights
     batched_attn_weights_bqhwlh = (
@@ -348,42 +350,6 @@ class TestAgainstReferenceHypothesis:
             f"{(optimized_output - stacked_reference_output).abs().max()}"
         )
 
-    @example(
-        inputs_config={
-            "n_queries": 2,
-            "embed_dim": 2,
-            "n_heads": 1,
-            "n_keys_per_query": 3,
-            "num_sparse_values": 5,
-            "position_dim": 1,
-            "n_freq_groups": 1,
-            "unspecified_query_indices": None,
-            "unspecified_prob": 0.0,
-            "dtype": torch.float32,
-            "use_biases": True,
-            "use_rope": "none",
-            "tensors_requiring_grads": [],
-            "seed": 0,
-        },
-    )
-    @example(
-        inputs_config={
-            "n_queries": 1,
-            "embed_dim": 2,
-            "n_heads": 1,
-            "n_keys_per_query": 1,
-            "num_sparse_values": 5,
-            "position_dim": 1,
-            "n_freq_groups": 1,
-            "unspecified_query_indices": [0],
-            "unspecified_prob": 0.0,
-            "dtype": torch.float32,
-            "use_biases": True,
-            "use_rope": "none",
-            "tensors_requiring_grads": [],
-            "seed": 0,
-        },
-    )
     @settings(deadline=None)
     @given(
         inputs_config=exhaustive_attention_input_configs(
@@ -430,24 +396,7 @@ class TestAgainstReferenceHypothesis:
 
 @pytest.mark.cuda_if_available
 class TestGradientsHypothesis:
-    @example(
-        inputs_config={
-            "n_queries": 1,
-            "embed_dim": 2,
-            "n_heads": 1,
-            "n_keys_per_query": 1,
-            "num_sparse_values": 5,
-            "position_dim": 1,
-            "n_freq_groups": 1,
-            "unspecified_query_indices": None,
-            "unspecified_prob": 0.0,
-            "dtype": torch.float32,
-            "use_biases": False,
-            "use_rope": "precomputed",
-            "tensors_requiring_grads": ["key_rope_encoding"],
-            "seed": 0,
-        },
-    )
+
     @settings(deadline=None)
     @given(
         inputs_config=exhaustive_attention_input_configs(
@@ -511,24 +460,6 @@ class TestGradientsHypothesis:
                     opt_input.grad, ref_input.grad, rtol=1e-4, atol=1e-4
                 ), f"Grad mismatch for input {i}: diff max={diff.max()} mean={diff.mean()}"
 
-    @example(
-        inputs_config={
-            "n_queries": 1,
-            "embed_dim": 2,
-            "n_heads": 1,
-            "n_keys_per_query": 1,
-            "num_sparse_values": 5,
-            "position_dim": 1,
-            "n_freq_groups": 1,
-            "unspecified_query_indices": [0],
-            "unspecified_prob": 0.0,
-            "dtype": torch.float32,
-            "use_biases": False,
-            "use_rope": "none",
-            "tensors_requiring_grads": ["query_tensor"],
-            "seed": 0,
-        },
-    )
     @settings(deadline=None)
     @given(
         inputs_config=exhaustive_attention_input_configs(

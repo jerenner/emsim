@@ -127,34 +127,45 @@ def deconcat_add_batch_dim(
     batch_offsets = normalize_batch_offsets(batch_offsets, tensor.shape[0])
 
     seq_lens = batch_offsets_to_seq_lengths(batch_offsets)
-    batchsize = batch_offsets.shape[0] - 1
+    batch_size = batch_offsets.shape[0] - 1
     max_len = int(torch.max(seq_lens))
 
     feature_dims = tensor.shape[1:]
-    out_shape = torch.Size([batchsize, max_len] + list(feature_dims))
+    out_shape = (batch_size, max_len) + feature_dims
 
-    # If all sequences are equal length can just return a view
+    # Fast path: If all sequences are equal length can just return a view
     if torch.all(seq_lens == max_len):
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
         out = tensor.view(out_shape)
         padding_mask = torch.zeros(
-            batchsize, max_len, device=tensor.device, dtype=torch.bool
+            batch_size, max_len, device=tensor.device, dtype=torch.bool
         )
         return out, padding_mask
 
+    # Full path: Construct the padded outputs and fill them with elements from
+    # the input tensor
     out = tensor.new_full(out_shape, pad_value)
     padding_mask = torch.ones(
-        torch.Size([batchsize, max_len]), device=tensor.device, dtype=torch.bool
+        (batch_size, max_len), device=tensor.device, dtype=torch.bool
     )
 
-    # Fill the output tensor with slices from the input
-    for b in range(batchsize):
-        start = int(batch_offsets[b])
-        end = int(batch_offsets[b + 1])
-        seq_len = int(seq_lens[b])
-        out[b, :seq_len] = tensor[start:end]
-        padding_mask[b, :seq_len] = False
+    # Construct indices for vectorized scatter operation
+
+    # indices pointing to the batch each token lives in
+    batch_indices = batch_offsets_to_indices(batch_offsets, tensor.shape[0])
+
+    # indices of each token's position within its batch
+    arange = torch.arange(tensor.shape[0], device=tensor.device)
+    token_indices = arange - batch_offsets[batch_indices]
+
+    # Scatter into the output tensors
+    out.index_put_((batch_indices, token_indices), tensor, accumulate=False)
+    padding_mask.index_put_(
+        (batch_indices, token_indices),
+        torch.zeros_like(token_indices, dtype=torch.bool),
+        accumulate=False,
+    )
 
     return out, padding_mask
 
@@ -176,48 +187,58 @@ def remove_batch_dim_and_concat(
         batch_offsets (Tensor): A 1D tensor indicating where each batch element starts
     """
     validate_atleast_nd(tensor, 3)
-    batch_size = tensor.shape[0]
-    max_len = tensor.shape[1]
+    batch_size, max_len = tensor.shape[:2]
     feature_dims = tensor.shape[2:]
 
+    # Early return for empty tensor
     if batch_size == 0 or max_len == 0:
-        # Early return for empty case
         out = torch.empty((0,) + feature_dims, dtype=tensor.dtype, device=tensor.device)
-        batch_offsets = torch.zeros((batch_size + 1,), dtype=torch.long, device=tensor.device)
+        batch_offsets = torch.zeros(
+            (batch_size + 1,), dtype=torch.long, device=tensor.device
+        )
         return out, batch_offsets
 
-    if padding_mask is not None:
-        if not padding_mask.ndim == 2:
-            raise ValueError(f"Expected padding_mask to be 2D, got {padding_mask.ndim}")
-        if not padding_mask.shape[0] == batch_size:
-            raise ValueError("Batch size mismatch between tensor and padding_mask")
-        if not padding_mask.shape[1] == max_len:
-            raise ValueError("Sequence length mismatch between tensor and padding_mask")
-
+    # Early return for no padding: All sequences are same length so can just reshape it
     if padding_mask is None or not padding_mask.any():
-        # All sequences are same length so can just reshape it
         total_len = batch_size * max_len
-        out_shape = torch.Size([total_len] + list(feature_dims))
+        out_shape = (total_len,) + feature_dims
         out = tensor.reshape(out_shape)
-        batch_offsets = torch.arange(0, total_len+1, max_len, device=tensor.device)
+        batch_offsets = torch.arange(0, total_len + 1, max_len, device=tensor.device)
 
         return out, batch_offsets
 
-    nonpadded_seq_lens = padding_mask.shape[-1] - padding_mask.sum(-1)
-    batch_offsets = seq_lengths_to_batch_offsets(nonpadded_seq_lens)
+    if padding_mask.ndim != 2:
+        raise ValueError(f"Expected padding_mask to be 2D, got {padding_mask.ndim}")
+    if padding_mask.shape[0] != batch_size:
+        raise ValueError("Batch size mismatch between tensor and padding_mask")
+    if padding_mask.shape[1] != max_len:
+        raise ValueError("Sequence length mismatch between tensor and padding_mask")
 
+    nonpad_mask = padding_mask.logical_not()
+    seq_lens = nonpad_mask.sum(-1).to(torch.long)
+    batch_offsets = seq_lengths_to_batch_offsets(seq_lens)
     total_len = int(batch_offsets[-1])
-    out_shape = torch.Size([total_len] + list(feature_dims))
-    out = torch.zeros(out_shape, dtype=tensor.dtype, device=tensor.device)
 
-    for b in range(batch_size):
-        seq_len = int(nonpadded_seq_lens[b])
-        if seq_len == 0:
-            continue
+    out_shape = (total_len,) + feature_dims
+    out = tensor.new_empty(out_shape)
 
-        batch_start_index = int(batch_offsets[b])
-        batch_end_index = int(batch_offsets[b + 1])
-        out[batch_start_index:batch_end_index] = tensor[b, :seq_len]
+    # meshgrid-like indices
+    batch_indices = torch.arange(batch_size, device=tensor.device)
+    batch_indices = batch_indices.unsqueeze(1).expand(batch_size, max_len)
+
+    token_indices = torch.arange(max_len, device=tensor.device)
+    token_indices = token_indices.unsqueeze(0).expand(batch_size, max_len)
+
+    # select non-padding indices: shape sum(seq_lens)
+    sel_batch_indices = batch_indices[nonpad_mask]
+    sel_token_indices = token_indices[nonpad_mask]
+
+    # Compute destination indices and extract values
+    dest_indices = (batch_offsets[sel_batch_indices] + sel_token_indices).to(torch.long)
+    values = tensor[nonpad_mask]
+
+    # Scatter values into the output tensor
+    out.index_put_((dest_indices,), values, accumulate=False)
 
     return out, batch_offsets
 

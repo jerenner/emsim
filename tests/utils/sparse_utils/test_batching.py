@@ -326,6 +326,7 @@ class TestRemoveBatchDimAndConcat:
         # Test with mismatched padding mask dimensions
         tensor = torch.rand(3, 4, 2, device=device)
         padding_mask_wrong_batch = torch.zeros(2, 4, device=device, dtype=torch.bool)
+        padding_mask_wrong_batch[0, -1] = True
         with pytest.raises((ValueError, torch.jit.Error), match="Batch size mismatch"):
             remove_batch_dim_and_concat(tensor, padding_mask_wrong_batch)
 

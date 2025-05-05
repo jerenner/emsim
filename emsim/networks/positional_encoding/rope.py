@@ -286,7 +286,7 @@ class RoPEEncodingND(nn.Module):
             a ValueError if the (head_dim/2) available elements of the RoPE vector
             cannot be evenly split between the frequency groups. If False, then
             trailing frequency groups may have fewer RoPE encodings assigned to them.
-        rope_base_theta (Union[Tensor], float]): Base value(s) for frequency scaling.
+        thetas (Union[Tensor], float]): Base value(s) for frequency scaling.
             Can be a single float (applied to all dimensions and frequency groups)
             or a 2D tensor of shape [n_freq_groups, position_dim], with either
             component dimension allowed to be 1 for broadcasting. Entries corresponding

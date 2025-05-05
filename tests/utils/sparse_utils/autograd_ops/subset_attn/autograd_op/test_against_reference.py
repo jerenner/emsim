@@ -34,7 +34,7 @@ def compare_intermediates(
         "sparse_tensor"
     ].shape
     n_heads = inputs["metadata"]["n_heads"]
-    n_queries = max(inputs["metadata"]["n_queries"])
+    max_n_queries = max(inputs["metadata"]["n_queries"])
     n_keys_per_query = inputs["metadata"]["n_keys_per_query"]
 
     # get indexing tuple for going from all keys to keys per query
@@ -44,7 +44,7 @@ def compare_intermediates(
             torch.arange(q, device=key_b.device)
             .unsqueeze(1)
             .expand(-1, n_keys_per_query)
-            for q in n_queries
+            for q in inputs["metadata"]["n_queries"]
         ]
     )
     key_pad_mask = subset_outputs["is_specified_mask"].logical_not()
@@ -85,7 +85,7 @@ def compare_intermediates(
     batched_attn_scores_bqhwlh = (
         batched_outputs["attn_scores"]
         .permute(0, 2, 3, 1)
-        .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+        .reshape(bsz, max_n_queries, sparse_height, sparse_width, n_levels, n_heads)
     )
     # query, key, head
     stacked_attn_scores_from_batched = batched_attn_scores_bqhwlh[
@@ -108,7 +108,7 @@ def compare_intermediates(
     batched_attn_scores_masked_bqhwlh = (
         batched_outputs["attn_scores_masked"]
         .permute(0, 2, 3, 1)
-        .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+        .reshape(bsz, max_n_queries, sparse_height, sparse_width, n_levels, n_heads)
     )
     # query, key, head
     stacked_attn_scores_masked_from_batched = batched_attn_scores_masked_bqhwlh[
@@ -155,7 +155,7 @@ def compare_intermediates(
     batched_attn_weights_bqhwlh = (
         batched_outputs["attn_weights"]
         .permute(0, 2, 3, 1)
-        .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+        .reshape(bsz, max_n_queries, sparse_height, sparse_width, n_levels, n_heads)
     )
     # query, key, head
     stacked_attn_weights_from_batched = batched_attn_weights_bqhwlh[

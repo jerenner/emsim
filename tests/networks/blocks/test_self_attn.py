@@ -4,7 +4,8 @@ from typing import Any, Union
 import numpy as np
 import pytest
 import torch
-from hypothesis import assume, given, settings
+import hypothesis
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from torch import Tensor, nn
@@ -989,18 +990,18 @@ class TestCorrectness:
         """Verify norm_first parameter works correctly."""
 
         # ensure nonzero input tensor
-        assume(
+        hypothesis.assume(
             abs(inputs["tensor_config"]["min_float_value"]) > 1e-6
             or abs(inputs["tensor_config"]["max_float_value"]) > 1e-6
         )
         # guard against dropout dropping out everything
-        assume(inputs["config"]["dropout"] < 0.6)
+        hypothesis.assume(inputs["config"]["dropout"] < 0.6)
 
         # Create input tensors
         input_tensors = make_input_tensors(**inputs["tensor_config"], device=device)
 
         # ensure that attention mask doesn't mask out everything
-        assume(not input_tensors["attn_mask"].all())
+        hypothesis.assume(not input_tensors["attn_mask"].all())
 
         # Create two identical modules except for norm_first setting
         config_norm_first = inputs["config"].copy()
@@ -1038,6 +1039,7 @@ class TestCorrectness:
         hook_first = ModuleHook(
             norm_first_module,
             {
+                "out_proj": lambda m: m.out_proj,
                 "norm": lambda m: m.norm,
                 "qkv": lambda m: m.qkv,
             },
@@ -1046,6 +1048,7 @@ class TestCorrectness:
         hook_last = ModuleHook(
             norm_last_module,
             {
+                "out_proj": lambda m: m.out_proj,
                 "norm": lambda m: m.norm,
                 "qkv": lambda m: m.qkv,
             },
@@ -1070,13 +1073,17 @@ class TestCorrectness:
             # For norm_first, norm should be applied before QKV
             norm_first_norm_out = hook_first.captured_values["norm"]["outputs"][0]
             norm_first_qkv_in = hook_first.captured_values["qkv"]["inputs"][0]
+            norm_first_out_proj = hook_first.captured_values["out_proj"]["outputs"][0]
 
             # For norm_last, norm should be applied after attention
             norm_last_norm_out = hook_last.captured_values["norm"]["outputs"][0]
             norm_last_qkv_in = hook_last.captured_values["qkv"]["inputs"][0]
+            norm_last_out_proj = hook_last.captured_values["out_proj"]["outputs"][0]
 
-            # Verify norm layers have different outputs
-            assert not torch.allclose(norm_first_norm_out, norm_last_norm_out)
+            # Verify norm layers have different outputs as long as non-residual branch
+            # is nonzero
+            if norm_first_out_proj.any() or norm_last_out_proj.any():
+                assert not torch.allclose(norm_first_norm_out, norm_last_norm_out)
 
             # For norm_first, check norm is directly before qkv
             assert torch.allclose(norm_first_norm_out, norm_first_qkv_in)

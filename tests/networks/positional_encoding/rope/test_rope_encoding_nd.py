@@ -5,6 +5,7 @@ import torch
 from torch import Tensor
 import numpy as np
 from math import isclose
+import hypothesis
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays, array_shapes
@@ -79,13 +80,19 @@ def rope_config_strategy(draw):
     share_heads = draw(st.booleans())
     n_freq_groups = draw(st.integers(1, 4))
     enforce_freq_groups_equal = (embed_dim // n_heads) % (n_freq_groups * 2) == 0
+
+    def will_rotate(freq_group_pattern: np.ndarray):
+        if not enforce_freq_groups_equal:
+            return freq_group_pattern[0].any().item()
+        return freq_group_pattern.any().item()
+
     freq_group_pattern = draw(
         arrays(
             np.bool,
             shape=(n_freq_groups, position_dim),
             elements=st.booleans(),
             fill=None,
-        ).filter(lambda x: x.any() and (not enforce_freq_groups_equal or x[0].any()))
+        ).filter(will_rotate)
     )
     rope_base_theta = draw(
         st.one_of(
@@ -529,38 +536,33 @@ class TestRoPEEncodingNDForward:
         rope = RoPEEncodingND(**inputs["config"]).to(device)
         input_tensors = rope_input_tensors(**inputs["tensor_config"], device=device)
 
+        query = input_tensors["query"]
+        query_pos = input_tensors["query_pos"]
+        key = input_tensors["key"]
+        key_pos = input_tensors["key_pos"]
+
+        hypothesis.assume(
+            not torch.allclose(query_pos, torch.zeros_like(query_pos), atol=1e-4)
+        )
+        hypothesis.assume(not torch.allclose(query, torch.zeros_like(query), atol=1e-4))
+        hypothesis.assume(
+            key is None or not torch.allclose(key, torch.zeros_like(key), atol=1e-4)
+        )
+        hypothesis.assume(
+            key_pos is None
+            or not torch.allclose(key_pos, torch.zeros_like(key_pos), atol=1e-4)
+        )
+
         output = rope(**input_tensors)
-        if input_tensors["key"] is not None:
+        if key is not None:
             query_rotated, key_rotated = output
         else:
             query_rotated = output
 
         # Test that rotation happened
-        query = input_tensors["query"]
-        query_pos = input_tensors["query_pos"]
-        key = input_tensors["key"]
-        if (
-            not allclose_zero(query)
-            and not allclose_zero(query_pos)
-            and rope.freq_group_pattern.any()
-        ):
-            assert not torch.allclose(query, query_rotated)
-        else:
-            assert torch.allclose(query, query_rotated)
+        assert not torch.allclose(query, query_rotated)
         if key is not None:
-            key_pos = (
-                input_tensors["key_pos"]
-                if input_tensors["key_pos"] is not None
-                else query_pos
-            )
-            if (
-                not allclose_zero(key)
-                and not allclose_zero(key_pos)
-                and rope.freq_group_pattern.any()
-            ):
-                assert not torch.allclose(key, key_rotated)
-            else:
-                assert torch.allclose(key, key_rotated)
+            assert not torch.allclose(key, key_rotated)
 
     def test_forward_query_and_key(
         self, base_config: dict[str, Any], sample_data, device: str

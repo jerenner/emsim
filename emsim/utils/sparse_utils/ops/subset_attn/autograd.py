@@ -870,10 +870,11 @@ def _compute_grads_keys_and_rope_encoding(
         return None, None
     # fmt: off
     grad_keys_maybe_rotated = torch.matmul(
-        grad_attn_scores.unsqueeze(-1),       # (n_heads, n_queries, n_keys_per_query, 1)
-        queries.unsqueeze(-2) * scale_factor, # (n_heads, n_queries, 1, head_dim)
-    )                                         # (n_heads, n_queries, n_keys_per_query, head_dim)
+        grad_attn_scores.unsqueeze(-1),  # (n_heads, n_queries, n_keys_per_query, 1)
+        queries.unsqueeze(-2),           # (n_heads, n_queries, 1, head_dim)
+    )                                    # (n_heads, n_queries, n_keys_per_query, head_dim)
     # fmt: on
+    grad_keys_maybe_rotated *= scale_factor
 
     # (n_queries, n_keys_per_query, n_heads, head_dim)
     grad_keys_maybe_rotated = permute_for_attention_backward(grad_keys_maybe_rotated)

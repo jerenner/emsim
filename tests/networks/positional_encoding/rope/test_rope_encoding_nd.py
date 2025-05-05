@@ -79,15 +79,15 @@ def rope_config_strategy(draw):
     embed_dim = draw(st.integers(1, 8)) * 2 * n_heads
     share_heads = draw(st.booleans())
     n_freq_groups = draw(st.integers(1, 4))
+    enforce_freq_groups_equal = (embed_dim // n_heads) % (n_freq_groups * 2) == 0
     freq_group_pattern = draw(
         arrays(
             np.bool,
             shape=(n_freq_groups, position_dim),
             elements=st.booleans(),
             fill=None,
-        ).filter(lambda x: x.any())
+        ).filter(lambda x: x.any() and (not enforce_freq_groups_equal or x[0].any()))
     )
-    enforce_freq_groups_equal = (embed_dim // n_heads) % (n_freq_groups * 2) == 0
     rope_base_theta = draw(
         st.one_of(
             st.floats(min_value=1.0, max_value=1e10, exclude_min=True),

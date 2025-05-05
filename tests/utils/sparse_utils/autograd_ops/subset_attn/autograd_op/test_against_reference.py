@@ -1,0 +1,597 @@
+from typing import Any
+
+import pytest
+import torch
+from hypothesis import example, given, settings
+from torch import Tensor
+
+from emsim.utils.sparse_utils.batching import remove_batch_dim_and_concat
+from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
+    GatherAndSubsetAttentionFunction,
+)
+
+from ..input_generation import (
+    attention_inputs,
+)
+from ..traceable_attn import (
+    prep_batched_attention,
+    traceable_batched_attention,
+    traceable_subset_attention,
+)
+from .conftest import (
+    exhaustive_attention_input_configs,
+    ordered_autograd_inputs,
+    set_requires_grad,
+)
+
+
+def compare_intermediates(
+    inputs: dict[str, Any],
+    subset_outputs: dict[str, Tensor],
+    batched_outputs: dict[str, Tensor],
+):
+    bsz, sparse_height, sparse_width, n_levels, embed_dim = inputs[
+        "sparse_tensor"
+    ].shape
+    n_heads = inputs["metadata"]["n_heads"]
+    n_queries = max(inputs["metadata"]["n_queries"])
+    n_keys_per_query = inputs["metadata"]["n_keys_per_query"]
+
+    # get indexing tuple for going from all keys to keys per query
+    key_b, key_i, key_j, key_l = inputs["index_tensor"].unbind(-1)
+    key_q = torch.cat(
+        [
+            torch.arange(q, device=key_b.device)
+            .unsqueeze(1)
+            .expand(-1, inputs["metadata"]["n_keys_per_query"])
+            for q in inputs["metadata"]["n_queries"]
+        ]
+    )
+    key_pad_mask = subset_outputs["is_specified_mask"].logical_not()
+
+    # Gather keys
+    batched_keys = batched_outputs["keys"].view(
+        bsz, sparse_height, sparse_width, n_levels, embed_dim
+    )
+    stacked_keys_from_batched = batched_keys[key_b, key_i, key_j, key_l]
+    subset_keys = subset_outputs["keys"].clone()
+    stacked_keys_from_batched[key_pad_mask] = 0.0
+    subset_keys[key_pad_mask] = 0.0
+    subset_keys = subset_keys.reshape_as(stacked_keys_from_batched)
+    assert torch.allclose(
+        subset_keys,
+        stacked_keys_from_batched,
+        atol=1e-4,
+        rtol=1e-3,
+    ), f"max key diff: {(subset_keys - stacked_keys_from_batched).abs().max()}"
+
+    # same for values...
+    batched_values = batched_outputs["values"].view(
+        bsz, sparse_height, sparse_width, n_levels, embed_dim
+    )
+    stacked_values_from_batched = batched_values[key_b, key_i, key_j, key_l]
+    subset_values = subset_outputs["values"].clone()
+    stacked_values_from_batched[key_pad_mask] = 0.0
+    subset_values[key_pad_mask] = 0.0
+    subset_values = subset_values.reshape_as(stacked_values_from_batched)
+    assert torch.allclose(
+        subset_values,
+        stacked_values_from_batched,
+        atol=1e-4,
+        rtol=1e-3,
+    ), f"max value diff: {(subset_values - stacked_values_from_batched).abs().max()}"
+
+    # attention scores
+    batched_attn_scores_bqhwlh = (
+        batched_outputs["attn_scores"]
+        .permute(0, 2, 3, 1)
+        .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+    )
+    # query, key, head
+    stacked_attn_scores_from_batched = batched_attn_scores_bqhwlh[
+        key_b, key_q, key_i, key_j, key_l
+    ].clone()
+    subset_attn_scores = subset_outputs["attn_scores"].transpose(-2, -1).clone()
+    stacked_attn_scores_from_batched[key_pad_mask] = 0.0
+    subset_attn_scores[key_pad_mask] = 0.0
+    assert torch.allclose(
+        subset_attn_scores, stacked_attn_scores_from_batched, atol=1e-4, rtol=1e-3,
+    ), (
+        "max scores diff: "
+        f"{(subset_attn_scores - stacked_attn_scores_from_batched).abs().max()}"
+    )
+
+    # masked attention scores
+    batched_attn_scores_masked_bqhwlh = (
+        batched_outputs["attn_scores_masked"]
+        .permute(0, 2, 3, 1)
+        .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+    )
+    # query, key, head
+    stacked_attn_scores_masked_from_batched = batched_attn_scores_masked_bqhwlh[
+        key_b, key_q, key_i, key_j, key_l
+    ]
+    subset_attn_scores_masked = subset_outputs["attn_scores_masked"].transpose(-1, -2)
+    assert torch.allclose(
+        subset_attn_scores_masked,
+        stacked_attn_scores_masked_from_batched,
+        atol=1e-4,
+        rtol=1e-3,
+    ), (
+        "max scores masked diff:"
+        f"{(subset_attn_scores_masked - stacked_attn_scores_masked_from_batched.abs().max())}"
+    )
+
+    batched_attn_mask_bqhwl = batched_outputs["attn_mask"].view(
+        bsz, n_queries, sparse_height, sparse_width, n_levels
+    )
+    nonmask_indices = batched_attn_mask_bqhwl.logical_not().nonzero()
+
+    batched_index_tensor = inputs["batched_index_tensor"]
+    batched_index_tensor_bqijl = (
+        torch.arange(n_queries, device=batched_index_tensor.device)
+        .view(1, n_queries, 1, 1)
+        .expand(bsz, -1, n_keys_per_query, 1)
+        .contiguous()
+    )
+    batched_index_tensor_bqijl[(batched_index_tensor == -1).all(-1, keepdim=True)] = -1
+    batched_index_tensor_bqijl = batched_index_tensor_bqijl.expand(
+        -1, -1, -1, 5
+    ).contiguous()
+    batched_index_tensor_bqijl[..., 0] = batched_index_tensor[..., 0]
+    batched_index_tensor_bqijl[..., 2:] = batched_index_tensor[..., 1:]
+    index_tensor_bqijl = remove_batch_dim_and_concat(
+        batched_index_tensor_bqijl, inputs["query_padding_mask"]
+    )[0]
+    specified_subset_indices = index_tensor_bqijl[inputs["is_specified_mask"]]
+
+    ### check that the indices are the same between index tensor and attn mask??
+    matched = (specified_subset_indices[None] == nonmask_indices[:, None]).all(-1)
+    # example: specified_subset_indices has a duplicate index
+
+    # attention weights
+    batched_attn_weights_bqhwlh = (
+        batched_outputs["attn_weights"]
+        .permute(0, 2, 3, 1)
+        .reshape(bsz, n_queries, sparse_height, sparse_width, n_levels, n_heads)
+    )
+    # query, key, head
+    stacked_attn_weights_from_batched = batched_attn_weights_bqhwlh[
+        key_b, key_q, key_i, key_j, key_l
+    ]
+    subset_attn_weights = subset_outputs["attn_weights"].transpose(-1, -2)
+    assert torch.allclose(
+        subset_attn_weights, stacked_attn_weights_from_batched, atol=1e-6, rtol=1e-3
+    ), (
+        "max attn_weight difference: "
+        f"{(subset_attn_weights - stacked_attn_weights_from_batched).abs().max()}"
+    )
+
+
+@pytest.mark.cuda_if_available
+class TestAgainstReferenceUnit:
+    @pytest.mark.parametrize(
+        "use_rope",
+        ["none", "precomputed", "from_freqs"],
+        ids=["rope=none", "rope=precomputed", "rope=from_freqs"],
+    )
+    def test_forward_against_traceable_stacked(
+        self, device: str, use_rope: str
+    ) -> None:
+        """Basic test of the forward method against a reference implementation
+        that doesn't have optimizations."""
+        inputs = attention_inputs(use_rope=use_rope, device=device, dropout_p=0.0)
+        inputs = ordered_autograd_inputs(inputs)
+
+        optimized_output = GatherAndSubsetAttentionFunction.apply(*inputs)
+        reference_output = traceable_subset_attention(
+            *inputs, batch_kv_projection=False
+        )
+
+        abs_difference = torch.abs(optimized_output - reference_output)
+        print(f"Biggest absolute difference: {abs_difference.max().item()}")
+        assert torch.allclose(optimized_output, reference_output, rtol=1e-4, atol=1e-5)
+
+        # Test again while letting the subset version use the input projection
+        # batching optimization
+        reference_output_2 = traceable_subset_attention(*inputs)
+
+        assert torch.allclose(
+            optimized_output, reference_output_2, rtol=1e-4, atol=1e-5
+        )
+
+    @pytest.mark.parametrize(
+        "use_rope",
+        ["none", "precomputed", "from_freqs"],
+        ids=["rope=none", "rope=precomputed", "rope=from_freqs"],
+    )
+    def test_forward_against_traceable_batched(
+        self, device: str, use_rope: str
+    ) -> None:
+        """Basic test of the forward method against a reference implementation that
+        uses padding instead of stacking the queries, and masking instead of key
+        subsets
+        """
+        inputs = attention_inputs(
+            use_rope=use_rope,
+            device=device,
+            dropout_p=0.0,
+        )
+        ordered_inputs = ordered_autograd_inputs(inputs)
+        batched_inputs = prep_batched_attention(inputs)
+
+        optimized_output = GatherAndSubsetAttentionFunction.apply(*ordered_inputs)
+        batched_reference_output = traceable_batched_attention(**batched_inputs)
+
+        stacked_reference_output = remove_batch_dim_and_concat(
+            batched_reference_output, inputs["query_padding_mask"]
+        )[0]
+
+        assert torch.allclose(optimized_output, stacked_reference_output, atol=1e-6), (
+            "max_difference: "
+            f"{(optimized_output - stacked_reference_output).abs().max()}"
+        )
+
+    @pytest.mark.parametrize(
+        "use_rope",
+        ["none", "precomputed", "from_freqs"],
+        ids=["rope=none", "rope=precomputed", "rope=from_freqs"],
+    )
+    def test_traceables_against_each_other(
+        self,
+        device: str,
+        use_rope: str,
+    ) -> None:
+        """Test equivalence of the two traceable implementations."""
+        inputs = attention_inputs(
+            use_rope=use_rope, device=device, dropout_p=0.0, training=False
+        )
+        ordered_inputs = ordered_autograd_inputs(inputs)
+        batched_inputs = prep_batched_attention(inputs)
+
+        subset_output = traceable_subset_attention(
+            *ordered_inputs, return_extended_outputs=True
+        )
+        batched_output = traceable_batched_attention(
+            **batched_inputs, return_extended_outputs=True
+        )
+
+        # check equality of intermediate values
+        compare_intermediates(inputs, subset_output, batched_output)
+
+        subset_attn_out = subset_output["attn_output"]
+        batched_attn_out = batched_output["attn_output"]
+
+        batched_attn_out_stacked = remove_batch_dim_and_concat(
+            batched_attn_out, inputs["query_padding_mask"]
+        )[0]
+
+        assert subset_attn_out.shape == batched_attn_out_stacked.shape
+
+        abs_difference = torch.abs(subset_attn_out - batched_attn_out_stacked)
+        print(f"Biggest absolute difference: {abs_difference.max().item()}")
+
+        assert torch.allclose(subset_attn_out, batched_attn_out_stacked, atol=1e-6)
+
+
+@pytest.mark.cuda_if_available
+class TestAgainstReferenceHypothesis:
+    @settings(deadline=None)
+    @given(
+        inputs_config=exhaustive_attention_input_configs(
+            dtypes=[torch.float32, torch.float64]
+        )
+    )
+    def test_forward_against_traceable_stacked(
+        self,
+        inputs_config: dict[str, Any],
+        device: str,
+    ) -> None:
+        """Property-based forward test against the reference."""
+        inputs = attention_inputs(
+            **inputs_config, training=False, dropout_p=0.0, device=device
+        )
+        inputs = ordered_autograd_inputs(inputs)
+
+        optimized_output = GatherAndSubsetAttentionFunction.apply(*inputs)
+        reference_output = traceable_subset_attention(
+            *inputs, batch_kv_projection=False
+        )
+
+        assert torch.allclose(optimized_output, reference_output, rtol=1e-4, atol=1e-5)
+
+        # Test again while letting the subset version use the input projection
+        # batching optimization
+        reference_output_2 = traceable_subset_attention(*inputs)
+
+        assert torch.allclose(
+            optimized_output, reference_output_2, rtol=1e-4, atol=1e-5
+        )
+
+    @settings(deadline=None)
+    @given(
+        inputs_config=exhaustive_attention_input_configs(
+            dtypes=[torch.float32, torch.float64]
+        )
+    )
+    def test_forward_against_traceable_batched(
+        self, inputs_config: dict[str, Any], device: str
+    ) -> None:
+        """Basic test of the forward method against a reference implementation that
+        uses padding instead of stacking the queries, and masking instead of key
+        subsets
+        """
+        inputs = attention_inputs(
+            **inputs_config,
+            dropout_p=0.0,
+            training=False,
+            device=device,
+        )
+        ordered_inputs = ordered_autograd_inputs(inputs)
+        batched_inputs = prep_batched_attention(inputs)
+
+        optimized_output = GatherAndSubsetAttentionFunction.apply(*ordered_inputs)
+        batched_reference_output = traceable_batched_attention(**batched_inputs)
+
+        stacked_reference_output = remove_batch_dim_and_concat(
+            batched_reference_output, inputs["query_padding_mask"]
+        )[0]
+
+        if inputs_config["dtype"] == torch.float32:
+            atol, rtol = 1e-4, 1e-3
+        else:
+            atol, rtol = 1e-8, 1e-5  # default
+        assert torch.allclose(
+            optimized_output, stacked_reference_output, atol=atol, rtol=rtol
+        ), (
+            "max_difference: "
+            f"{(optimized_output - stacked_reference_output).abs().max()}"
+        )
+
+    @example(
+        inputs_config={
+            "n_queries": 2,
+            "embed_dim": 2,
+            "n_heads": 1,
+            "n_keys_per_query": 3,
+            "num_sparse_values": 5,
+            "position_dim": 1,
+            "n_freq_groups": 1,
+            "unspecified_query_indices": None,
+            "unspecified_prob": 0.0,
+            "dtype": torch.float32,
+            "use_biases": True,
+            "use_rope": "none",
+            "tensors_requiring_grads": [],
+            "seed": 0,
+        },
+    )
+    @example(
+        inputs_config={
+            "n_queries": 1,
+            "embed_dim": 2,
+            "n_heads": 1,
+            "n_keys_per_query": 1,
+            "num_sparse_values": 5,
+            "position_dim": 1,
+            "n_freq_groups": 1,
+            "unspecified_query_indices": [0],
+            "unspecified_prob": 0.0,
+            "dtype": torch.float32,
+            "use_biases": True,
+            "use_rope": "none",
+            "tensors_requiring_grads": [],
+            "seed": 0,
+        },
+    )
+    @settings(deadline=None)
+    @given(
+        inputs_config=exhaustive_attention_input_configs(
+            dtypes=[torch.float32, torch.float64]
+        )
+    )
+    def test_traceables_against_each_other(
+        self,
+        inputs_config: dict[str, Any],
+        device: str,
+    ) -> None:
+        """Test equivalence of the two traceable implementations."""
+        inputs = attention_inputs(
+            **inputs_config, device=device, dropout_p=0.0, training=False
+        )
+        ordered_inputs = ordered_autograd_inputs(inputs)
+        batched_inputs = prep_batched_attention(inputs)
+
+        subset_output = traceable_subset_attention(
+            *ordered_inputs, return_extended_outputs=True
+        )
+        batched_output = traceable_batched_attention(
+            **batched_inputs, return_extended_outputs=True
+        )
+
+        # check equality of intermediate values
+        compare_intermediates(inputs, subset_output, batched_output)
+
+        subset_attn_out = subset_output["attn_output"]
+        batched_attn_out = batched_output["attn_output"]
+
+        batched_attn_out_stacked = remove_batch_dim_and_concat(
+            batched_attn_out, inputs["query_padding_mask"]
+        )[0]
+
+        assert subset_attn_out.shape == batched_attn_out_stacked.shape
+
+        abs_difference = torch.abs(subset_attn_out - batched_attn_out_stacked)
+
+        assert torch.allclose(
+            subset_attn_out, batched_attn_out_stacked, atol=1e-4, rtol=1e-3
+        ), f"max_difference: {abs_difference.max()}"
+
+
+@pytest.mark.cuda_if_available
+class TestGradientsHypothesis:
+    @example(
+        inputs_config={
+            "n_queries": 1,
+            "embed_dim": 2,
+            "n_heads": 1,
+            "n_keys_per_query": 1,
+            "num_sparse_values": 5,
+            "position_dim": 1,
+            "n_freq_groups": 1,
+            "unspecified_query_indices": None,
+            "unspecified_prob": 0.0,
+            "dtype": torch.float32,
+            "use_biases": False,
+            "use_rope": "precomputed",
+            "tensors_requiring_grads": ["key_rope_encoding"],
+            "seed": 0,
+        },
+    )
+    @settings(deadline=None)
+    @given(
+        inputs_config=exhaustive_attention_input_configs(
+            dtypes=[torch.float32, torch.float64],
+            min_requiring_grads=1,
+        )
+    )
+    def test_gradients_against_traceable(
+        self, device: str, inputs_config: dict[str, Any]
+    ):
+        """Test gradients against the reference implementation that uses autograd"""
+        tensors_requiring_grads = inputs_config["tensors_requiring_grads"]
+
+        # set up inputs
+        inputs = attention_inputs(**inputs_config, device=device, dropout_p=0.0)
+        inputs = set_requires_grad(inputs, tensors_requiring_grads)
+
+        # make a fresh copy of input tensors for reference implementation
+        inputs_copy = {
+            k: (
+                v.clone().detach().requires_grad_(v.requires_grad)
+                if isinstance(v, Tensor)
+                else v
+            )
+            for k, v in inputs.items()
+        }
+        ordered_optimized_inputs = ordered_autograd_inputs(inputs)
+        ordered_reference_inputs = ordered_autograd_inputs(inputs_copy)
+
+        torch.manual_seed(inputs_config["seed"])
+
+        # get outputs
+        optimized_output = GatherAndSubsetAttentionFunction.apply(
+            *ordered_optimized_inputs
+        )
+        reference_output = traceable_subset_attention(
+            *ordered_reference_inputs, batch_kv_projection=False
+        )
+
+        # check outputs match
+        assert torch.allclose(optimized_output, reference_output, rtol=1e-4, atol=1e-5)
+
+        # Create random gradient for backprop
+        grad_output = torch.randn_like(optimized_output)
+        optimized_output.backward(grad_output)
+        reference_output.backward(grad_output.clone())
+
+        # Compare gradients
+        for i, (opt_input, ref_input) in enumerate(zip(inputs, inputs_copy)):
+            if isinstance(opt_input, Tensor) and opt_input.requires_grad:
+                assert (
+                    opt_input.grad is not None
+                ), f"Optimized grad is None for input {i}"
+                assert (
+                    ref_input.grad is not None
+                ), f"Reference grad is None for input {i}"
+
+                diff = torch.abs(opt_input.grad - ref_input.grad)
+
+                assert torch.allclose(
+                    opt_input.grad, ref_input.grad, rtol=1e-4, atol=1e-4
+                ), f"Grad mismatch for input {i}: diff max={diff.max()} mean={diff.mean()}"
+
+    @example(
+        inputs_config={
+            "n_queries": 1,
+            "embed_dim": 2,
+            "n_heads": 1,
+            "n_keys_per_query": 1,
+            "num_sparse_values": 5,
+            "position_dim": 1,
+            "n_freq_groups": 1,
+            "unspecified_query_indices": [0],
+            "unspecified_prob": 0.0,
+            "dtype": torch.float32,
+            "use_biases": False,
+            "use_rope": "none",
+            "tensors_requiring_grads": ["query_tensor"],
+            "seed": 0,
+        },
+    )
+    @settings(deadline=None)
+    @given(
+        inputs_config=exhaustive_attention_input_configs(
+            dtypes=[torch.float32, torch.float64],
+            min_requiring_grads=1,
+        )
+    )
+    def test_gradients_against_traceable_batched(
+        self, device: str, inputs_config: dict[str, Any]
+    ):
+        """Test gradients against the reference implementation that uses autograd"""
+        tensors_requiring_grads = inputs_config["tensors_requiring_grads"]
+        torch.set_anomaly_enabled(True)
+
+        # set up inputs
+        inputs = attention_inputs(**inputs_config, device=device, dropout_p=0.0)
+        inputs = set_requires_grad(inputs, tensors_requiring_grads)
+
+        # make a fresh copy of input tensors for reference implementation
+        reference_inputs = {
+            k: (
+                v.clone().detach().requires_grad_(v.requires_grad)
+                if isinstance(v, Tensor)
+                else v
+            )
+            for k, v in inputs.items()
+        }
+
+        optimized_inputs = ordered_autograd_inputs(inputs)
+        batched_inputs = prep_batched_attention(reference_inputs)
+
+        torch.manual_seed(inputs_config["seed"])
+
+        # get outputs
+        optimized_output = GatherAndSubsetAttentionFunction.apply(*optimized_inputs)
+        batched_outputs = traceable_batched_attention(
+            **batched_inputs, return_extended_outputs=True
+        )
+
+        # check outputs match
+
+        stacked_batched_output = remove_batch_dim_and_concat(
+            batched_outputs["attn_output"], reference_inputs["query_padding_mask"]
+        )[0]
+        assert torch.allclose(
+            optimized_output, stacked_batched_output, rtol=1e-4, atol=1e-5
+        ), f"max output diff: {(optimized_output - stacked_batched_output).abs().max()}"
+
+        # Create random gradient for backprop
+        grad_output = torch.randn_like(optimized_output)
+        optimized_output.backward(grad_output)
+        stacked_batched_output.backward(grad_output.clone())
+
+        # Compare gradients
+        for k in tensors_requiring_grads:
+            ref_input = reference_inputs[k]
+            opt_input = inputs[k]
+            # if isinstance(ref_input, Tensor) and ref_input.requires_grad:
+            assert opt_input.grad is not None, f"Optimized grad is None for {k}"
+            assert ref_input.grad is not None, f"Reference grad is None for {k}"
+
+            diff = torch.abs(opt_input.grad - ref_input.grad)
+
+            assert torch.allclose(
+                opt_input.grad, ref_input.grad, rtol=1e-2, atol=1e-4
+            ), f"Grad mismatch for {k}: diff max={diff.max()} mean={diff.mean()}"

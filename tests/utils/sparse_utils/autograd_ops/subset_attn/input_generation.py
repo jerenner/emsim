@@ -146,59 +146,36 @@ def attention_inputs(
 
     query_batch_offsets = torch.tensor(np.cumsum([0] + n_queries), device=device)
 
-    # Generate the sparse tensor inputs, either in the form of the sparse tensor
-    # itself or in the form of the outputs of get_sparse_index_mapping directly
-    if not generate_linear_sparse_tensor_directly:
-        sparse_tensor, batched_index_tensor = create_sparse_and_index_tensor(
-            n_queries=n_queries,
-            height=sparse_height,
-            width=sparse_width,
-            levels=sparse_levels,
-            embed_dim=embed_dim,
-            n_keys_per_query=n_keys_per_query,
-            sparsity=sparsity,
-            index_hit_rate=index_hit_rate,
-            use_2d_features=use_2d_sparse_features,
-            n_heads=n_heads,
-            unspecified_query_indices=unspecified_query_indices,
-            device=device,
-            dtype=dtype,
-            seed=None,  # seeding done in the current function
-        )
-        attn_mask_valid_indices = batched_attn_mask_indices(
-            sparse_tensor, batched_index_tensor
-        )
+    # Generate the sparse tensor inputs
+    sparse_tensor, batched_index_tensor = create_sparse_and_index_tensor(
+        n_queries=n_queries,
+        height=sparse_height,
+        width=sparse_width,
+        levels=sparse_levels,
+        embed_dim=embed_dim,
+        n_keys_per_query=n_keys_per_query,
+        sparsity=sparsity,
+        index_hit_rate=index_hit_rate,
+        use_2d_features=use_2d_sparse_features,
+        n_heads=n_heads,
+        unspecified_query_indices=unspecified_query_indices,
+        device=device,
+        dtype=dtype,
+        seed=None,  # seeding done in the current function
+    )
+    attn_mask_valid_indices = batched_attn_mask_indices(
+        sparse_tensor, batched_index_tensor
+    )
 
-        stacked_index_tensor, query_batch_offsets_2 = remove_batch_dim_and_concat(
-            batched_index_tensor, query_padding_mask
-        )
-        assert torch.equal(query_batch_offsets, query_batch_offsets_2)  # sanity check
+    stacked_index_tensor, query_batch_offsets_2 = remove_batch_dim_and_concat(
+        batched_index_tensor, query_padding_mask
+    )
+    assert torch.equal(query_batch_offsets, query_batch_offsets_2)  # sanity check
 
-        linear_index_tensor, is_specified_mask = get_sparse_index_mapping(
-            sparse_tensor, stacked_index_tensor
-        )
-        sparse_tensor_values = sparse_tensor.values()
-
-    else:
-        total_spatial_indices = (
-            len(n_queries) * sparse_height * sparse_width * sparse_levels
-        )
-        sparse_tensor_values, linear_index_tensor, is_specified_mask = (
-            create_linear_sparse_values_and_index_tensor_directly(
-                num_sparse_values=math.ceil(total_spatial_indices) * sparsity,
-                n_queries=n_queries,
-                n_keys_per_query=n_keys_per_query,
-                embed_dim=embed_dim,
-                unspecified_prob=1 - index_hit_rate,
-                device=device,
-                dtype=dtype,
-            )
-        )
-        sparse_tensor = None
-        batched_index_tensor = None
-        attn_mask_valid_indices = None
-        query_padding_mask = None
-        stacked_index_tensor = None
+    linear_index_tensor, is_specified_mask = get_sparse_index_mapping(
+        sparse_tensor, stacked_index_tensor
+    )
+    sparse_tensor_values = sparse_tensor.values()
 
     # Ensure embed_dim is divisible by n_heads
     assert embed_dim % n_heads == 0, "embed_dim must be divisible by n_heads"
@@ -262,9 +239,8 @@ def attention_inputs(
         )
 
         # shape: sum(n_queries), n_keys_per_query, position_dim
-        stacked_key_positions = batched_key_positions[
-            stacked_index_tensor.unbind(-1)
-        ]
+        stacked_key_positions = batched_key_positions[stacked_index_tensor.unbind(-1)]
+
         rope_freqs = torch.rand(
             position_dim,
             n_freq_groups,
@@ -305,7 +281,6 @@ def attention_inputs(
 
     return {
         "query_tensor": stacked_query_tensor,
-        "batched_query_tensor": query_tensor,
         "sparse_tensor": sparse_tensor,
         "index_tensor": stacked_index_tensor,
         "batched_index_tensor": batched_index_tensor,
@@ -320,10 +295,8 @@ def attention_inputs(
         "value_weight": value_weight,
         "key_bias": key_bias,
         "value_bias": value_bias,
-        "key_rope_encoding": stacked_key_rope_encoding,
-        "batched_key_rope_encoding": batched_key_rope_encoding,
-        "key_positions": stacked_key_positions,
-        "batched_key_positions": batched_key_positions,
+        "key_rope_encoding": batched_key_rope_encoding,
+        "key_positions": batched_key_positions,
         "rope_freqs": rope_freqs,
         "scale_factor": scale_factor,
         "dropout_p": dropout_p,
@@ -449,14 +422,15 @@ def create_sparse_and_index_tensor(
 
     # Randomly select indices for non-zero elements
     perm = torch.randperm(total_spatial_elements, device=device)
-    selected_indices = all_indices[:, perm[:nnz]]
+    nonsparse_key_indices = all_indices[:, perm[:nnz]]
+    sparse_key_indices = all_indices[:, perm[nnz:]]
 
     # Generate random values for the sparse tensor
     values = torch.randn((nnz,) + feature_size, dtype=dtype, device=device)
 
     # Create the sparse tensor
     sparse_tensor = torch.sparse_coo_tensor(
-        indices=selected_indices,
+        indices=nonsparse_key_indices,
         values=values,
         size=(batch_size, height, width, levels) + feature_size,
         device=device,
@@ -475,34 +449,70 @@ def create_sparse_and_index_tensor(
         ],
         dim=-1,
     )
+    index_tensor = torch.empty(
+        index_tensor_batch_shape + (4,), dtype=torch.long, device=device
+    )
 
-    is_hit = torch.rand(index_tensor_batch_shape, device=device) < index_hit_rate
+    is_hit_mask = torch.rand(index_tensor_batch_shape, device=device) < index_hit_rate
 
     # For hits, sample from available indices without replacement up to amount of
     # available indices
     for b in range(batch_size):
-        indices_in_this_batch_mask = selected_indices[0] == b
-        n_indices_in_this_batch = indices_in_this_batch_mask.sum()
+        nonsparse_this_batch_mask = nonsparse_key_indices[0] == b
+        sparse_this_batch_mask = sparse_key_indices[0] == b
+        n_available_hits = nonsparse_this_batch_mask.sum()
+        n_available_misses = sparse_this_batch_mask.sum()
 
-        hits_this_batch = is_hit[b]
-        n_hits_this_batch = min(hits_this_batch.sum(), n_indices_in_this_batch)
+        # switch some hits to misses if not enough available indices
+        hits_this_batch_mask = is_hit_mask[b]
+        hits_this_batch_nz = hits_this_batch_mask.nonzero()
+        n_hits_this_batch = min(hits_this_batch_nz.size(0), n_available_hits)
+        if n_hits_this_batch < hits_this_batch_nz.size(0):
+            # Need to set some hits to misses
+            perm = torch.randperm(hits_this_batch_nz.size(0), device=device)
+            hits_to_flip = perm[:hits_this_batch_nz.size(0) - n_hits_this_batch]
+            hits_this_batch_mask[hits_this_batch_nz[hits_to_flip].unbind(-1)] = False
 
-        perm_available_indices = torch.randperm(n_indices_in_this_batch, device=device)
-        sampling_indices = perm_available_indices[:n_hits_this_batch]
 
-        sampled_hits = selected_indices[:, indices_in_this_batch_mask][
-            :, sampling_indices
+        n_misses_this_batch = hits_this_batch_mask.numel() - n_hits_this_batch
+
+        # Sample hits
+        perm_available_hits = torch.randperm(n_available_hits, device=device)
+        sampled_hits_indices = perm_available_hits[:n_hits_this_batch]
+        sampled_hits = nonsparse_key_indices[:, nonsparse_this_batch_mask][
+            :, sampled_hits_indices
         ]
 
-        hits_nonzero = hits_this_batch.nonzero()
-        perm_hit_keys = torch.randperm(n_hits_this_batch, device=device)
-        hit_locations = hits_nonzero[perm_hit_keys]
+        # Sample misses
+        perm_available_misses = torch.randperm(n_available_misses, device=device)
+        sampled_misses_indices = perm_available_misses[:n_misses_this_batch]
+        sampled_misses = sparse_key_indices[:, sparse_this_batch_mask][
+            :, sampled_misses_indices
+        ]
 
-        index_tensor[b, *hit_locations.unbind(-1)] = sampled_hits.T
+        # Randomly distribute sampled hits and misses among hit/miss key pointers
+        # Hits
+        hits_nonzero = hits_this_batch_mask.nonzero()
+        perm_hit_keys = torch.randperm(hits_nonzero.size(0), device=device)
+        hit_pointers = hits_nonzero[perm_hit_keys]
+
+        index_tensor[b, *hit_pointers.unbind(-1)] = sampled_hits.T
+
+        # Misses
+        misses_nonzero = hits_this_batch_mask.logical_not().nonzero()
+        perm_miss_keys = torch.randperm(misses_nonzero.size(0), device=device)
+        miss_pointers = misses_nonzero[perm_miss_keys]
+
+        index_tensor[b, *miss_pointers.unbind(-1)] = sampled_misses.T
 
     # Fill in indices past the specified number of queries per batch with -1 pad value
     for i, n_queries_i in enumerate(n_queries):
         index_tensor[i, n_queries_i:] = -1
+
+    # Assert we overwrote the uninitialized data
+    assert index_tensor.min() >= -1 and index_tensor.max() <= max(
+        batch_size, height, width, levels
+    )
 
     # Fill in the designated unspecified_query_indices (queries with all misses) with -1
     # pad value if requested
@@ -545,33 +555,3 @@ def batched_attn_mask_indices(sparse_tensor: Tensor, index_tensor: Tensor) -> Te
     attn_mask_indices = torch.stack([batch_indices, query_indices, h, w, lev], dim=1)
 
     return attn_mask_indices
-
-
-def create_linear_sparse_values_and_index_tensor_directly(
-    num_sparse_values: int = 20,
-    n_queries: Union[int, list[int]] = 4,
-    n_keys_per_query: int = 5,
-    embed_dim: int = 8,
-    unspecified_prob: float = 0.25,
-    device: Union[str, torch.device] = "cpu",
-    dtype: torch.dtype = torch.float32,
-) -> tuple[Tensor, Tensor]:
-    # Generate spares tensor values
-    sparse_tensor_values = torch.randn(
-        num_sparse_values, embed_dim, device=device, dtype=dtype
-    )
-
-    # Generate random is_specified_mask
-    is_specified_mask = torch.rand(n_queries, n_keys_per_query, device=device)
-    is_specified_mask = is_specified_mask > unspecified_prob
-
-    # Generate random linear index tensor
-    linear_index_tensor = torch.where(
-        is_specified_mask,
-        torch.randint(
-            0, num_sparse_values, (n_queries, n_keys_per_query), device=device
-        ),
-        torch.zeros(n_queries, n_keys_per_query, device=device, dtype=torch.long),
-    )
-
-    return sparse_tensor_values, linear_index_tensor, is_specified_mask

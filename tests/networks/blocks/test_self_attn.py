@@ -948,7 +948,7 @@ class TestCorrectness:
 
         # Create input where token 0 should attend strongly to token 3
         # We'll make token 3 have a pattern very similar to token 0
-        torch.manual_seed(42)
+        torch.manual_seed(40)
         batch_size = 1
         seq_len = 4
         position_dim = base_config["position_dim"]

@@ -14,6 +14,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
     calculate_rope,
     rotate_embeddings,
 )
+from emsim.utils.sparse_utils.batching import deconcat_add_batch_dim
 
 
 def traceable_subset_attention(
@@ -82,11 +83,13 @@ def traceable_subset_attention(
     values = values.transpose(1, 2).contiguous()
 
     # Calculate attention scores
-
-    attn_scores = torch.matmul(
-        queries.unsqueeze(-2) * scale_factor,  # (n_queries, n_heads, 1, head_dim)
-        keys.transpose(-1, -2),  # (n_queries, n_heads, head_dim, n_keys_per_query)
-    ).squeeze(-2)
+    attn_scores = (
+        torch.matmul(
+            queries.unsqueeze(-2),  # (n_queries, n_heads, 1, head_dim)
+            keys.transpose(-1, -2),  # (n_queries, n_heads, head_dim, n_keys_per_query)
+        ).squeeze(-2)
+        * scale_factor
+    )
     # attn_scores: (n_queries, n_heads, n_keys_per_query)
 
     # Apply masking and softmax
@@ -113,15 +116,15 @@ def traceable_subset_attention(
         return attn_output
     else:
         return {
-            "queries": queries,  # n_queries, n_heads, head_dim
-            # key/value: n_queries, n_keys_per_query, n_heads, head_dim
-            "keys": keys.transpose(1, 2),
-            "values": values.transpose(1, 2),
+            "queries": queries.flatten(-2, -1),  # n_queries, embed_dim
+            # key/value: n_queries, n_keys_per_query, embed_dim
+            "keys": keys.transpose(1, 2).flatten(-2, -1),
+            "values": values.transpose(1, 2).flatten(-2, -1),
             "is_specified_mask": is_specified_mask,
             "attn_scores": attn_scores,
-            "attn_scores_masked" : attn_scores_masked,
+            "attn_scores_masked": attn_scores_masked,
             "attn_weights": attn_weights,
-            "attn_output": attn_output.view(n_queries, n_heads, head_dim),
+            "attn_output": attn_output,
             "key_positions": key_positions,
             "key_rope_encoding": key_rope_encoding,
             "rope_freqs": rope_freqs,
@@ -200,14 +203,14 @@ def traceable_batched_attention(
         return attn_output
     else:
         return {
-            "queries": queries.transpose(1, 2),  # batch, seq_len, n_heads, head_dim
-            "keys": keys.transpose(1, 2),
-            "values": values.transpose(1, 2),
+            "queries": queries.transpose(1, 2).flatten(-2, -1),  # batch, seq_len, embed_dim
+            "keys": keys.transpose(1, 2).flatten(-2, -1),
+            "values": values.transpose(1, 2).flatten(-2, -1),
             "attn_mask": attn_mask,
             "attn_scores": attn_scores,  # batch, n_heads, n_queries, n_keys
             "attn_scores_masked": attn_scores_masked,
             "attn_weights": attn_weights,
-            "attn_output": attn_output.view(batch_size, n_queries, n_heads, head_dim),
+            "attn_output": attn_output,
             "key_positions": key_positions,
             "key_rope_encoding": key_rope_encoding,
             "rope_freqs": rope_freqs,
@@ -246,7 +249,10 @@ def scaled_dot_product_attention(
 
     attn_scores = query @ key.transpose(-2, -1) * scale_factor
     attn_scores_masked = attn_scores + attn_bias
-    attn_weight = torch.softmax(attn_scores_masked, dim=-1)
+    all_masked = torch.isinf(attn_scores_masked).all(-1)
+
+    attn_weight = torch.zeros_like(attn_scores_masked)
+    attn_weight[~all_masked] = torch.softmax(attn_scores_masked[~all_masked], dim=-1)
     attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
     attn_output = attn_weight @ value
     return attn_output, attn_weight, attn_scores_masked, attn_scores
@@ -256,13 +262,19 @@ def prep_batched_attention(inputs: dict[str, Any]):
     """Preps the inputs for traceable_batched_attention using the dict
     from attention_inputs
     """
-    queries = inputs["batched_query_tensor"]
+    stacked_queries = inputs["query_tensor"]
+    batch_offsets = inputs["query_batch_offsets"]
+    queries = deconcat_add_batch_dim(stacked_queries, batch_offsets)[0]
     bsz, n_queries, embed_dim = queries.shape
     n_heads = inputs["n_heads"]
 
-    source_tensor, source_mask = sparse_tensor_to_dense_with_mask(
-        inputs["sparse_tensor"]
+    sparse_tensor = torch.sparse_coo_tensor(
+        inputs["sparse_tensor"].indices(),
+        inputs["sparse_tensor_values"],
+        size=inputs["sparse_tensor"].shape,
     )
+
+    source_tensor, source_mask = sparse_tensor_to_dense_with_mask(sparse_tensor)
     _, height, width, n_levels = source_mask.shape
 
     # make attn_mask: True means invalid attention interaction
@@ -288,8 +300,8 @@ def prep_batched_attention(inputs: dict[str, Any]):
     key_weight, value_weight = inputs["key_weight"], inputs["value_weight"]
     key_bias, value_bias = inputs["key_bias"], inputs["value_bias"]
 
-    key_rope_encoding = inputs["batched_key_rope_encoding"]
-    key_positions = inputs["batched_key_positions"]
+    key_rope_encoding = inputs["key_rope_encoding"]
+    key_positions = inputs["key_positions"]
     rope_freqs = inputs["rope_freqs"]
 
     scale_factor = inputs["scale_factor"]

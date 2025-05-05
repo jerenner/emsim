@@ -27,6 +27,20 @@ def ordered_autograd_inputs(
     if isinstance(inputs, tuple):
         inputs = inputs[0]
 
+    # shape: sum(n_queries), n_keys_per_query, n_heads, head_dim//2
+    key_rope_encoding = (
+        inputs["key_rope_encoding"][inputs["index_tensor"].unbind(-1)]
+        if inputs["key_rope_encoding"] is not None
+        else None
+    )
+
+    # shape: sum(n_queries), n_keys_per_query, position_dim
+    key_positions = (
+        inputs["key_positions"][inputs["index_tensor"].unbind(-1)]
+        if inputs["key_positions"] is not None
+        else None
+    )
+
     return (
         inputs["query_tensor"],
         inputs["n_heads"],
@@ -37,8 +51,8 @@ def ordered_autograd_inputs(
         inputs["value_weight"],
         inputs["key_bias"],
         inputs["value_bias"],
-        inputs["key_rope_encoding"],
-        inputs["key_positions"],
+        key_rope_encoding,
+        key_positions,
         inputs["rope_freqs"],
         inputs["scale_factor"],
         inputs["dropout_p"],
@@ -53,7 +67,7 @@ def set_requires_grad(inputs: dict[str, Any], tensor_names: Union[str, list[str]
         tensor_names = [tensor_names]
     for name in tensor_names:
         if name in modified_inputs and modified_inputs[name] is not None:
-            tensor: Tensor = modified_inputs[name].clone()
+            tensor: Tensor = modified_inputs[name].detach().clone()
             modified_inputs[name] = tensor.requires_grad_(True)
     return modified_inputs
 
@@ -186,7 +200,6 @@ def exhaustive_attention_input_configs(
     # Sample dtype
     dtypes = [dtypes] if isinstance(dtypes, torch.dtype) else dtypes
     dtype = draw(st.sampled_from(dtypes))
-
 
     return {
         "n_queries": n_queries,

@@ -3,7 +3,6 @@ from typing import Any
 import pytest
 import torch
 from hypothesis import given, settings
-from torch import Tensor
 
 from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
     GatherAndSubsetAttentionFunction,

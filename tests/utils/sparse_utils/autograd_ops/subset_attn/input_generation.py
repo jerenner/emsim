@@ -1,6 +1,5 @@
 from typing import Optional, Union, Literal
 
-import math
 import numpy as np
 from torch import Tensor
 import torch
@@ -27,7 +26,6 @@ def attention_inputs(
     index_hit_rate: float = 0.75,
     unspecified_query_indices: Optional[Union[int, list[int]]] = None,
     use_2d_sparse_features: bool = False,
-    generate_linear_sparse_tensor_directly: bool = False,
     device: Union[str, torch.device] = "cpu",
     dtype: torch.dtype = torch.float32,
     dropout_p: float = 0.1,
@@ -211,9 +209,6 @@ def attention_inputs(
     batched_key_positions: Optional[torch.Tensor] = None
     rope_freqs: Optional[torch.Tensor] = None
 
-    stacked_key_rope_encoding: Optional[Tensor] = None
-    stacked_key_positions: Optional[Tensor] = None
-
     if use_rope == "precomputed":
         # Precomputed RoPE encoding: Need to generate for every key for batched
         # then extract the targeted keys for stacked
@@ -224,10 +219,6 @@ def attention_inputs(
             dtype=dtype,
         )
 
-        # shape: sum(n_queries), n_keys_per_query, n_heads, head_dim//2
-        stacked_key_rope_encoding = batched_key_rope_encoding[
-            stacked_index_tensor.unbind(-1)
-        ]
     elif use_rope == "from_freqs":
         # On-the-fly RoPE encoding with key positions and frequencies
 
@@ -237,9 +228,6 @@ def attention_inputs(
             device=device,
             dtype=dtype,
         )
-
-        # shape: sum(n_queries), n_keys_per_query, position_dim
-        stacked_key_positions = batched_key_positions[stacked_index_tensor.unbind(-1)]
 
         rope_freqs = torch.rand(
             position_dim,

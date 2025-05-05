@@ -1,10 +1,10 @@
 import math
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 import numpy as np
 import pytest
 import torch
-from hypothesis import assume, example, given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from torch import Tensor, nn
@@ -12,14 +12,12 @@ from torch import Tensor, nn
 from emsim.networks.positional_encoding.rope import (
     RoPEEncodingND,
     get_multilevel_freq_group_pattern,
-    prep_multilevel_positions,
 )
 from emsim.networks.transformer.blocks.self_attn import (
     MultilevelSelfAttentionBlockWithRoPE,
 )
 from tests.networks.conftest import (
     ModuleHook,
-    tensor_unit_normal,
     positions_strategy,
 )
 
@@ -949,7 +947,6 @@ class TestCorrectness:
         # Create input where token 0 should attend strongly to token 3
         # We'll make token 3 have a pattern very similar to token 0
         torch.manual_seed(40)
-        batch_size = 1
         seq_len = 4
         position_dim = base_config["position_dim"]
         embed_dim = base_config["embed_dim"]

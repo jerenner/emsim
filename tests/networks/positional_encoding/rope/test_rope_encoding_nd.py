@@ -5,13 +5,12 @@ import torch
 from torch import Tensor
 import numpy as np
 from math import isclose
-from hypothesis import given, settings, example, assume, HealthCheck
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays, array_shapes
 
 from emsim.networks.positional_encoding.rope import (
     RoPEEncodingND,
-    get_multilevel_freq_group_pattern,
 )
 
 from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (

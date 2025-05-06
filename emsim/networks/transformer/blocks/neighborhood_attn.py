@@ -23,6 +23,45 @@ from emsim.utils.sparse_utils.validation import validate_nd
 
 
 class SparseNeighborhoodAttentionBlock(nn.Module):
+    """Sparse neighborhood attention block for multi-level feature maps.
+
+    This module performs sparse attention over local neighborhoods at
+    multiple resolution levels. Each query attends only to keys in its spatial
+    neighborhood, with configurable neighborhood sizes at different resolution levels.
+    This enables hierarchical feature aggregation while maintaining computational
+    efficiency through sparse attention.
+
+    The implementation uses rotary position encodings (RoPE) to incorporate spatial
+    and level position information into the attention mechanism. This allows the
+    attention to be aware of relative spatial relationships between queries and keys.
+
+    Args:
+        embed_dim (int): Dimensionality of input and output embeddings.
+        n_heads (int): Number of attention heads.
+        n_levels (int, optional): Number of resolution levels. Default: 4
+        neighborhood_sizes (Union[Tensor, list[int]], optional): List of odd integers
+            specifying the neighborhood size (window width) at each level.
+            Default: [3, 5, 7, 9]
+        position_dim (int, optional): Dimensionality of spatial positions.
+            Default: 2 (for 2D positions).
+        dropout (float, optional): Dropout probability for attention weights and
+            output projection. Default: 0.0.
+        bias (bool, optional): Whether to use bias in linear projections. Default: False.
+        norm_first (bool, optional): Whether to apply layer normalization before
+            attention. Default: True.
+        rope_spatial_base_theta (float, optional): Base theta value for RoPE spatial
+            dimensions. Larger values result in lower-frequency rotations, suitable for
+            dimensions with greater spatial scale. Default: 100.0.
+        rope_level_base_theta (float, optional): Base theta value for RoPE level
+            dimension. Default: 10.0.
+        rope_share_heads (bool, optional): Whether to share RoPE frequencies across
+            attention heads. Default: False.
+        rope_freq_group_pattern (str, optional): Pattern to use for grouping RoPE
+            frequencies. Options: "single", "partition", "closure". Default: "single".
+        rope_enforce_freq_groups_equal (bool, optional): Whether to enforce equal
+            division of frequency dimensions across frequency groups. Default: True.
+    """
+
     def __init__(
         self,
         embed_dim: int,
@@ -81,8 +120,50 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
     ) -> Tensor:
+        """Forward pass of sparse neighborhood attention.
+
+        For each query, computes multi-head attention over keys in its spatial
+        neighborhood at multiple resolution levels. The neighborhood size at each
+        level is determined by the corresponding value in `neighborhood_sizes`.
+
+        Args:
+            query (Tensor): Query features of shape [n_queries, embed_dim].
+            query_spatial_positions (Tensor): Spatial positions of queries,
+                shape [n_queries, position_dim].
+            query_batch_offsets (Tensor): Tensor of shape [batch_size+1]
+                indicating where each batch starts in the queries.
+            stacked_feature_maps (Tensor): Sparse tensor containing feature maps
+                stacked across all levels, with total shape
+                [batch, *spatial_dims, levels, embed_dim], where the last dimension
+                is dense and the others are sparse.
+            level_spatial_shapes (Tensor): Spatial dimensions of each level,
+                shape [n_levels, position_dim]. Contains the height, width, etc.
+                of feature maps at each resolution level.
+
+        Returns:
+            Tensor: Output embeddings after neighborhood attention,
+                shape [n_queries, embed_dim].
+
+        Raises:
+            ValueError: If input tensors don't have expected shapes.
+        """
+
         validate_nd(query, 2, "query")
+        validate_nd(query_spatial_positions, 2, "query_spatial_positions")
         n_queries = query.shape[0]
+        if query.size(1) != self.position_dim:
+            raise ValueError(
+                "Expected second dim of query_spatial_positions to be equal to"
+                f"position dim (={self.position_dim}), but got shape {query.shape}"
+            )
+
+        req_feat_map_dim = self.position_dim + 3
+        if stacked_feature_maps.ndim != req_feat_map_dim:
+            raise ValueError(
+                f"Expected stacked_feature_maps to have {req_feat_map_dim} total "
+                f"dimensions (batch + position_dims (={self.position_dim}) + level + "
+                f"embed_dim), but got shape {stacked_feature_maps.shape}"
+            )
 
         residual = query
         if self.norm_first:
@@ -93,7 +174,8 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         max_spatial_level = level_spatial_shapes.argmax(-2).unique()
         assert max_spatial_level.numel() == 1
 
-        # Add level "dimension" to query position for pos encoding
+        # Add level "dimension" to query position for pos encoding.
+        # We treat each query as living in the full-scale level
         query_spatial_level_positions = query_spatial_positions.new_zeros(
             (n_queries, self.pos_encoding.position_dim)
         )

@@ -126,11 +126,9 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
 
     This module applies self-attention across tokens from multiple resolution levels,
     using Rotary Position Encodings (RoPE) to encode the spatial positions of tokens.
-    It handles batched inputs in a memory-efficient way by working with concatenated
-    sequences and batch offsets to avoid padding.
 
     Args:
-        embed_dim (int): Dimensionality of input embeddings.
+        embed_dim (int): Dimensionality of input and output embeddings.
         n_heads (int): Number of attention heads.
         position_dim (int, optional): Dimensionality of spatial positions.
             Default: 2 (for 2D positions).

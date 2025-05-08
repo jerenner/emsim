@@ -11,7 +11,7 @@ from emsim.utils.sparse_utils.batching.batching import (
 )
 from emsim.utils.sparse_utils.ops.linear.linear import batch_sparse_index_linear
 from emsim.utils.sparse_utils.ops.subset_attn.subset_attn import (
-    batch_sparse_index_subset_attn,
+    BatchSparseIndexSubsetAttention,
 )
 
 from emsim.networks.positional_encoding.rope import (
@@ -79,15 +79,25 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         rope_enforce_freq_groups_equal: bool = True,
     ):
         super().__init__()
+        if len(neighborhood_sizes) != n_levels:
+            raise ValueError(
+                "Expected len(neighborhood_sizes) to be equal to n_levels, but got "
+                f"{len(neighborhood_sizes)=} and {n_levels=}"
+            )
+        if any(size % 2 != 1 for size in neighborhood_sizes):
+            raise ValueError(
+                "Expected neighborhood_sizes to be all odd integers, but got "
+                f"{neighborhood_sizes}"
+            )
         self.embed_dim = embed_dim
         self.n_heads = n_heads
+        self.n_levels = n_levels
         self.position_dim = position_dim
         self.norm_first = norm_first
 
         self.norm = nn.LayerNorm(embed_dim)
 
         self.q_in_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.kv_in_proj = nn.Linear(embed_dim, 2 * embed_dim, bias=bias)
         self.pos_encoding = RoPEEncodingND(
             position_dim + 1,  # +1 for level dimension
             embed_dim,
@@ -99,11 +109,11 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
                 [rope_spatial_base_theta] * position_dim + [rope_level_base_theta]
             ],
         )
+        self.subset_attn = BatchSparseIndexSubsetAttention(embed_dim, use_bias=bias)
         self.attn_drop_rate = dropout
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.out_proj_drop = nn.Dropout(dropout)
 
-        self.n_levels = n_levels
         self.register_buffer(
             "rope_spatial_base_theta", torch.tensor(rope_spatial_base_theta)
         )
@@ -111,6 +121,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             "rope_level_base_theta", torch.tensor(rope_level_base_theta)
         )
         self.neighborhood_sizes = torch.tensor(neighborhood_sizes, dtype=torch.int)
+        self.rope_share_heads = rope_share_heads
 
     def forward(
         self,
@@ -151,9 +162,9 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         validate_nd(query, 2, "query")
         validate_nd(query_spatial_positions, 2, "query_spatial_positions")
         n_queries = query.shape[0]
-        if query.size(1) != self.position_dim:
+        if query_spatial_positions.size(1) != self.position_dim:
             raise ValueError(
-                "Expected second dim of query_spatial_positions to be equal to"
+                "Expected second dim of query_spatial_positions to be equal to "
                 f"position dim (={self.position_dim}), but got shape {query.shape}"
             )
 
@@ -171,8 +182,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         q = self.q_in_proj(query)
 
         # Prep query
-        max_spatial_level = level_spatial_shapes.argmax(-2).unique()
-        assert max_spatial_level.numel() == 1
+        max_spatial_level = level_spatial_shapes.prod(1).argmax(0)
 
         # Add level "dimension" to query position for pos encoding.
         # We treat each query as living in the full-scale level
@@ -191,52 +201,42 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             query_spatial_positions, level_spatial_shapes, self.neighborhood_sizes
         )
         keys_per_query = nhood_spatial_indices.size(1)
-
-        # Initialize the full sparse indices tensor for keys:
-        # (batch, *spatial_dims, level)
-        key_index_tensor = query_spatial_positions.new_zeros(
-            n_queries, keys_per_query, self.position_dim + 2
-        )
-        # fill in batch indices
-        for i in range(query_batch_offsets.size(0) - 1):
-            batch_start, batch_end = query_batch_offsets[i], query_batch_offsets[i + 1]
-            key_index_tensor[batch_start:batch_end, :, 0] = i
-        key_index_tensor[:, :, 1:-1] = nhood_spatial_indices
-        key_index_tensor[:, :, -1] = nhood_level_indices
-
-        # Get the key RoPE components
-        key_rope_freqs = self.pos_encoding.grouped_rope_freqs_tensor(
-            self.pos_encoding.freqs
-        )
-        key_positions = prep_multilevel_positions(
-            key_index_tensor[..., 1:-1],
-            key_index_tensor[:, 0],
-            key_index_tensor[:, -1],
-            level_spatial_shapes,
-        )
-
-        # Get weight tensors for attention call
-        key_weight, value_weight = self.kv_in_proj.weight.chunk(2, -1)
-        if self.kv_in_proj.bias is not None:
-            key_bias, value_bias = self.kv_in_proj.bias.chunk(2, -1)
-        else:
-            key_bias, value_bias = None, None
-
         assert nhood_spatial_indices.shape == (
             n_queries,
             keys_per_query,
-            query_spatial_positions.size(-1),
+            self.position_dim,
         )
 
-        x = batch_sparse_index_subset_attn(
+        # Initialize the full sparse indices tensor for keys:
+        # (batch, *spatial_dims, level)
+        key_index_tensor = query_spatial_positions.new_empty(
+            n_queries, keys_per_query, self.position_dim + 2
+        )
+        # expand batch and level indices to broadcasted dims
+        key_batch_indices = batch_offsets_to_indices(query_batch_offsets)
+        key_batch_indices = key_batch_indices[:, None].expand(-1, keys_per_query)
+        key_level_indices = nhood_level_indices.unsqueeze(0).expand(n_queries, -1)
+
+        key_index_tensor[:, :, 0] = key_batch_indices
+        key_index_tensor[:, :, 1:-1] = nhood_spatial_indices
+        key_index_tensor[:, :, -1] = key_level_indices
+
+        # Get the key RoPE components
+        key_positions = prep_multilevel_positions(
+            nhood_spatial_indices,
+            key_batch_indices,
+            key_level_indices,
+            level_spatial_shapes,
+        )
+        key_rope_freqs = self.pos_encoding.grouped_rope_freqs_tensor(
+            self.pos_encoding.freqs
+        )
+
+        x, _ = self.subset_attn(
             stacked_feature_maps,
             key_index_tensor,
             query_rotated,
             self.n_heads,
-            key_weight,
-            value_weight,
-            key_bias,
-            value_bias,
             key_positions=key_positions,
             rope_freqs=key_rope_freqs,
         )
@@ -253,7 +253,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
     def reset_parameters(self):
         self.norm.reset_parameters()
         self.q_in_proj.reset_parameters()
-        self.kv_in_proj.reset_parameters()
+        self.subset_attn.reset_parameters()
         self.pos_encoding.reset_parameters()
         self.out_proj.reset_parameters()
 

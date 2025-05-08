@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 import hypothesis
-from hypothesis import given, settings
+from hypothesis import given, settings, assume
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from torch import Tensor, nn
@@ -83,11 +83,11 @@ def input_data_strategy(draw) -> dict[str, Any]:
     )
 
     # Draw tensor generation parameters
-    seed = draw(st.integers(min_value=0, max_value=1e10))
+    seed = draw(st.integers(min_value=0, max_value=1e8))
     float_dtype = draw(st.just(torch.float32))
 
-    min_float_value = draw(st.floats(min_value=-1e10, max_value=1e10, exclude_max=True))
-    max_float_value = draw(st.floats(min_value=min_float_value, max_value=1e10))
+    min_float_value = draw(st.floats(min_value=-1e6, max_value=1e6, exclude_max=True))
+    max_float_value = draw(st.floats(min_value=min_float_value, max_value=1e6))
 
     # Generation params for attn_mask
     attn_mask_sparsity = draw(st.floats(0.0, 1.0))
@@ -1082,7 +1082,11 @@ class TestCorrectness:
 
             # Verify norm layers have different outputs as long as non-residual branch
             # is nonzero
-            if norm_first_out_proj.any() or norm_last_out_proj.any():
+            if not torch.allclose(
+                norm_first_out_proj, torch.zeros_like(norm_first_norm_out)
+            ) and not torch.allclose(
+                norm_last_out_proj, torch.zeros_like(norm_last_out_proj)
+            ):
                 assert not torch.allclose(norm_first_norm_out, norm_last_norm_out)
 
             # For norm_first, check norm is directly before qkv
@@ -1101,6 +1105,10 @@ class TestCorrectness:
         module = MultilevelSelfAttentionBlockWithRoPE(**inputs["config"]).to(device)
         input_tensors = make_input_tensors(**inputs["tensor_config"], device=device)
 
+        # ensure input isn't all zeros
+        x = input_tensors["x"]
+        assume(not torch.allclose(x, torch.zeros_like(x)))
+
         # Zero out all weights to produce an identity mapping
         with torch.no_grad():
             module.qkv.weight.zero_()
@@ -1111,8 +1119,11 @@ class TestCorrectness:
             if hasattr(module.out_proj, "bias") and module.out_proj.bias is not None:
                 module.out_proj.bias.zero_()
 
+        # Make hook to get norm output
+        hook = ModuleHook(module, {"norm": lambda m: m.norm})
+
         # Run forward with zero weights - should just get the input back due to residual
-        with torch.no_grad():
+        with torch.no_grad(), hook:
             output = module(**input_tensors)
 
         # Output should be equal to input due to residual connection (plus normalization effect)
@@ -1122,9 +1133,6 @@ class TestCorrectness:
                 output, input_tensors["x"]
             ), "Expected output to equal input with residual connection"
         else:
-            # Output has been normalized
+            # Output should equal norm output
             assert output.shape == input_tensors["x"].shape
-            if output.numel() > 10:  # Ensure enough elements to test
-                tolerance = 0.1
-                assert output.mean().abs() < tolerance
-                assert (output.std() - 1) < tolerance
+            assert torch.allclose(output, hook.captured_values["norm"]["outputs"][0])

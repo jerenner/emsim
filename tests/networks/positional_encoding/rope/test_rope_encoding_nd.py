@@ -176,7 +176,7 @@ def rope_config_strategy(draw):
         position_min_key = draw(st.none())
         position_max_key = draw(st.none())
 
-    seed = draw(st.integers(min_value=0, max_value=1e10))
+    seed = draw(st.integers(min_value=0, max_value=1e8))
 
     return {
         "config": {

@@ -158,7 +158,7 @@ def neighborhood_data_strategy(draw, require_grads: bool = False) -> dict[str, A
     )
 
     # Draw tensor generation parameters
-    seed = draw(st.integers(0, 10000))
+    seed = draw(st.integers(0, 1e8))
     float_dtype = draw(st.just(torch.float32))
 
     min_float_value = draw(st.floats(min_value=-1e6, max_value=1e6, exclude_max=True))
@@ -962,8 +962,11 @@ class TestCorrectness:
             if module.out_proj.bias is not None:
                 module.out_proj.bias.zero_()
 
+        # Make hook to get norm output
+        hook = ModuleHook(module, {"norm": lambda m: m.norm})
+
         # Run forward pass
-        with torch.no_grad():
+        with torch.no_grad(), hook:
             output = module(**input_data)
 
         # With zero weights, output should equal input (for norm_first=True)
@@ -971,12 +974,9 @@ class TestCorrectness:
         if module.norm_first:
             assert torch.allclose(output, query)
         else:
-            # For norm_last, check that normalization happened
+            # Output should equal norm output
             assert output.shape == query.shape
-            # Check mean close to 0 and var close to 1
-            if (n := output.numel()) > 10:  # Need enough elements
-                assert torch.abs(output.mean()) < 0.1
-                assert torch.abs(output.std() - 1.0) < 3 / math.sqrt(2 * (n - 1))
+            assert torch.allclose(output, hook.captured_values["norm"]["outputs"][0])
 
     def test_neighborhood_attention(self, base_config: dict[str, Any], device: str):
         """Test that neighborhoods are properly attended to."""

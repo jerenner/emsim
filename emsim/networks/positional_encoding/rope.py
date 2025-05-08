@@ -5,7 +5,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
     calculate_rope,
     rotate_embeddings,
 )
-from emsim.utils.sparse_utils.validation import validate_nd
+from emsim.utils.sparse_utils.validation import validate_nd, validate_atleast_nd
 from emsim.utils.misc_utils import can_broadcast_shapes
 
 import torch
@@ -772,30 +772,30 @@ def prep_multilevel_positions(
     This enables consistent position encoding across hierarchical feature maps.
 
     Args:
-        spatial_positions (Tensor): Indices or positions of shape [num_points, position_dim],
+        spatial_positions (Tensor): Indices or positions of shape [..., position_dim],
             where each row contains the N-D position of each point. If floating point,
             they're treated as coordinates; if integer, they're treated as indices.
-        batch_indices (Tensor): Integer tensor of shape [num_points], containing the
+        batch_indices (Tensor): Integer tensor of shape [...], containing the
             batch index for each position in spatial_positions.
-        level_indices (Tensor): Integer tensor of shape [num_points], containing the
+        level_indices (Tensor): Integer tensor of shape [...], containing the
             level index for each position in spatial_positions.
         level_spatial_shapes (Tensor): Tensor of shape [num_levels, 2] or
             [batch_size, num_levels, 2] specifying the spatial dimensions
             (height, width) of each level.
 
     Returns:
-        Tensor: Rescaled positions of shape [num_points, position_dim + 1] with floating
-            point dtype, where the second dimension has the level index concatenated onto
+        Tensor: Rescaled positions of shape [..., position_dim + 1] with floating
+            point dtype, where the last dimension has the level index concatenated onto
             the end of the spatial coordinates, and the spatial coordinates are
             standardized to the finest resolution level.
 
     Raises:
         ValueError: If tensors don't have the expected shape, dimensions, or dtypes.
     """
-    validate_nd(spatial_positions, 2, "spatial_positions")
-    validate_nd(batch_indices, 1, "batch_indices")
-    validate_nd(level_indices, 1, "level_indices")
-    num_points = spatial_positions.size(0)
+    validate_atleast_nd(spatial_positions, 2, "spatial_positions")
+    batch_dims = spatial_positions.ndim - 1
+    validate_nd(batch_indices, batch_dims, "batch_indices")
+    validate_nd(level_indices, batch_dims, "level_indices")
 
     if not torch.is_floating_point(spatial_positions):
         # convert from indices to coordinates of pixel centers
@@ -806,11 +806,11 @@ def prep_multilevel_positions(
 
     # Initialize output tensor
     multilevel_positions = spatial_positions.new_zeros(
-        num_points, spatial_positions.size(1) + 1
+        spatial_positions.shape[:-1] + (spatial_positions.size(-1) + 1,)
     )
 
     # Early exit
-    if num_points == 0:
+    if multilevel_positions.numel() == 0:
         return multilevel_positions
 
     if level_spatial_shapes.ndim == 2:
@@ -823,12 +823,12 @@ def prep_multilevel_positions(
     indexed_spatial_shapes = level_spatial_shapes[batch_indices, level_indices]
 
     # Fill in rescaled positions
-    multilevel_positions[:, :-1] = spatial_positions / (
+    multilevel_positions[..., :-1] = spatial_positions / (
         indexed_spatial_shapes / max_spatial_shapes
     )
 
     # Fill in level indices
-    multilevel_positions[:, -1] = level_indices.to(multilevel_positions)
+    multilevel_positions[..., -1] = level_indices.to(multilevel_positions)
 
     return multilevel_positions
 

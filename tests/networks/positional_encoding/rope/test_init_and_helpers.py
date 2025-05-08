@@ -582,18 +582,19 @@ class TestPrepMultilevelPositions:
         )
 
     def test_prep_multilevel_positions_batched_shapes(self, device):
-        # Sample indices
         spatial_indices = torch.tensor(
             [
                 [10, 20],  # batch 0, level 0
-                [5, 15],  # batch 1, level 1
+                [10, 30],  # batch 0, level 1
+                [50, 25],  # batch 1, level 0
+                [75, 30],  # batch 1, level 1
             ],
             dtype=torch.long,
             device=device,
         )
 
-        batch_indices = torch.tensor([0, 1], device=device)
-        level_indices = torch.tensor([0, 1], device=device)
+        batch_indices = torch.tensor([0, 0, 1, 1], device=device)
+        level_indices = torch.tensor([0, 1, 0, 1], device=device)
 
         # Batched spatial shapes (batch, level, 2)
         spatial_shapes = torch.tensor(
@@ -603,7 +604,7 @@ class TestPrepMultilevelPositions:
                     [50, 50],  # level 1
                 ],
                 [  # batch 1
-                    [200, 200],  # level 0
+                    [300, 300],  # level 0
                     [100, 100],  # level 1
                 ],
             ],
@@ -618,6 +619,57 @@ class TestPrepMultilevelPositions:
             spatial_indices.shape[0],
             spatial_indices.shape[1] + 1,
         )
+        spatial_scaler = torch.tensor([1, 2, 1, 3], device=device).view(4, 1)
+        expected_positions = torch.empty_like(positions)
+        expected_positions[:, -1] = level_indices.to(expected_positions)
+        expected_positions[:, :-1] = (spatial_indices + 0.5) * spatial_scaler
+        assert torch.allclose(positions, expected_positions)
+
+    def test_prep_multilevel_positions_batch_dims(self, device):
+        # Indices with 2 leading batch dims
+        spatial_indices = torch.tensor(
+            [
+                [10, 20],  # batch 0, level 0
+                [10, 30],  # batch 0, level 1
+                [50, 25],  # batch 1, level 0
+                [75, 30],  # batch 1, level 1
+            ],
+            dtype=torch.long,
+            device=device,
+        ).view(2, 2, 2)
+
+        batch_indices = torch.tensor([0, 0, 1, 1], device=device).view(2, 2)
+        level_indices = torch.tensor([0, 1, 0, 1], device=device).view(2, 2)
+
+        # Batched spatial shapes (batch, level, 2)
+        spatial_shapes = torch.tensor(
+            [
+                [  # batch 0
+                    [100, 100],  # level 0
+                    [50, 50],  # level 1
+                ],
+                [  # batch 1
+                    [300, 300],  # level 0
+                    [100, 100],  # level 1
+                ],
+            ],
+            dtype=torch.float,
+            device=device,
+        )
+
+        positions = prep_multilevel_positions(
+            spatial_indices, batch_indices, level_indices, spatial_shapes
+        )
+        assert positions.shape == (
+            spatial_indices.shape[0],
+            spatial_indices.shape[1],
+            spatial_indices.shape[2] + 1,
+        )
+        spatial_scaler = torch.tensor([1, 2, 1, 3], device=device).view(2, 2, 1)
+        expected_positions = torch.empty_like(positions)
+        expected_positions[:, :, -1] = level_indices.to(expected_positions)
+        expected_positions[:, :, :-1] = (spatial_indices + 0.5) * spatial_scaler
+        assert torch.allclose(positions, expected_positions)
 
 
 @pytest.mark.cuda_if_available

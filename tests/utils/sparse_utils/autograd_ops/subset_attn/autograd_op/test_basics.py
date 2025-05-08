@@ -10,7 +10,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
 )
 
 from ..input_generation import attention_inputs
-from .conftest import (
+from ..conftest import (
     DIFFERENTIABLE_TENSOR_NAMES,
     ordered_autograd_inputs,
     set_requires_grad,

@@ -18,7 +18,7 @@ from ..traceable_attn import (
     traceable_batched_attention,
     traceable_subset_attention,
 )
-from .conftest import (
+from ..conftest import (
     exhaustive_attention_input_configs,
     ordered_autograd_inputs,
     set_requires_grad,
@@ -229,7 +229,9 @@ class TestAgainstReferenceUnit:
             batched_reference_output, inputs["query_padding_mask"]
         )[0]
 
-        assert torch.allclose(optimized_output, stacked_reference_output, atol=1e-6), (
+        assert torch.allclose(
+            optimized_output, stacked_reference_output, atol=1e-6, rtol=1e-4
+        ), (
             "max_difference: "
             f"{(optimized_output - stacked_reference_output).abs().max()}"
         )

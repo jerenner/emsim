@@ -1,7 +1,7 @@
 from typing import Optional
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 from emsim.utils.sparse_utils.indexing.script_funcs import get_sparse_index_mapping
 
@@ -155,3 +155,64 @@ def batch_sparse_index_subset_attn(
     assert is_specified_mask.shape == index_tensor.shape[:-1]
 
     return attended, is_specified_mask
+
+
+class BatchSparseIndexSubsetAttention(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        use_bias: bool = False,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.use_bias = use_bias
+
+        self.kv_proj = nn.Linear(embed_dim, embed_dim * 2, bias=use_bias, dtype=dtype)
+
+    def forward(
+        self,
+        sparse_tensor: Tensor,
+        index_tensor: Tensor,
+        query_tensor: Tensor,
+        n_heads: int,
+        key_rope_encoding: Optional[Tensor] = None,
+        key_positions: Optional[Tensor] = None,
+        rope_freqs: Optional[Tensor] = None,
+        scale_factor: Optional[float] = None,
+        check_all_specified: bool = False,
+    ):
+        kv_params = self.kv_params()
+
+        return batch_sparse_index_subset_attn(
+            sparse_tensor,
+            index_tensor,
+            query_tensor,
+            n_heads,
+            key_weight=kv_params["key_weight"],
+            value_weight=kv_params["value_weight"],
+            key_bias=kv_params["key_bias"],
+            value_bias=kv_params["value_bias"],
+            key_rope_encoding=key_rope_encoding,
+            key_positions=key_positions,
+            rope_freqs=rope_freqs,
+            scale_factor=scale_factor,
+            check_all_specified=check_all_specified,
+        )
+
+    def kv_params(self):
+        key_weight, value_weight = self.kv_proj.weight.chunk(2, dim=0)
+        if self.kv_proj.bias is not None:
+            key_bias, value_bias = self.kv_proj.bias.chunk(2, dim=0)
+        else:
+            key_bias, value_bias = None, None
+
+        return {
+            "key_weight": key_weight,
+            "value_weight": value_weight,
+            "key_bias": key_bias,
+            "value_bias": value_bias,
+        }
+
+    def reset_parameters(self):
+        self.kv_proj.reset_parameters()

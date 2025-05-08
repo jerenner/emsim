@@ -10,7 +10,7 @@ from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
 
 from ..input_generation import attention_inputs
 from ..traceable_attn import traceable_subset_attention
-from .conftest import (
+from ..conftest import (
     exhaustive_attention_input_configs,
     ordered_autograd_inputs,
     set_requires_grad,

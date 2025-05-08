@@ -3,7 +3,7 @@ import torch
 
 # Import the functions to test
 from emsim.utils.sparse_utils.indexing.script_funcs import (
-    flattened_indices,
+    flatten_sparse_indices,
     linearize_sparse_and_index_tensors,
     get_sparse_index_mapping,
     gather_and_mask,
@@ -20,7 +20,7 @@ class TestFlattenedIndices:
         sparse_tensor = torch.sparse_coo_tensor(i, v, shape).coalesce()
 
         # Flatten the first two dimensions
-        new_indices, new_shape, offsets = flattened_indices(sparse_tensor, 0, 1)
+        new_indices, new_shape, offsets = flatten_sparse_indices(sparse_tensor, 0, 1)
 
         # Check results
         assert new_shape.shape[0] == 2  # Should be (9, 2)
@@ -44,7 +44,7 @@ class TestFlattenedIndices:
         sparse_tensor = torch.sparse_coo_tensor(i, v, shape).coalesce()
 
         # Flatten just the first dimension (no change expected)
-        new_indices, new_shape, offsets = flattened_indices(sparse_tensor, 0, 0)
+        new_indices, new_shape, offsets = flatten_sparse_indices(sparse_tensor, 0, 0)
 
         assert torch.allclose(new_indices, i)
         assert torch.allclose(new_shape, torch.tensor(shape, device=device))

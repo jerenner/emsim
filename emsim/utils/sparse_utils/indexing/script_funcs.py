@@ -1,9 +1,93 @@
+from typing import Optional
+
 import torch
 from torch import Tensor
 
 
 @torch.jit.script
-def flattened_indices(
+def _make_linear_offsets(dim_sizes: Tensor) -> Tensor:
+    """Computes the strides/offsets to transform a multidimensional index into
+    a flattened scalar index.
+
+    Args:
+        dim_sizes (Tensor): Tensor of dimension sizes, shape [N]
+
+    Returns:
+        Tensor: Linear offsets for each dimension, shape [N]. Last dimension
+            has stride 1, first has prod(sizes[1:])
+    """
+    # append a trailing 1 so cumprod gives us the "next" stride
+    dim_sizes_1 = dim_sizes.new_ones(dim_sizes.size(0) + 1)
+    dim_sizes_1[:-1] = dim_sizes
+
+    # calculate linear offsets for each multidimensional axis's step
+    # i.e., for dims [d0, d1, d2], the offsets would be [d1*d2, d2, 1].
+    # we accomplish this with a reversed cumprod
+    reverse_cumprod = dim_sizes_1.flip([0]).cumprod(0).flip([0])
+
+    # drop the first element (total number of indices)
+    offsets = reverse_cumprod[1:]
+
+    return offsets
+
+
+@torch.jit.script
+def flatten_nd_indices(indices: Tensor, sizes: Tensor) -> tuple[Tensor, Tensor]:
+    """Flattens N-dimensional indices into 1-dimensional scalar indices
+
+    Args:
+        indices (Tensor): Integer coordinate tensor of shape [B, N], where N
+            is the number of dimensions to be flattened and B is the batch dimension.
+        sizes (Tensor): Extents of every dimension, of shape [N]
+
+    Returns:
+        flat_indices (Tensor): Flattened indices tensor, of shape [1, B]
+        offsets (Tensor): Strides that were used for flattening (needed for unflatten),
+            of shape [N]
+    """
+    offsets = _make_linear_offsets(sizes)  # [N]
+    flat_indices = (indices * offsets.unsqueeze(-1)).sum(0, keepdim=True)
+    return flat_indices, offsets
+
+
+@torch.jit.script
+def unflatten_nd_indices(
+    flat_indices: Tensor, dim_sizes: Tensor, offsets: Optional[Tensor] = None
+) -> Tensor:
+    """Reconstructs ('unflattens') N-D indices from 1D 'flattened' indices.
+
+    Args:
+        flat_indices (Tensor): Flat indices tensor of shape [1, B]
+        dim_sizes (Tensor): Original sizes of every dimension, of shape [N]
+        offsets (Optional[Tensor]): Offsets that were used for flattening, as returned
+            by _make_linear_offsets or flatten_nd_indices. If None, it will be
+            recalculated from `dim_sizes`
+
+    Returns:
+        Tensor: N-D indices tensor of shape [N, B]
+    """
+    if offsets is None:
+        offsets = _make_linear_offsets(dim_sizes)
+    N = dim_sizes.numel()
+    B = flat_indices.size(-1)
+    out = torch.empty(N, B, device=flat_indices.device, dtype=torch.long)
+
+    # integer divide by stride
+    torch.div(
+        flat_indices.expand_as(out),
+        offsets.unsqueeze(1),
+        rounding_mode="floor",
+        out=out,
+    )
+
+    # modulus by sizes
+    torch.remainder(out, dim_sizes.unsqueeze(1), out=out)
+
+    return out
+
+
+@torch.jit.script
+def flatten_sparse_indices(
     tensor: Tensor, start_axis: int, end_axis: int
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Flattens a sparse tensor's indices along specified dimensions.
@@ -36,32 +120,19 @@ def flattened_indices(
     # the sparse tensor's indices tensor
     shape = torch._shape_as_tensor(tensor).to(tensor.device)
 
-    # concatenate a 1 onto the end of the dimensions to be flattened since
-    # the trailing dimension will have a stride of 1
-    dim_sizes_1 = torch.cat(
-        [
-            shape[start_axis : end_axis + 1],
-            torch.ones(1, device=tensor.device, dtype=torch.long),
-        ]
+    sizes_to_flatten = shape[start_axis : end_axis + 1]
+
+    flattened_indices, dim_linear_offsets = flatten_nd_indices(
+        indices_to_flatten, sizes_to_flatten
     )
-
-    # calculate linear offsets for each multidimensional axis's step
-    # i.e., for dims [d0, d1, d2], the offsets would be [d1*d2, d2, 1].
-    # we accomplish this with a reversed cumprod
-    reverse_cumprod = dim_sizes_1.flip([0]).cumprod(0).flip([0])
-
-    flattened_dim_size, dim_linear_offsets = torch.split(
-        reverse_cumprod, [1, reverse_cumprod.size(0) - 1]
-    )
-
-    # compute strided 1D indices over the flattened dims by summing each axis's
-    # individual contribution
-    flattened_indices = indices_to_flatten * dim_linear_offsets.unsqueeze(-1)
-    flattened_indices = flattened_indices.sum(0, keepdim=True)
 
     # make new shape with the flattened axes stacked together
     new_shape = torch.cat(
-        [shape[:start_axis], flattened_dim_size, shape[end_axis + 1 :]]
+        [
+            shape[:start_axis],
+            torch.prod(sizes_to_flatten, 0, keepdim=True),
+            shape[end_axis + 1 :],
+        ]
     )
     # this assertion shouldn't cause a cpu sync
     assert new_shape.size(0) == tensor.ndim - (end_axis - start_axis)
@@ -114,7 +185,7 @@ def linearize_sparse_and_index_tensors(
                 "respectively."
             )
 
-    sparse_tensor_indices_linear, _, dim_linear_offsets = flattened_indices(
+    sparse_tensor_indices_linear, _, dim_linear_offsets = flatten_sparse_indices(
         sparse_tensor, 0, sparse_tensor.sparse_dim() - 1
     )
     sparse_tensor_indices_linear.squeeze_(0)
@@ -164,6 +235,14 @@ def get_sparse_index_mapping(
         device=index_tensor.device
     )
     sparse_shape = sparse_tensor_shape[:sparse_dim]
+
+    # check for empty sparse tensor
+    if sparse_tensor._nnz() == 0:
+        linear_index_tensor = index_tensor.new_zeros(index_tensor.shape[:-1])
+        is_specified_mask = index_tensor.new_zeros(
+            index_tensor.shape[:-1], dtype=torch.bool
+        )
+        return linear_index_tensor, is_specified_mask
 
     # Check for out of bounds indices (below 0 or outside tensor dim)
     out_of_bounds_indices = torch.any(index_tensor < 0, -1)
@@ -217,7 +296,7 @@ def gather_and_mask(
     indices and zeros out values where the mask is False.
 
     Args:
-        values (Tensor): Source tensor to gather from, must be 1D with shape (N)
+        values (Tensor): Source tensor to gather from, may be 1D with shape (N)
             or n-D with shape (N, D0, D1, ...), where N is the number of elements
             and D are potentially multiple feature dimensions.
         indices (Tensor): Long tensor of indices into the first dimension of values.

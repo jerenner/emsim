@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-from emsim.utils.sparse_utils.indexing.script_funcs import flattened_indices
+from emsim.utils.sparse_utils.indexing.script_funcs import flatten_sparse_indices
 
 
 def sparse_squeeze_dense_dim(tensor: Tensor, dim: int) -> Tensor:
@@ -73,7 +73,7 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
     assert end_axis <= tensor.ndim
     tensor = tensor.coalesce()
 
-    new_indices, new_shape, _ = flattened_indices(tensor, start_axis, end_axis)
+    new_indices, new_shape, _ = flatten_sparse_indices(tensor, start_axis, end_axis)
     new_shape: list[int] = new_shape.tolist()
     return torch.sparse_coo_tensor(
         new_indices,

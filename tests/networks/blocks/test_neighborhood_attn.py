@@ -167,13 +167,15 @@ def neighborhood_data_strategy(draw, require_grads: bool = False) -> dict[str, A
     position_dtype = draw(st.just(torch.float32))
 
     if require_grads:
-        tensors_requiring_grads = st.lists(
-            st.sampled_from(
-                ["query", "query_spatial_positions", "stacked_feature_maps"]
-            ),
-            min_size=1,
-            max_size=3,
-            unique=True,
+        tensors_requiring_grads = draw(
+            st.lists(
+                st.sampled_from(
+                    ["query", "query_spatial_positions", "stacked_feature_maps"]
+                ),
+                min_size=1,
+                max_size=3,
+                unique=True,
+            )
         )
     else:
         tensors_requiring_grads = []

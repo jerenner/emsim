@@ -393,7 +393,7 @@ class TestAgainstReferenceHypothesis:
 
         assert torch.allclose(
             subset_attn_out, batched_attn_out_stacked, atol=1e-4, rtol=1e-3
-        ), f"max_difference: {abs_difference.max()}"
+        ), f"max output diff: {abs_difference.max()}"
 
 
 @pytest.mark.cuda_if_available

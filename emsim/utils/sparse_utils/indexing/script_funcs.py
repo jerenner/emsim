@@ -246,7 +246,7 @@ def get_sparse_index_mapping(
 
     # Check for out of bounds indices (below 0 or outside tensor dim)
     out_of_bounds_indices = torch.any(index_tensor < 0, -1)
-    out_of_bounds_indices.logical_or_(torch.any(index_tensor > sparse_shape, -1))
+    out_of_bounds_indices |= torch.any(index_tensor >= sparse_shape, -1)
 
     # put dummy value of 0 in the OOB indices.
     # Maybe it'll make the linearization computations and searchsorted faster:
@@ -277,7 +277,7 @@ def get_sparse_index_mapping(
     is_specified_mask: Tensor = (
         sparse_tensor_indices_linearized[linear_index_tensor] == index_tensor_linearized
     )
-    is_specified_mask.logical_and_(~out_of_bounds_indices.view(-1))
+    is_specified_mask &= (~out_of_bounds_indices.view(-1))
 
     linear_index_tensor = linear_index_tensor.view(index_tensor.shape[:-1])
     is_specified_mask = is_specified_mask.view(index_tensor.shape[:-1])

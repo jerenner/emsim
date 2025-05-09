@@ -70,7 +70,10 @@ class ModuleHook:
             # Capture inputs
             captured_args = self._process_value(args)
             captured_kwargs = self._process_value(kwargs)
-            self.captured_values[hook_name]["inputs"] = (captured_args, captured_kwargs)
+            self.captured_values[hook_name]["inputs"] = {
+                "args": captured_args,
+                "kwargs": captured_kwargs,
+            }
 
             # Call original method
             result = original_method(*args, **kwargs)
@@ -85,10 +88,15 @@ class ModuleHook:
 
     def _hook_module(self, hook_name: str, component_getter: Callable):
         """Hook a module to capture inputs and outputs."""
-        component = component_getter(self.module)
+        component: nn.Module = component_getter(self.module)
 
-        def forward_hook(module, inputs, outputs):
-            self.captured_values[hook_name]["inputs"] = self._normalize_to_list(inputs)
+        def forward_hook(module, args, kwargs, outputs):
+            captured_args = self._process_value(args)
+            captured_kwargs = self._process_value(kwargs)
+            self.captured_values[hook_name]["inputs"] = {
+                "args": captured_args,
+                "kwargs": captured_kwargs,
+            }
 
             # Capture outputs (normalized to list)
             self.captured_values[hook_name]["outputs"] = self._normalize_to_list(
@@ -96,7 +104,7 @@ class ModuleHook:
             )
 
         # Register hooks
-        handle = component.register_forward_hook(forward_hook)
+        handle = component.register_forward_hook(forward_hook, with_kwargs=True)
         self.original_methods[hook_name] = handle
 
     def _set_attr_nested(self, path: str, value: Any):

@@ -197,8 +197,10 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
 
         # Prepare key data:
         # Compute the neighborhood indices of each query
-        nhood_spatial_indices, nhood_level_indices = get_multilevel_neighborhoods(
-            query_spatial_positions, level_spatial_shapes, self.neighborhood_sizes
+        nhood_spatial_indices, out_of_bounds_nhood_mask, nhood_level_indices = (
+            get_multilevel_neighborhoods(
+                query_spatial_positions, level_spatial_shapes, self.neighborhood_sizes
+            )
         )
         keys_per_query = nhood_spatial_indices.size(1)
         assert nhood_spatial_indices.shape == (
@@ -210,7 +212,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         # Initialize the full sparse indices tensor for keys:
         # (batch, *spatial_dims, level)
         key_index_tensor = query_spatial_positions.new_empty(
-            n_queries, keys_per_query, self.position_dim + 2
+            n_queries, keys_per_query, self.position_dim + 2, dtype=torch.long
         )
         # expand batch and level indices to broadcasted dims
         key_batch_indices = batch_offsets_to_indices(query_batch_offsets)
@@ -232,13 +234,19 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             self.pos_encoding.freqs
         )
 
-        x, _ = self.subset_attn(
+        x, is_specified_mask = self.subset_attn(
             stacked_feature_maps,
             key_index_tensor,
             query_rotated,
             self.n_heads,
             key_positions=key_positions,
             rope_freqs=key_rope_freqs,
+        )
+
+        # sanity check that the out of bounds indices were correctly identified as
+        # unspecified
+        assert torch.all(
+            (out_of_bounds_nhood_mask & (~is_specified_mask)) == out_of_bounds_nhood_mask
         )
 
         x = self.out_proj(x)
@@ -286,6 +294,13 @@ def get_multilevel_neighborhoods(
                 [n_queries, sum(neighborhood_sizes^position_dim), position_dim]
                 containing the spatial indices of all neighborhood points for each
                 query across all levels.
+            - out_of_bounds_mask: Boolean tensor of shape
+                [n_queries, sum(neighborhood_sizes^position_dim)] that is True at locations
+                in multilevel_neighborhood_indices that are out of bounds; i.e.
+                negative or >= the spatial shape for that level
+                If some of the computed neighborhood indices for a query are out of
+                bounds of the level's spatial shape, those indices will instead be
+                filled with mask values of -1.
             - level_indices: Tensor of shape [sum(neighborhood_sizes^position_dim)]
                 mapping each neighborhood position to its corresponding resolution
                 level.
@@ -298,6 +313,10 @@ def get_multilevel_neighborhoods(
         query_fullscale_spatial_positions, 2, "query_fullscale_spatial_positions"
     )
     n_queries, position_dim = query_fullscale_spatial_positions.shape
+
+    assert (
+        level_spatial_shapes.ndim == 2
+    ), "This function only supports non-batch-dependent level_spatial_shapes"
 
     device = query_fullscale_spatial_positions.device
 
@@ -341,6 +360,10 @@ def get_multilevel_neighborhoods(
         dtype=torch.long,
     )
 
+    out_of_bounds_mask = torch.zeros(
+        n_queries, n_neighborhood_elements.sum(), device=device, dtype=torch.bool
+    )
+
     # Compute the neighborhood indices and fill in the output tensor
     for level, level_positions in enumerate(
         query_multilevel_spatial_positions.unbind(1)
@@ -349,8 +372,20 @@ def get_multilevel_neighborhoods(
         level_end = level_offsets[level + 1]
         nhood_grid = neighborhood_offset_grids[level]
 
-        multilevel_neighborhood_indices[:, level_start:level_end, :] = (
-            level_positions.unsqueeze(1).floor().long() + nhood_grid.unsqueeze(0)
+        level_neighborhood_indices = level_positions.unsqueeze(
+            1
+        ).floor().long() + nhood_grid.unsqueeze(0)
+
+        # mask out of bounds indices
+        out_of_bounds_mask[:, level_start:level_end] = (
+            level_neighborhood_indices < 0
+        ).any(-1)
+        out_of_bounds_mask[:, level_start:level_end].logical_or_(
+            (level_neighborhood_indices >= level_spatial_shapes[level]).any(-1)
         )
 
-    return multilevel_neighborhood_indices, level_indices
+        multilevel_neighborhood_indices[:, level_start:level_end, :] = (
+            level_neighborhood_indices
+        )
+
+    return multilevel_neighborhood_indices, out_of_bounds_mask, level_indices

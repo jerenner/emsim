@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from numpy import array
 from torch import Tensor, nn
+import torch.nn.functional as F
 
 from emsim.networks.positional_encoding.rope import (
     RoPEEncodingND,
@@ -124,7 +125,9 @@ def simple_input_tensors(
 
 
 @st.composite
-def neighborhood_data_strategy(draw, require_grads: bool = False) -> dict[str, Any]:
+def neighborhood_data_strategy(
+    draw, require_grads: bool = False, max_float_mag=1e6
+) -> dict[str, Any]:
     # Draw basic shape parameters
     n_heads = draw(st.integers(1, 8))
     head_dim = draw(st.integers(1, 16)) * 2
@@ -148,21 +151,28 @@ def neighborhood_data_strategy(draw, require_grads: bool = False) -> dict[str, A
     )
 
     # Level shapes
-    level_shapes = draw(
-        arrays(
-            np.int64,
-            (n_levels, position_dim),
-            elements=st.integers(1, 1000),
-            fill=st.nothing(),
-        )
-    )
+    level_shapes = []
+    last_level = [1] * position_dim
+    for level in range(n_levels):
+        shape = []
+        for pos_dim in range(position_dim):
+            shape.append(draw(st.integers(last_level[pos_dim], 1000 * (level + 1))))
+        last_level = shape
+        level_shapes.append(shape)
+
+    level_shapes = np.array(level_shapes)
+    assert np.array_equal(np.sort(level_shapes, 0), level_shapes)
 
     # Draw tensor generation parameters
     seed = draw(st.integers(0, 1e8))
     float_dtype = draw(st.just(torch.float32))
 
-    min_float_value = draw(st.floats(min_value=-1e6, max_value=1e6, exclude_max=True))
-    max_float_value = draw(st.floats(min_value=min_float_value, max_value=1e6))
+    min_float_value = draw(
+        st.floats(min_value=-max_float_mag, max_value=max_float_mag, exclude_max=True)
+    )
+    max_float_value = draw(
+        st.floats(min_value=min_float_value, max_value=max_float_mag)
+    )
 
     position_dtype = draw(st.just(torch.float32))
 
@@ -277,6 +287,8 @@ def strategy_input_tensors(
     # if different spatial shapes for each batch, expand per batch
     if max_spatial_shape.ndim == 2:
         max_spatial_shape = max_spatial_shape[query_batch_indices]
+
+    # make query positions in the region [0, max] for each dim
     query_spatial_positions = torch.empty(
         (n_queries, position_dim), device=device, dtype=position_dtype
     ).uniform_(0, 1)
@@ -294,7 +306,7 @@ def strategy_input_tensors(
     full_nhood_batch_idx = query_batch_indices[full_neighborhood_query_idx]
     full_nhood_positions = query_spatial_positions[full_neighborhood_query_idx]
 
-    multilevel_nhoods, nhood_level_indices = get_multilevel_neighborhoods(
+    multilevel_nhoods, oob_mask, nhood_level_indices = get_multilevel_neighborhoods(
         full_nhood_positions, level_spatial_shapes, neighborhood_sizes
     )
     n_nhood_indices = multilevel_nhoods.size(1)
@@ -310,6 +322,7 @@ def strategy_input_tensors(
     # 2. Randomly sample a portion of all indices to be nonzero
     sparse_nonzero_indices = []
     for level, level_shape in enumerate(level_spatial_shapes):
+        # add batch dimension to level feature map shape
         extended_level_shape = level_shape.new_full(
             (level_shape.size(0) + 1,), fill_value=batch_size
         )
@@ -318,9 +331,10 @@ def strategy_input_tensors(
 
         n_sampled_indices = int(n_level_indices * (1 - sparse_region_sparsity))
         n_sampled_indices = min(
-            max(n_sampled_indices, 1), 1000
-        )  # hard cap to avoid blowup
+            max(n_sampled_indices, 1), n_level_indices, 1000
+        )  # hard cap at 1000 to avoid blowup
 
+        # sample from the available indices in 1D form
         if n_level_indices <= 1000:
             sampled_flat_indices = torch.randperm(n_level_indices, device=device)[
                 :n_sampled_indices
@@ -329,6 +343,9 @@ def strategy_input_tensors(
             sampled_flat_indices = (
                 torch.rand(n_sampled_indices, device=device) * n_level_indices
             ).long()
+
+        # "unflatten" the sampled 1D indices to the true index
+        # (dim x N, last entry of axis 0 is level index)
         sampled_unflattened_indices = sampled_flat_indices.new_full(
             (extended_level_shape.size(0) + 1, n_sampled_indices), fill_value=level
         )
@@ -336,11 +353,13 @@ def strategy_input_tensors(
             sampled_flat_indices.unsqueeze(0), extended_level_shape
         )
 
+        assert torch.all(sampled_unflattened_indices[:-1].T < extended_level_shape)
+
         sparse_nonzero_indices.append(sampled_unflattened_indices)
 
     # 3. Construct the sparse tensor
     all_nonzero_indices = torch.cat(
-        [nhood_indices.flatten(0, -2).T] + sparse_nonzero_indices, dim=1
+        [nhood_indices[~oob_mask].T] + sparse_nonzero_indices, dim=1
     )  # (D x nnz)
     if max_spatial_shape.ndim == 2:
         max_spatial_shape = max_spatial_shape.max(0)[0]
@@ -353,6 +372,13 @@ def strategy_input_tensors(
         sparse_shape,
         device=device,
     ).coalesce()
+
+    assert (stacked_feature_maps.indices() >= 0).all()
+    for level in range(n_levels):
+        level_mask = stacked_feature_maps.indices()[-1] == level
+        level_indices = stacked_feature_maps.indices().T[level_mask, 1:-1]
+        assert torch.all(level_indices < level_spatial_shapes[level])
+
     if "stacked_feature_maps" in tensors_requiring_grads:
         stacked_feature_maps.requires_grad_(True)
 
@@ -399,8 +425,10 @@ class TestGetMultilevelNeighborhoods:
         neighborhood_sizes = [3, 5]
 
         # Call the function
-        multilevel_neighborhood_indices, level_indices = get_multilevel_neighborhoods(
-            query_positions, level_shapes, neighborhood_sizes
+        multilevel_neighborhood_indices, out_of_bounds_mask, level_indices = (
+            get_multilevel_neighborhoods(
+                query_positions, level_shapes, neighborhood_sizes
+            )
         )
 
         # Validate output shapes
@@ -416,6 +444,9 @@ class TestGetMultilevelNeighborhoods:
         # Check level indices are correct
         assert torch.all(level_indices[:9] == 0)  # First 9 elements from level 0
         assert torch.all(level_indices[9:] == 1)  # Remaining from level 1
+
+        # Check no out of bounds indices
+        assert not out_of_bounds_mask.any()
 
     def test_input_validation(self, device: str):
         """Test error handling and input validation."""
@@ -453,13 +484,70 @@ class TestGetMultilevelNeighborhoods:
         expected_level_indices = torch.tensor([0, 0, 0], device=device)
 
         # Call the function
-        multilevel_neighborhood_indices, level_indices = get_multilevel_neighborhoods(
-            query_positions, level_shapes, neighborhood_sizes
+        multilevel_neighborhood_indices, oob_mask, level_indices = (
+            get_multilevel_neighborhoods(
+                query_positions, level_shapes, neighborhood_sizes
+            )
         )
 
         # Validate outputs match expected values
         assert torch.all(multilevel_neighborhood_indices == expected_indices)
         assert torch.all(level_indices == expected_level_indices)
+
+        assert not oob_mask.any()
+
+    def test_out_of_bounds_indices(self, device: str):
+        """Test that out of bounds indices are properly masked out"""
+        level_shapes = torch.tensor(
+            [
+                [5, 5],
+                [10, 10],
+            ],
+            device=device,
+        )
+
+        # both levels same size to keep mask construction simple
+        neighborhood_sizes = torch.tensor([3, 3], device=device)
+
+        query_positions = torch.tensor(
+            [
+                [0.5, 0.5],  # upper left corner of neighborhood out of bounds
+                [1.0, 2.5],  # out of bounds on top for smaller level
+                [2.5, 2.5],  # in bounds
+                [10.5, 10.5],  # out of bounds on all but upper left on both levels
+            ],
+            device=device,
+        )
+
+        n_queries = query_positions.size(0)
+        n_levels = level_shapes.size(0)
+
+        expected_out_of_bounds_mask = torch.zeros(
+            n_queries,
+            n_levels,
+            3,
+            3,
+            device=device,
+            dtype=torch.bool,
+        )
+
+        # first query
+        expected_out_of_bounds_mask[0, :, 0] = True  # top part
+        expected_out_of_bounds_mask[0, :, :, 0] = True  # left part
+        # second query
+        expected_out_of_bounds_mask[1, 0, 0] = True  # top part of coarser level
+        # fourth query
+        expected_out_of_bounds_mask[3, :, -2:] = True  # bottom part
+        expected_out_of_bounds_mask[3, :, :, -2:] = True  # right part
+
+        expected_out_of_bounds_mask = expected_out_of_bounds_mask.view(n_queries, -1)
+
+        # Call the function
+        _, out_of_bounds_mask, _ = get_multilevel_neighborhoods(
+            query_positions, level_shapes, neighborhood_sizes
+        )
+
+        assert torch.equal(out_of_bounds_mask, expected_out_of_bounds_mask)
 
     def test_multiple_levels_3d(self, device: str):
         """Test 3D positions with multiple levels."""
@@ -485,8 +573,10 @@ class TestGetMultilevelNeighborhoods:
         neighborhood_sizes = [3, 5]
 
         # Call the function
-        multilevel_neighborhood_indices, level_indices = get_multilevel_neighborhoods(
-            query_positions, level_shapes, neighborhood_sizes
+        multilevel_neighborhood_indices, oob_mask, level_indices = (
+            get_multilevel_neighborhoods(
+                query_positions, level_shapes, neighborhood_sizes
+            )
         )
 
         # Validate output shapes
@@ -500,8 +590,15 @@ class TestGetMultilevelNeighborhoods:
         assert level_indices.shape == (expected_total_elements,)
 
         # Check level indices distribution
-        assert torch.all(level_indices[:27] == 0)  # First 27 elements from level 0
+        assert torch.all(level_indices[:27] == 0)  # First 3*3*3 elements
         assert torch.all(level_indices[27:] == 1)  # Remaining from level 1
+
+        expected_oob_mask = torch.zeros_like(oob_mask)
+        expected_oob_mask[1, level_indices == 1] = (
+            multilevel_neighborhood_indices[1, level_indices == 1] >= 6
+        ).any(-1)
+
+        assert torch.equal(oob_mask, expected_oob_mask)
 
 
 @pytest.mark.cuda_if_available
@@ -690,7 +787,7 @@ class TestForward:
             module(**input_data)
 
         # Check if input to q_in_proj is normalized based on norm_first
-        pre_q_input = hook.captured_values["q_in_proj"]["inputs"][0]
+        pre_q_input = hook.captured_values["q_in_proj"]["inputs"]["args"][0]
 
         if norm_first:
             # Pre-norm: input to q_in_proj should be normalized
@@ -1031,10 +1128,10 @@ class TestCorrectness:
             output = module(**input_data)
 
         # Get attention index tensor
-        key_index_tensor = hook.captured_values["subset_attn"]["inputs"][1]
+        key_index_tensor = hook.captured_values["subset_attn"]["inputs"]["args"][1]
 
         # The output should be more similar to the query than a random vector would be
-        query_output_similarity = torch.cosine_similarity(query, output)
+        query_output_similarity = F.cosine_similarity(query, output)
         assert (
             query_output_similarity > 0.5
         ), f"Expected high similarity, got {query_output_similarity}"
@@ -1052,3 +1149,298 @@ class TestCorrectness:
         assert torch.all(
             (spatial_indices_y >= 7) & (spatial_indices_y <= 9)
         ), f"Unexpected y indices: {spatial_indices_y}"
+
+
+@pytest.mark.cuda_if_available
+class TestProperties:
+    @settings(deadline=None)
+    @given(inputs=neighborhood_data_strategy(require_grads=True))
+    def test_gradient_magnitude_consistency(self, inputs: dict[str, Any], device: str):
+        """Test that gradient magnitudes are reasonable and don't explode or vanish."""
+        config = inputs["config"]
+        module = SparseNeighborhoodAttentionBlock(**config).to(device)
+
+        # Create input data that requires gradients
+        input_data = strategy_input_tensors(**inputs["tensor_config"], device=device)
+
+        # Forward pass
+        output = module(**input_data)
+        loss = output.mean()
+
+        # Backward pass
+        loss.backward()
+
+        # Check gradient magnitudes for inputs
+        for name, tensor in input_data.items():
+            if hasattr(tensor, "grad") and tensor.grad is not None:
+                # Check that gradients are finite
+                assert not torch.isnan(tensor.grad).any(), f"{name} has NaN gradients"
+                assert not torch.isinf(tensor.grad).any(), f"{name} has Inf gradients"
+
+                # Gradient magnitude should be proportional to tensor magnitude
+                if tensor.is_sparse:
+                    values = tensor.coalesce().values()
+                    grad = tensor.grad.coalesce().values()
+                else:
+                    values = tensor
+                    grad = tensor.grad
+                if values.numel() > 0 and values.abs().max() > 1e-6:
+                    grad_magnitude_ratio = grad.abs().mean() / values.abs().mean()
+                    assert grad_magnitude_ratio < 100.0, (
+                        f"{name} gradient too large: "
+                        f"magnitude ratio: {grad_magnitude_ratio}"
+                    )
+
+        # Check parameter gradients
+        for name, param in module.named_parameters():
+            if param.grad is not None:
+                assert not torch.isnan(param.grad).any(), f"{name} has NaN gradients"
+                assert not torch.isinf(param.grad).any(), f"{name} has Inf gradients"
+
+    @settings(deadline=None)
+    @given(inputs=neighborhood_data_strategy())
+    def test_position_shift_invariance(self, inputs: dict[str, Any], device: str):
+        """Test that consistent position shifts produce consistent output changes."""
+        # assume nonempty data
+        assume(inputs["tensor_config"]["query_batch_offsets"][-1] > 1)
+        # assume nonzero data
+        assume(
+            inputs["tensor_config"]["max_float_value"]
+            - inputs["tensor_config"]["min_float_value"]
+            > 1e-4
+        )
+        # assume non-unit key grid
+        assume(not (inputs["tensor_config"]["level_spatial_shapes"] == 1).all())
+        # assume non-tiny embedding dimension
+        assume(inputs["config"]["embed_dim"] > 4)
+        # force queries to have something to attend to
+        inputs["tensor_config"]["query_full_neighborhood_portion"] = 1.0
+        # force dropout inactive
+        inputs["config"]["dropout"] = 0.0
+
+        config = inputs["config"]
+        module = SparseNeighborhoodAttentionBlock(**config).to(device)
+
+        # Create input data
+        input_data = strategy_input_tensors(**inputs["tensor_config"], device=device)
+
+        # Make a copy with shifted positions
+        shifted_data = input_data.copy()
+        shift_amount = shifted_data["query_spatial_positions"].new_ones(
+            config["position_dim"]
+        ) * max(1.0, input_data["level_spatial_shapes"].min().item() * 0.05)
+        shifted_data["query_spatial_positions"] = (
+            input_data["query_spatial_positions"] + shift_amount
+        )
+
+        # Run forward on both inputs with hooks to capture attention output
+        with torch.no_grad():
+            with ModuleHook(
+                module, {"subset_attn": lambda m: m.subset_attn}
+            ) as hook_original:
+                _ = module(**input_data)
+            with ModuleHook(
+                module, {"subset_attn": lambda m: m.subset_attn}
+            ) as hook_shifted:
+                _ = module(**shifted_data)
+
+        attn_out_original = hook_original.captured_values["subset_attn"]["outputs"][0]
+        attn_out_shifted = hook_shifted.captured_values["subset_attn"]["outputs"][0]
+
+        # Attention outputs should be different but structured
+        # We can check:
+        # 1. Outputs are different
+        assert not torch.allclose(attn_out_original, attn_out_shifted)
+
+        # 2. The relative change is similar across queries in the same batch
+        batch_indices = batch_offsets_to_indices(input_data["query_batch_offsets"])
+        for batch_idx in range(len(input_data["query_batch_offsets"]) - 1):
+            batch_mask = batch_indices == batch_idx
+            if batch_mask.sum() >= 2:
+                sim_diff = F.cosine_similarity(
+                    attn_out_original[batch_mask], attn_out_shifted[batch_mask], dim=1
+                )
+                # Check similarity variability is relatively small
+                if (n := sim_diff.numel()) > 1:
+                    threshold = min(0.9, 0.45 * (1.0 + 2.0 / math.sqrt(n)))
+                    assert (
+                        sim_diff.std() < threshold
+                    ), "Position shift should affect outputs consistently"
+
+    @settings(deadline=None)
+    @given(inputs=neighborhood_data_strategy())
+    def test_neighborhood_size_scaling(self, inputs: dict[str, Any], device: str):
+        """Test that neighborhood sizes scale attention contexts correctly."""
+        # assume at least 2 queries
+        assume(inputs["tensor_config"]["query_batch_offsets"][-1] > 1)
+        # assume nonzero data
+        assume(
+            inputs["tensor_config"]["max_float_value"]
+            - inputs["tensor_config"]["min_float_value"]
+            > 1e-4
+        )
+        # assume big enough key grid
+        assume((inputs["tensor_config"]["level_spatial_shapes"] >= 5).all())
+        # assume non-tiny embedding dimension
+        assume(inputs["config"]["embed_dim"] > 4)
+        # force non sparse
+        inputs["tensor_config"]["query_full_neighborhood_portion"] = 1.0
+        inputs["tensor_config"]["sparse_region_sparsity"] = 0.0
+        # force dropout inactive
+        inputs["config"]["dropout"] = 0.0
+
+        # Create two modules with different neighborhood sizes
+        small_nhood_size = 1
+        large_nhood_size = 3
+        small_nhoods = [small_nhood_size] * inputs["config"]["n_levels"]
+        large_nhoods = [large_nhood_size] * inputs["config"]["n_levels"]
+
+        config_small = inputs["config"].copy()
+        config_small["neighborhood_sizes"] = small_nhoods
+
+        config_large = inputs["config"].copy()
+        config_large["neighborhood_sizes"] = large_nhoods
+
+        # Use same seed to get same parameters
+        torch.manual_seed(inputs["tensor_config"]["seed"])
+        module_small = SparseNeighborhoodAttentionBlock(**config_small).to(device)
+
+        torch.manual_seed(inputs["tensor_config"]["seed"])
+        module_large = SparseNeighborhoodAttentionBlock(**config_large).to(device)
+
+        # Check params are the same
+        assert torch.equal(module_small.q_in_proj.weight, module_large.q_in_proj.weight)
+        assert torch.equal(module_small.out_proj.weight, module_large.out_proj.weight)
+        assert torch.equal(
+            module_small.subset_attn.kv_proj.weight,
+            module_large.subset_attn.kv_proj.weight,
+        )
+        for freq_large, freq_small in zip(
+            module_large.pos_encoding.freqs, module_small.pos_encoding.freqs
+        ):
+            assert torch.equal(freq_large, freq_small)
+        if inputs["config"]["bias"]:
+            assert torch.equal(module_small.q_in_proj.bias, module_large.q_in_proj.bias)
+            assert torch.equal(module_small.out_proj.bias, module_large.out_proj.bias)
+            assert torch.equal(
+                module_small.subset_attn.kv_proj.bias,
+                module_large.subset_attn.kv_proj.bias,
+            )
+
+        # Create input data
+        input_data = strategy_input_tensors(**inputs["tensor_config"], device=device)
+
+        # Create hooks to log attn inputs and outputs
+        hook_small = ModuleHook(module_small, {"subset_attn": lambda m: m.subset_attn})
+        hook_large = ModuleHook(module_large, {"subset_attn": lambda m: m.subset_attn})
+
+        # Run forward on both
+        with torch.no_grad():
+            with hook_small:
+                _ = module_small(**input_data)
+            with hook_large:
+                _ = module_large(**input_data)
+
+        # Verify attended keys are different
+        values_small = hook_small.captured_values
+        values_large = hook_large.captured_values
+        small_key_index_tensor = values_small["subset_attn"]["inputs"]["args"][1]
+        large_key_index_tensor = values_large["subset_attn"]["inputs"]["args"][1]
+
+        # Check that neighborhood sizes are correct
+        assert small_key_index_tensor.shape[1] < large_key_index_tensor.shape[1]
+        assert small_key_index_tensor.shape[1] == sum(
+            np.pow(small_nhoods, inputs["config"]["position_dim"])
+        )
+        assert large_key_index_tensor.shape[1] == sum(
+            np.pow(large_nhoods, inputs["config"]["position_dim"])
+        )
+
+        small_is_specified_mask = values_small["subset_attn"]["outputs"][1]
+        large_is_specified_mask = values_large["subset_attn"]["outputs"][1]
+
+        small_specified_indices = small_key_index_tensor[small_is_specified_mask]
+        large_specified_indices = large_key_index_tensor[large_is_specified_mask]
+        assert small_specified_indices.shape[0] < large_specified_indices.shape[0], (
+            f"query positions: {input_data['query_spatial_positions']}"
+        )
+
+        # Test that nonzero attended keys are different
+        small_specified_unique = small_specified_indices.unique(dim=0)
+        large_specified_unique = large_specified_indices.unique(dim=0)
+        assert not torch.equal(small_specified_unique, large_specified_unique)
+        assert small_specified_unique.shape[0] < large_specified_unique.shape[0]
+
+        # Test that actual attention outputs are different
+        attn_out_small = values_small["subset_attn"]["outputs"][0]
+        attn_out_large = values_large["subset_attn"]["outputs"][0]
+        assert not torch.allclose(attn_out_small, attn_out_large), (
+            f"Output max diff: {(attn_out_small - attn_out_large).abs().max()}"
+            " total additional keys: "
+            f"{large_specified_unique.shape[0] - small_specified_unique.shape[0]}"
+        )
+
+    @settings(deadline=None)
+    @given(inputs=neighborhood_data_strategy(max_float_mag=1e3))
+    def test_multi_level_contribution(self, inputs: dict[str, Any], device: str):
+        """Test that multiple levels contribute to the output."""
+        # assume at least 2 queries
+        assume(inputs["tensor_config"]["query_batch_offsets"][-1] > 1)
+        # assume nonzero data
+        assume(
+            inputs["tensor_config"]["max_float_value"]
+            - inputs["tensor_config"]["min_float_value"]
+            > 1e-4
+        )
+        # assume more than 1 feature level
+        assume(inputs["config"]["n_levels"] > 1)
+        # assume non-tiny embedding dimension
+        assume(inputs["config"]["embed_dim"] > 4)
+        # force queries to have something to attend to
+        inputs["tensor_config"]["query_full_neighborhood_portion"] = 1.0
+        inputs["tensor_config"]["sparse_region_sparsity"] = 0.0
+        # force dropout inactive
+        inputs["config"]["dropout"] = 0.0
+
+        assume(inputs["config"]["n_levels"] > 1)  # Skip test if only one level
+
+        module = SparseNeighborhoodAttentionBlock(**inputs["config"]).to(device)
+
+        # Create input data
+        input_data = strategy_input_tensors(**inputs["tensor_config"], device=device)
+        sparse_tensor = input_data["stacked_feature_maps"]
+        original_indices = sparse_tensor.indices()
+
+        # Run with all levels
+        with torch.no_grad():
+            all_output = module(**input_data)
+
+        # Check if at least one single-level output differs from all-level output
+        level_outputs = []
+        for level in range(inputs["config"]["n_levels"]):
+            # Create sparse tensor with just this level
+            level_mask = original_indices[-1] == level
+
+            level_data = input_data.copy()
+            level_data["stacked_feature_maps"] = torch.sparse_coo_tensor(
+                original_indices[:, level_mask],
+                sparse_tensor.values()[level_mask],
+                sparse_tensor.size(),
+                device=device,
+            ).coalesce()
+
+            # Run forward with only this level
+            with torch.no_grad():
+                level_outputs.append(module(**level_data))
+
+        # At least one level should produce different output than all levels combined
+        assert any(
+            [not torch.allclose(output, all_output) for output in level_outputs]
+        ), (
+            "Multi-level output should differ from single-level outputs. Output max diffs:"
+            f"{[(output - all_output).abs().max() for output in level_outputs]}, "
+            "not allclose: "
+            f"{[not torch.allclose(output, all_output) for output in level_outputs]}"
+            ", cosine sims: "
+            f"{[F.cosine_similarity(output, all_output) for output in level_outputs]}"
+        )

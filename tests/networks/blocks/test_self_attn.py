@@ -586,7 +586,7 @@ class TestForward:
             module(**input_data)
 
         # Check if input to qkv is normalized based on norm_first
-        pre_qkv_input = hook.captured_values["qkv"]["inputs"][0]
+        pre_qkv_input = hook.captured_values["qkv"]["inputs"]["args"][0]
 
         if norm_first:
             # Pre-norm: input to QKV should be normalized
@@ -893,7 +893,7 @@ class TestCorrectness:
         q, _, _ = qkv_output.chunk(3, dim=-1)
 
         # Extract pos_encoding inputs and outputs
-        prepped_positions = hook.captured_values["pos_encoding"]["inputs"][1]
+        prepped_positions = hook.captured_values["pos_encoding"]["inputs"]["args"][1]
 
         # Check that positions had levels appended
         assert torch.allclose(
@@ -1072,12 +1072,12 @@ class TestCorrectness:
 
             # For norm_first, norm should be applied before QKV
             norm_first_norm_out = hook_first.captured_values["norm"]["outputs"][0]
-            norm_first_qkv_in = hook_first.captured_values["qkv"]["inputs"][0]
+            norm_first_qkv_in = hook_first.captured_values["qkv"]["inputs"]["args"][0]
             norm_first_out_proj = hook_first.captured_values["out_proj"]["outputs"][0]
 
             # For norm_last, norm should be applied after attention
             norm_last_norm_out = hook_last.captured_values["norm"]["outputs"][0]
-            norm_last_qkv_in = hook_last.captured_values["qkv"]["inputs"][0]
+            norm_last_qkv_in = hook_last.captured_values["qkv"]["inputs"]["args"][0]
             norm_last_out_proj = hook_last.captured_values["out_proj"]["outputs"][0]
 
             # Verify norm layers have different outputs as long as non-residual branch

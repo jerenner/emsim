@@ -5,6 +5,8 @@ import MinkowskiEngine as ME
 from typing import Optional
 from functools import partial
 
+from emsim.utils.sparse_utils.minkowskiengine import get_me_layer
+
 
 @torch.compiler.disable
 class MinkowskiSparseBottleneckV2(nn.Module):
@@ -114,8 +116,8 @@ class MinkowskiSparseResnetV2Stage(nn.Module):
         out_reduction: int,
         bottle_ratio: float = 0.25,
         dimension: int = 2,
-        act_layer: Optional[nn.Module] = None,
-        norm_layer: Optional[nn.Module] = None,
+        act_layer: str = "relu",
+        norm_layer: str = "batchnorm1d",
         bias: bool = True,
     ):
         super().__init__()
@@ -138,8 +140,8 @@ class MinkowskiSparseResnetV2Stage(nn.Module):
                     stride=stride,
                     dilation=dilation,
                     dimension=dimension,
-                    act_layer=act_layer,
-                    norm_layer=norm_layer,
+                    act_layer=get_me_layer(act_layer),
+                    norm_layer=get_me_layer(norm_layer),
                     in_reduction=in_reduction if block_index == 0 else out_reduction,
                     out_reduction=out_reduction,
                     bias=bias,

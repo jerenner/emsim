@@ -7,6 +7,8 @@ from timm.layers import get_padding, DropPath
 from torch import nn, Tensor
 import MinkowskiEngine as ME
 
+from emsim.utils.sparse_utils.minkowskiengine import get_me_layer
+
 
 @torch.compiler.disable
 class MinkowskiInverseSparseBottleneckV2(nn.Module):
@@ -35,6 +37,8 @@ class MinkowskiInverseSparseBottleneckV2(nn.Module):
         out_chs = out_chs or in_chs
         # mid_chs = make_divisible(out_chs * bottle_ratio)
         mid_chs = int(out_chs * bottle_ratio)
+        if act_layer == ME.MinkowskiReLU:
+            act_layer = partial(act_layer, inplace=True)
 
         # encoder skip upsample block
         if block_index == 0:
@@ -159,8 +163,8 @@ class MinkowskiSparseInverseResnetV2Stage(nn.Module):
         bottle_ratio: float = 0.25,
         bias: bool = True,
         dimension: int = 2,
-        act_layer: nn.Module = ME.MinkowskiReLU,
-        norm_layer: nn.Module = ME.MinkowskiBatchNorm,
+        act_layer: str = "relu",
+        norm_layer: str = "batchnorm1d",
     ):
         super().__init__()
         self.stage_index = stage_index
@@ -181,8 +185,8 @@ class MinkowskiSparseInverseResnetV2Stage(nn.Module):
                     bottle_ratio=bottle_ratio,
                     bias=bias,
                     dimension=dimension,
-                    act_layer=act_layer,
-                    norm_layer=norm_layer,
+                    act_layer=get_me_layer(act_layer),
+                    norm_layer=get_me_layer(norm_layer),
                 ),
             )
             prev_chs = out_chs

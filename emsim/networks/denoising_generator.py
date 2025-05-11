@@ -1,33 +1,26 @@
-
 import torch
 from torch import Tensor, nn
 
 from emsim.utils.sparse_utils.batching.batching import split_batch_concatted_tensor
+from emsim.config.denoising import DenoisingConfig
 
 
 class DenoisingGenerator(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        max_electrons_per_image: int = 400,
-        max_total_denoising_queries: int = 1200,
-        position_noise_variance: float = 1.0,
-        pos_neg_queries_share_embedding: bool = False,
-    ):
+    def __init__(self, config: DenoisingConfig):
         super().__init__()
-        self.d_model = d_model
-        self.max_denoising_group_size = max_electrons_per_image
-        self.max_total_denoising_queries = max_total_denoising_queries
-        self.position_noise_scale = position_noise_variance
+        self.embed_dim = config.embed_dim
+        self.max_denoising_group_size = config.max_electrons_per_image
+        self.max_total_denoising_queries = config.max_total_denoising_queries
+        self.position_noise_scale = config.position_noise_variance
         self.dn_query_embedding = nn.Embedding(
             (
-                max_electrons_per_image
-                if pos_neg_queries_share_embedding
-                else max_electrons_per_image * 2
+                config.max_electrons_per_image
+                if config.pos_neg_queries_share_embedding
+                else config.max_electrons_per_image * 2
             ),
-            d_model,
+            config.embed_dim,
         )
-        self.pos_neg_queries_share_embedding = pos_neg_queries_share_embedding
+        self.pos_neg_queries_share_embedding = config.pos_neg_queries_share_embedding
 
     def forward(self, batch_dict: dict[str, Tensor]):
         true_positions = batch_dict["incidence_points_pixels_rc"]
@@ -56,7 +49,9 @@ class DenoisingGenerator(nn.Module):
         for i in range(len(electrons_per_image)):
             n_electrons = electrons_per_image[i]
             posneg_mult = 1 if self.pos_neg_queries_share_embedding else 2
-            assert n_electrons * posneg_mult <= self.dn_query_embedding.num_embeddings, "Not enough denoising embeddings"
+            assert (
+                n_electrons * posneg_mult <= self.dn_query_embedding.num_embeddings
+            ), "Not enough denoising embeddings"
             query_indices = torch.randperm(
                 n_electrons * posneg_mult, device=denoising_queries.device
             )

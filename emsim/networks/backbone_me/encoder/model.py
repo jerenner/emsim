@@ -6,46 +6,35 @@ from torch import Tensor, nn
 from ....utils.sparse_utils.conversion import torch_sparse_to_minkowski
 from .blocks import MinkowskiSparseResnetV2Stage, MinkowskiStem
 
+from emsim.config.backbone import BackboneEncoderConfig
+
 
 # @torch.compiler.disable
 class MinkowskiSparseResnetV2(nn.Module):
-    def __init__(
-        self,
-        layers: list[int],
-        channels: list[int] = [32, 64, 128, 256],
-        in_chans: int = 1,
-        stem_channels: int = 16,
-        output_stride: Optional[int] = None,
-        bias: bool = True,
-        dimension: int = 2,
-        act_layer: nn.Module = ME.MinkowskiReLU,
-        norm_layer: nn.Module = ME.MinkowskiBatchNorm,
-    ):
+    def __init__(self, config: BackboneEncoderConfig):
         super().__init__()
         self.feature_info = []
         self.stem = MinkowskiStem(
-            in_chans,
-            stem_channels,
-            kernel_size=7,
-            bias=bias,
-            dimension=dimension,
+            config.in_channels,
+            config.stem_channels,
+            kernel_size=config.stem_kernel_size,
+            bias=config.bias,
+            dimension=config.dimension,
         )
         self.feature_info.append(
-            dict(num_chs=stem_channels, reduction=1, module="stem")
+            dict(num_chs=config.stem_channels, reduction=1, module="stem")
         )
-        if output_stride is None:
-            output_stride = 2 ** len(layers)
 
-        prev_chs = stem_channels
+        prev_chs = config.stem_channels
         curr_stride = 1
         dilation = 1
         self.stages = nn.ModuleList()
-        for stage_index, (d, c) in enumerate(zip(layers, channels)):
+        for stage_index, (d, c) in enumerate(zip(config.layers, config.channels)):
             # out_chs = make_divisible(c)
             out_chs = c
             # stride = 1 if stage_index == 0 else 2
             stride = 2
-            if curr_stride >= output_stride:
+            if curr_stride >= config.output_stride:
                 dilation *= stride
                 stride = 1
             stage = MinkowskiSparseResnetV2Stage(
@@ -57,8 +46,8 @@ class MinkowskiSparseResnetV2(nn.Module):
                 depth=d,
                 in_reduction=curr_stride,
                 out_reduction=curr_stride * stride,
-                act_layer=act_layer,
-                norm_layer=norm_layer,
+                act_layer=config.act_layer,
+                norm_layer=config.norm_layer,
             )
             prev_chs = out_chs
             curr_stride *= stride

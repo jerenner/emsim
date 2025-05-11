@@ -31,11 +31,13 @@ from .utils import (
     prep_detection_inputs,
     recursive_reset,
 )
+from ...config.criterion import CriterionConfig
 
 
 class EMCriterion(nn.Module):
     def __init__(
         self,
+        config: CriterionConfig,
         loss_coef_class: float = 1.0,
         loss_coef_mask_bce: float = 1.0,
         loss_coef_mask_dice: float = 1.0,
@@ -67,39 +69,41 @@ class EMCriterion(nn.Module):
         detection_metric_interval: int = 10,
     ):
         super().__init__()
-        self.loss_coef_class = loss_coef_class
-        self.loss_coef_mask_bce = loss_coef_mask_bce
-        self.loss_coef_mask_dice = loss_coef_mask_dice
-        self.loss_coef_incidence_nll = loss_coef_incidence_nll
-        self.loss_coef_incidence_likelihood = loss_coef_incidence_likelihood
-        self.loss_coef_incidence_huber = loss_coef_incidence_huber
-        self.loss_coef_salience = loss_coef_salience
-        self.loss_coef_box_l1 = loss_coef_box_l1
-        self.loss_coef_box_giou = loss_coef_box_giou
-        self.no_electron_weight = no_electron_weight
-        self.aux_loss = use_aux_loss
-        self.aux_loss_use_final_matches = aux_loss_use_final_matches
-        self.aux_loss_weight = aux_loss_weight
-        self.detach_likelihood_mean = detach_likelihood_mean
-        self.use_denoising_loss = use_denoising_loss
-        self.denoising_loss_weight = denoising_loss_weight
-        self.detection_metric_distance_thresholds = detection_metric_distance_thresholds
-        self.detection_metric_interval = detection_metric_interval
+        self.loss_coef_class = config.loss_coef_class
+        self.loss_coef_mask_bce = config.loss_coef_mask_bce
+        self.loss_coef_mask_dice = config.loss_coef_mask_dice
+        self.loss_coef_incidence_nll = config.loss_coef_incidence_nll
+        self.loss_coef_incidence_likelihood = config.loss_coef_incidence_likelihood
+        self.loss_coef_incidence_huber = config.loss_coef_incidence_huber
+        self.loss_coef_salience = config.loss_coef_salience
+        self.loss_coef_box_l1 = config.loss_coef_box_l1
+        self.loss_coef_box_giou = config.loss_coef_box_giou
+        self.no_electron_weight = config.no_electron_weight
+        self.aux_loss = config.aux_loss.use_aux_loss
+        self.aux_loss_use_final_matches = config.aux_loss.use_final_matches
+        self.aux_loss_weight = config.aux_loss.aux_loss_weight
+        self.detach_likelihood_mean = config.detach_likelihood_mean
+        self.use_denoising_loss = config.denoising.use_denoising_loss
+        self.denoising_loss_weight = config.denoising.denoising_loss_weight
+        self.detection_metric_distance_thresholds = (
+            config.detection_metric_distance_thresholds
+        )
+        self.detection_metric_interval = config.detection_metric_interval
         self.step_counter = 0
 
         self.salience_criterion = ElectronSalienceCriterion(
-            salience_alpha, salience_gamma
+            config.salience.alpha, config.salience.gamma
         )
 
         self.matcher = HungarianMatcher(
-            cost_coef_class=matcher_cost_coef_class,
-            cost_coef_mask=matcher_cost_coef_mask,
-            cost_coef_dice=matcher_cost_coef_dice,
-            cost_coef_dist=matcher_cost_coef_dist,
-            cost_coef_nll=matcher_cost_coef_nll,
-            cost_coef_likelihood=matcher_cost_coef_likelihood,
-            # cost_coef_box_l1=matcher_cost_coef_box_l1,
-            # cost_coef_box_giou=matcher_cost_coef_box_giou,
+            cost_coef_class=config.matcher.cost_coef_class,
+            cost_coef_mask=config.matcher.cost_coef_mask,
+            cost_coef_dice=config.matcher.cost_coef_dice,
+            cost_coef_dist=config.matcher.cost_coef_dist,
+            cost_coef_nll=config.matcher.cost_coef_nll,
+            cost_coef_likelihood=config.matcher.cost_coef_likelihood,
+            cost_coef_box_l1=config.matcher.cost_coef_box_l1,
+            cost_coef_box_giou=config.matcher.cost_coef_box_giou,
         )
 
         self.train_losses = nn.ModuleDict(
@@ -114,9 +118,9 @@ class EMCriterion(nn.Module):
                 # "loss_box_giou": MeanMetric(),
             }
         )
-        if use_aux_loss:
-            assert n_aux_losses > 0
-            for i in range(n_aux_losses):
+        if self.use_aux_loss:
+            assert config.aux_loss.n_aux_losses > 0
+            for i in range(config.aux_loss.n_aux_losses):
                 for loss_name in [
                     "loss_class",
                     "loss_bce",
@@ -130,7 +134,7 @@ class EMCriterion(nn.Module):
                     self.train_losses.update(
                         {f"aux_losses/{i}/{loss_name}": MeanMetric()}
                     )
-        if use_denoising_loss:
+        if self.use_denoising_loss:
             self.train_losses.update(
                 {"dn/" + k: MeanMetric() for k in self.train_losses}
             )
@@ -165,7 +169,7 @@ class EMCriterion(nn.Module):
             },
         )
         point_detection_metrics = {}
-        for threshold in detection_metric_distance_thresholds:
+        for threshold in self.detection_metric_distance_thresholds:
             point_detection_metrics[str(threshold).replace(".", ",")] = (
                 MetricCollection(
                     [BinaryPrecision(), BinaryRecall(), BinaryAveragePrecision()],
@@ -179,7 +183,7 @@ class EMCriterion(nn.Module):
 
         # self.train_metrics.add_module("box_detection", MeanAveragePrecision())
 
-        if use_denoising_loss:
+        if self.use_denoising_loss:
             self.dn_metrics = nn.ModuleDict(
                 {
                     "query_classification": MetricCollection(
@@ -205,7 +209,7 @@ class EMCriterion(nn.Module):
 
         self.eval_metrics = nn.ModuleDict()
         point_detection_metrics = {}
-        for threshold in detection_metric_distance_thresholds:
+        for threshold in self.detection_metric_distance_thresholds:
             point_detection_metrics[str(threshold).replace(".", ",")] = (
                 MetricCollection(
                     [BinaryPrecision(), BinaryRecall(), BinaryAveragePrecision()],

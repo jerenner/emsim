@@ -1,7 +1,7 @@
 from typing import Optional
 import logging
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch import Tensor, nn
 
 from ..utils.misc_utils import _get_layer
@@ -12,6 +12,7 @@ from .transformer.model import EMTransformer
 from .me_value_encoder import ValueEncoder
 from .denoising_generator import DenoisingGenerator
 
+from ..config.model import EMModelConfig
 
 _logger = logging.getLogger(__name__)
 
@@ -202,87 +203,20 @@ class EMModel(nn.Module):
 
     @classmethod
     def from_config(cls, cfg: DictConfig):
-        backbone = MinkowskiSparseResnetUnet(
-            encoder_layers=cfg.unet.encoder.layers,
-            decoder_layers=cfg.unet.decoder.layers,
-            encoder_channels=cfg.unet.encoder.channels,
-            decoder_channels=cfg.unet.decoder.channels,
-            stem_channels=cfg.unet.stem_channels,
-            act_layer=get_me_layer(cfg.unet.act_layer),
-            norm_layer=get_me_layer(cfg.unet.norm_layer),
-        )
+        if not isinstance(cfg, EMModelConfig):
+            config: EMModelConfig = OmegaConf.to_object(cfg)
+        else:
+            config = cfg
+
+        backbone = MinkowskiSparseResnetUnet(config.backbone)
         channel_uniformizer = ValueEncoder(
-            [info["num_chs"] for info in backbone.feature_info], cfg.transformer.d_model
+            [info["num_chs"] for info in backbone.feature_info],
+            config.transformer.d_model,
         )
-        transformer = EMTransformer(
-            d_model=cfg.transformer.d_model,
-            n_heads=cfg.transformer.n_heads,
-            dim_feedforward=cfg.transformer.dim_feedforward,
-            n_feature_levels=len(backbone.feature_info),
-            n_deformable_points=cfg.transformer.n_deformable_points,
-            dropout=cfg.transformer.dropout,
-            activation_fn=_get_layer(cfg.transformer.activation_fn),
-            n_encoder_layers=cfg.transformer.encoder.layers,
-            n_decoder_layers=cfg.transformer.decoder.layers,
-            predict_box=cfg.predict_box,
-            level_filter_ratio=cfg.transformer.level_filter_ratio,
-            layer_filter_ratio=cfg.transformer.layer_filter_ratio,
-            rope_spatial_base_theta=cfg.transformer.rope.spatial_base_theta,
-            rope_level_base_theta=cfg.transformer.rope.level_base_theta,
-            rope_share_heads=cfg.transformer.rope.share_heads,
-            rope_freq_group_pattern=cfg.transformer.rope.freq_group_pattern,
-            encoder_max_tokens=cfg.transformer.max_tokens,
-            encoder_topk_sa=cfg.transformer.encoder.topk_sa,
-            encoder_use_rope=cfg.transformer.encoder.use_rope,
-            encoder_use_ms_deform_attn=cfg.transformer.encoder.use_ms_deform_attn,
-            encoder_use_neighborhood_attn=cfg.transformer.encoder.use_neighborhood_attn,
-            n_query_embeddings=cfg.transformer.query_embeddings,
-            decoder_use_ms_deform_attn=cfg.transformer.decoder.use_ms_deform_attn,
-            decoder_use_neighborhood_attn=cfg.transformer.decoder.use_neighborhood_attn,
-            decoder_use_full_cross_attn=cfg.transformer.decoder.use_full_cross_attn,
-            decoder_look_forward_twice=cfg.transformer.decoder.look_forward_twice,
-            decoder_detach_updated_positions=cfg.transformer.decoder.detach_updated_positions,
-            decoder_use_rope=cfg.transformer.decoder.use_rope,
-            neighborhood_sizes=cfg.transformer.neighborhood_sizes,
-            mask_main_queries_from_denoising=cfg.denoising.mask_main_queries_from_denoising,
-        )
-        criterion = EMCriterion(
-            loss_coef_class=cfg.criterion.loss_coef_class,
-            loss_coef_mask_bce=cfg.criterion.loss_coef_mask_bce,
-            loss_coef_mask_dice=cfg.criterion.loss_coef_mask_dice,
-            loss_coef_incidence_nll=cfg.criterion.loss_coef_incidence_nll,
-            loss_coef_incidence_likelihood=cfg.criterion.loss_coef_incidence_likelihood,
-            loss_coef_incidence_huber=cfg.criterion.loss_coef_incidence_huber,
-            loss_coef_box_l1=cfg.criterion.loss_coef_box_l1,
-            loss_coef_box_giou=cfg.criterion.loss_coef_box_giou,
-            no_electron_weight=cfg.criterion.no_electron_weight,
-            salience_alpha=cfg.criterion.salience.alpha,
-            salience_gamma=cfg.criterion.salience.gamma,
-            matcher_cost_coef_class=cfg.criterion.matcher.cost_coef_class,
-            matcher_cost_coef_mask=cfg.criterion.matcher.cost_coef_mask,
-            matcher_cost_coef_dice=cfg.criterion.matcher.cost_coef_dice,
-            matcher_cost_coef_dist=cfg.criterion.matcher.cost_coef_dist,
-            matcher_cost_coef_nll=cfg.criterion.matcher.cost_coef_nll,
-            matcher_cost_coef_likelihood=cfg.criterion.matcher.cost_coef_likelihood,
-            matcher_cost_coef_box_l1=cfg.criterion.matcher.cost_coef_box_l1,
-            matcher_cost_coef_box_giou=cfg.criterion.matcher.cost_coef_box_giou,
-            use_aux_loss=cfg.criterion.aux_loss.use_aux_loss,
-            aux_loss_use_final_matches=cfg.criterion.aux_loss.use_final_matches,
-            aux_loss_weight=cfg.criterion.aux_loss.aux_loss_weight,
-            n_aux_losses=cfg.transformer.decoder.layers - 1,
-            detach_likelihood_mean=cfg.criterion.detach_likelihood_mean,
-            use_denoising_loss=cfg.denoising.use_denoising,
-            denoising_loss_weight=cfg.denoising.denoising_loss_weight,
-            detection_metric_distance_thresholds=cfg.criterion.detection_metric_distance_thresholds,
-        )
-        if cfg.denoising.use_denoising:
-            denoising_generator = DenoisingGenerator(
-                d_model=cfg.transformer.d_model,
-                max_electrons_per_image=cfg.denoising.max_electrons_per_image,
-                max_total_denoising_queries=cfg.denoising.max_total_denoising_queries,
-                position_noise_variance=cfg.denoising.position_noise_variance,
-                pos_neg_queries_share_embedding=cfg.denoising.pos_neg_queries_share_embedding,
-            )
+        transformer = EMTransformer(config.transformer)
+        criterion = EMCriterion(config.criterion)
+        if config.denoising.use_denoising:
+            denoising_generator = DenoisingGenerator(config.denoising)
         else:
             denoising_generator = None
         return cls(

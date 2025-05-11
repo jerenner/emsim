@@ -5,39 +5,33 @@ import MinkowskiEngine as ME
 from functools import partial
 
 from .blocks import (
-    MinkowskiInverseSparseBottleneckV2,
     MinkowskiSparseInverseResnetV2Stage,
 )
+
+from emsim.config.backbone import BackboneDecoderConfig
 
 # @torch.compiler.disable
 class MinkowskiSparseUnetDecoder(nn.Module):
     def __init__(
         self,
-        layers: list[int],
+        config: BackboneDecoderConfig,
         encoder_channels: list[int],
         encoder_strides: list[int] = None,
-        channels: list[int] = [256, 128, 64, 32],
-        bias: bool = True,
-        dimension: int = 2,
-        act_layer: nn.Module = ME.MinkowskiReLU,
-        norm_layer: nn.Module = ME.MinkowskiBatchNorm,
     ):
-        assert len(layers) == len(channels)
+        assert len(config.layers) == len(config.channels)
         super().__init__()
         prev_chs = encoder_channels[0]
         encoder_skip_channels = encoder_channels[1:]
         if encoder_strides is None:
             encoder_strides = [2**i for i in range(len(encoder_channels))][::-1]
-        if act_layer == ME.MinkowskiReLU:
-            act_layer = partial(act_layer, inplace=True)
 
         self.feature_info = []
 
         self.stages = nn.ModuleList()
         for stage_index, (depth, c) in enumerate(
             zip(
-                layers,
-                channels,
+                config.layers,
+                config.channels,
             )
         ):
             out_chs = c
@@ -60,10 +54,10 @@ class MinkowskiSparseUnetDecoder(nn.Module):
                 in_reduction=in_reduction,
                 out_reduction=out_reduction,
                 encoder_skip_chs=skip_chs,
-                bias=bias,
-                dimension=dimension,
-                act_layer=act_layer,
-                norm_layer=norm_layer,
+                bias=config.bias,
+                dimension=config.dimension,
+                act_layer=config.act_layer,
+                norm_layer=config.norm_layer,
             )
             prev_chs = out_chs
             self.feature_info += [

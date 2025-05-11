@@ -30,151 +30,115 @@ from ..positional_encoding.rope import (
 from ..segmentation_map import PatchedSegmentationMapPredictor
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
+from emsim.config.transformer import TransformerConfig
 
 
 class EMTransformer(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        dim_feedforward: int,
-        n_feature_levels: int,
-        n_deformable_points: int,
-        backbone_indice_keys: Optional[list[str]] = None,
-        dropout: float = 0.1,
-        activation_fn: Union[str, nn.Module] = "gelu",
-        norm_first: bool = True,
-        attn_proj_bias: bool = False,
-        n_encoder_layers: int = 6,
-        n_decoder_layers: int = 6,
-        predict_box: bool = False,
-        level_filter_ratio: tuple = (0.25, 0.5, 1.0, 1.0),
-        layer_filter_ratio: tuple = (1.0, 0.8, 0.6, 0.6, 0.4, 0.2),
-        rope_spatial_base_theta: float = 100.0,
-        rope_level_base_theta: float = 10.0,
-        rope_share_heads: bool = False,
-        rope_freq_group_pattern: str = "single",
-        encoder_max_tokens: int = 10000,
-        encoder_topk_sa: int = 10000,
-        encoder_use_rope: bool = False,
-        encoder_use_ms_deform_attn: bool = True,
-        encoder_use_neighborhood_attn: bool = True,
-        n_query_embeddings: int = 1000,
-        decoder_use_ms_deform_attn: bool = True,
-        decoder_use_neighborhood_attn: bool = True,
-        decoder_use_full_cross_attn: bool = False,
-        decoder_look_forward_twice: bool = True,
-        decoder_detach_updated_positions: bool = True,
-        decoder_use_rope: bool = True,
-        neighborhood_sizes: list[int] = [3, 5, 7, 9],
-        dimension: int = 2,
-        mask_main_queries_from_denoising: bool = False,
-    ):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.two_stage_num_proposals = n_query_embeddings
-        self.salience_mask_predictor = MESparseMaskPredictor(d_model, d_model)
-        self.use_rope = encoder_use_rope
-        if encoder_use_rope:
+        self.two_stage_num_proposals = config.query_embeddings
+        self.salience_mask_predictor = MESparseMaskPredictor(
+            config.d_model, config.d_model
+        )
+        self.use_rope = config.encoder.use_rope
+        if self.use_rope:
             self.pos_embedding = RoPEEncodingND(
-                dimension + 1,
-                d_model,
-                n_heads,
-                rope_share_heads,
-                get_multilevel_freq_group_pattern(dimension, rope_freq_group_pattern),
-                rope_base_theta=[rope_spatial_base_theta] * 2 + [rope_level_base_theta],
+                config.spatial_dimension + 1,
+                config.d_model,
+                config.n_heads,
+                config.rope.share_heads,
+                get_multilevel_freq_group_pattern(
+                    config.spatial_dimension, config.rope.freq_group_pattern
+                ),
+                rope_base_theta=[config.rope.spatial_base_theta] * 2
+                + [config.rope.level_base_theta],
             )
         else:
-            self.pos_embedding = FourierEncoding(3, d_model, dtype=torch.double)
-        self.n_levels = n_feature_levels
-        self.classification_head = nn.Linear(d_model, 1)
+            self.pos_embedding = FourierEncoding(3, config.d_model, dtype=torch.double)
+        self.n_levels = config.n_feature_levels
+        self.classification_head = nn.Linear(config.d_model, 1)
 
         self.alpha = nn.Parameter(torch.Tensor(3), requires_grad=True)
 
         self.encoder = EMTransformerEncoder(
             TransformerEncoderLayer(
-                d_model=d_model,
-                n_heads=n_heads,
-                dim_feedforward=dim_feedforward,
-                use_msdeform_attn=encoder_use_ms_deform_attn,
-                n_deformable_value_levels=n_feature_levels,
-                n_deformable_points=n_deformable_points,
-                use_neighborhood_attn=encoder_use_neighborhood_attn,
-                neighborhood_sizes=neighborhood_sizes,
-                dropout=dropout,
-                activation_fn=activation_fn,
-                norm_first=norm_first,
-                attn_proj_bias=attn_proj_bias,
-                topk_sa=encoder_topk_sa,
-                use_rope=encoder_use_rope,
+                d_model=config.d_model,
+                n_heads=config.n_heads,
+                dim_feedforward=config.dim_feedforward,
+                use_msdeform_attn=config.encoder.use_ms_deform_attn,
+                n_deformable_value_levels=config.n_feature_levels,
+                n_deformable_points=config.n_deformable_points,
+                use_neighborhood_attn=config.encoder.use_neighborhood_attn,
+                neighborhood_sizes=config.neighborhood_sizes,
+                dropout=config.dropout,
+                activation_fn=config.activation_fn,
+                norm_first=config.norm_first,
+                attn_proj_bias=config.attn_proj_bias,
+                topk_sa=config.encoder.topk_sa,
+                use_rope=config.encoder.use_rope,
                 rope_base_theta=rope_base_theta,
             ),
-            num_layers=n_encoder_layers,
+            num_layers=config.encoder.layers,
             score_predictor=self.classification_head,
         )
-        self.encoder_output_norm = nn.LayerNorm(d_model)
+        self.encoder_output_norm = nn.LayerNorm(config.d_model)
         self.query_pos_offset_head = PositionOffsetHead(
-            d_model, d_model, 2, predict_box
+            config.d_model, config.d_model, 2, config.predict_box
         )
-        self.predict_box = predict_box
-        self.segmentation_head = PatchedSegmentationMapPredictor(d_model)
-        self.std_head = StdDevHead(d_model)
+        self.predict_box = config.predict_box
+        self.segmentation_head = PatchedSegmentationMapPredictor(config.d_model)
+        self.std_head = StdDevHead(config.d_model)
 
-        if sparse_library == "spconv":
-            import spconv.pytorch as spconv
-
-            self.salience_unpoolers = nn.ModuleList(
-                [
-                    spconv.SparseInverseConv2d(1, 1, 3, indice_key=key)
-                    for key in backbone_indice_keys[::-1]
-                ]
-            )
-        elif sparse_library == "minkowskiengine":
-            self.salience_unpoolers = nn.ModuleList(
-                [
-                    torch.compiler.disable(
-                        ME.MinkowskiConvolutionTranspose(
-                            1, 1, 3, stride=2, dimension=dimension
-                        )
+        self.salience_unpoolers = nn.ModuleList(
+            [
+                torch.compiler.disable(
+                    ME.MinkowskiConvolutionTranspose(
+                        1, 1, 3, stride=2, dimension=config.spatial_dimension
                     )
-                    for _ in range(len(level_filter_ratio) - 1)
-                ]
-            )
-        else:
-            raise ValueError(f"Unrecognized sparse_library: `{sparse_library=}`")
-        self.register_buffer("level_filter_ratio", torch.tensor(level_filter_ratio))
-        self.register_buffer("layer_filter_ratio", torch.tensor(layer_filter_ratio))
-        self.encoder_max_tokens = encoder_max_tokens
+                )
+                for _ in range(len(config.level_filter_ratio) - 1)
+            ]
+        )
+        self.register_buffer(
+            "level_filter_ratio", torch.tensor(config.level_filter_ratio)
+        )
+        self.register_buffer(
+            "layer_filter_ratio", torch.tensor(config.layer_filter_ratio)
+        )
+        self.encoder_max_tokens = config.max_tokens
 
-        self.object_query_embedding = nn.Embedding(n_query_embeddings, d_model)
+        self.object_query_embedding = nn.Embedding(
+            config.query_embeddings, config.d_model
+        )
         self.decoder = EMTransformerDecoder(
             TransformerDecoderLayer(
-                d_model=d_model,
-                n_heads=n_heads,
-                dim_feedforward=dim_feedforward,
-                use_ms_deform_attn=decoder_use_ms_deform_attn,
-                n_deformable_value_levels=n_feature_levels,
-                n_deformable_points=n_deformable_points,
-                use_neighborhood_attn=decoder_use_neighborhood_attn,
-                neighborhood_sizes=neighborhood_sizes,
-                use_full_cross_attn=decoder_use_full_cross_attn,
-                predict_box=predict_box,
-                dropout=dropout,
-                activation_fn=activation_fn,
-                norm_first=norm_first,
-                attn_proj_bias=attn_proj_bias,
-                self_attn_use_rope=decoder_use_rope,
+                d_model=config.d_model,
+                n_heads=config.n_heads,
+                dim_feedforward=config.dim_feedforward,
+                use_ms_deform_attn=config.decoder.use_ms_deform_attn,
+                n_deformable_value_levels=config.n_feature_levels,
+                n_deformable_points=config.n_deformable_points,
+                use_neighborhood_attn=config.decoder.use_neighborhood_attn,
+                neighborhood_sizes=config.neighborhood_sizes,
+                use_full_cross_attn=config.decoder.use_full_cross_attn,
+                predict_box=config.predict_box,
+                dropout=config.dropout,
+                activation_fn=config.activation_fn,
+                norm_first=config.norm_first,
+                attn_proj_bias=config.attn_proj_bias,
+                self_attn_use_rope=config.decoder.use_rope,
                 rope_base_theta=rope_base_theta,
             ),
-            num_layers=n_decoder_layers,
-            predict_box=predict_box,
+            num_layers=config.decoder.layers,
+            predict_box=config.predict_box,
             class_head=self.classification_head,
             position_offset_head=self.query_pos_offset_head,
             std_head=self.std_head,
             segmentation_head=self.segmentation_head,
-            look_forward_twice=decoder_look_forward_twice,
-            detach_updated_positions=decoder_detach_updated_positions,
+            look_forward_twice=config.decoder.look_forward_twice,
+            detach_updated_positions=config.decoder.detach_updated_positions,
         )
-        self.mask_main_queries_from_denoising = mask_main_queries_from_denoising
+        self.mask_main_queries_from_denoising = config.mask_main_queries_from_denoising
 
         self.reset_parameters()
 
@@ -463,7 +427,9 @@ class EMTransformer(nn.Module):
         )
 
         spatial_shapes = torch.stack(spatial_shapes, -2)  # dim: batch, level, 2
-        prepped_coords = prep_multilevel_positions(stacked_coords, batch_indices, level_indices, spatial_shapes)
+        prepped_coords = prep_multilevel_positions(
+            stacked_coords, batch_indices, level_indices, spatial_shapes
+        )
         pos_encoded_feats = self.pos_embedding(stacked_feats, prepped_coords)
 
         batch_offsets = torch.cumsum(

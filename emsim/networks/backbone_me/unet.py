@@ -7,33 +7,14 @@ from ...utils.sparse_utils.conversion import torch_sparse_to_minkowski
 from .decoder.model import MinkowskiSparseUnetDecoder
 from .encoder.model import MinkowskiSparseResnetV2
 
+from emsim.config.backbone import BackboneConfig
+
 
 class MinkowskiSparseResnetUnet(ME.MinkowskiNetwork):
-    def __init__(
-        self,
-        in_channels: int = 1,
-        encoder_layers: list[int] = [2, 2, 2, 2],
-        decoder_layers: list[int] = [2, 2, 2, 2],
-        encoder_channels: list[int] = [32, 64, 128, 256],
-        decoder_channels: list[int] = [256, 128, 64, 32],
-        stem_channels: int = 16,
-        bias: bool = True,
-        dimension: int = 2,
-        act_layer: nn.Module = ME.MinkowskiReLU,
-        norm_layer: nn.Module = ME.MinkowskiBatchNorm,
-    ):
-        super().__init__(dimension)
+    def __init__(self, config: BackboneConfig):
+        super().__init__(config.dimension)
 
-        self.encoder = MinkowskiSparseResnetV2(
-            encoder_layers,
-            encoder_channels,
-            in_chans=in_channels,
-            stem_channels=stem_channels,
-            bias=bias,
-            dimension=dimension,
-            act_layer=act_layer,
-            norm_layer=norm_layer,
-        )
+        self.encoder = MinkowskiSparseResnetV2(config.encoder)
 
         encoder_strides = []
         encoder_skip_channels = []
@@ -44,14 +25,7 @@ class MinkowskiSparseResnetUnet(ME.MinkowskiNetwork):
                 break
 
         self.decoder = MinkowskiSparseUnetDecoder(
-            decoder_layers,
-            encoder_skip_channels,
-            encoder_strides,
-            channels=decoder_channels,
-            bias=bias,
-            dimension=dimension,
-            act_layer=act_layer,
-            norm_layer=norm_layer,
+            config.decoder, encoder_skip_channels, encoder_strides
         )
 
     def forward(self, x: Union[Tensor, ME.SparseTensor]):

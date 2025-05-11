@@ -1,0 +1,35 @@
+dimension: 2
+
+in_channels: 1
+stem_channels: 16
+
+bias: true
+act_layer: "relu"
+norm_layer: "batchnorm1d"
+convert_sync_batch_norm: true
+
+encoder:
+  layers: [2, 2, 2, 2]
+  channels: [32, 64, 128, 256]
+  drop_path_rate: 0.0
+
+  output_stride: ${backbone_encoder_output_stride:}
+
+  in_channels: ${model.backbone.in_channels}
+  stem_channels: ${model.backbone.stem_channels}
+  stem_kernel_size: ${model.backbone.stem_kernel_size}
+  
+  dimension: ${model.backbone.dimension}
+  bias: ${model.backbone.bias}
+  act_layer: ${model.backbone.act_layer}
+  norm_layer: ${model.backbone.norm_layer}
+
+decoder:
+  layers: [2, 2, 2, 2]
+  channels: [256, 128, 64, 32]
+  drop_path_rate: 0.0
+
+  dimension: ${model.backbone.dimension}
+  bias: ${model.backbone.bias}
+  act_layer: ${model.backbone.act_layer}
+  norm_layer: ${model.backbone.norm_layer}

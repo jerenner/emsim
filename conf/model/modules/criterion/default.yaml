@@ -1,0 +1,38 @@
+aux_loss:
+  use_aux_loss: true
+  use_final_matches: false
+  aux_loss_weight: 1.0
+  n_aux_losses: "${n_aux_losses:}"
+
+no_electron_weight: 1.0
+
+matcher:
+  cost_coef_class: 1.0
+  cost_coef_mask: 3.0
+  cost_coef_dice: 5.0
+  cost_coef_dist: 1.0
+  cost_coef_nll: 0.0
+  cost_coef_likelihood: 0.0
+  cost_coef_box_l1: 1.0
+  cost_coef_box_giou: 1.0
+
+loss_coef_class: 10.0
+loss_coef_mask_bce: 3.0
+loss_coef_mask_dice: 5.0
+loss_coef_incidence_nll: 0.1
+loss_coef_incidence_likelihood: 10.0
+loss_coef_incidence_huber: 100.0
+loss_coef_box_l1: 1.0
+loss_coef_box_giou: 1.0
+
+use_denoising_loss: ${model.denoising.use_denoising}
+denoising_loss_weight: ${model.denoising.denoising_loss_weight}
+
+detach_likelihood_mean: false
+
+salience:
+  alpha: 0.25
+  gamma: 2.0
+
+detection_metric_distance_thresholds: [0.5, 1.0, 5.0]
+detection_metric_interval: ${traning.print_interval}

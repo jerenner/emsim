@@ -1,0 +1,11 @@
+dataset:
+  directory: "./data"
+  pixels_file: "pixelated_5um_tracks_thinned_4um_back_1M_300keV.txt"
+  num_workers: 8
+  train_percentage: 0.95
+  events_per_image_range: [100, 200]
+  noise_std: 1.0
+  pixel_patch_size: 7
+  n_sigma_sparsify: 3
+  max_pixels_to_keep: 50000
+  new_grid_size: null

@@ -1,0 +1,18 @@
+defaults:
+  - model: default
+  - dataset: default
+  - training: default
+  - _self_
+
+spatial_dimension: 2
+
+seed: 1234
+device: "cuda"
+
+debug: false
+
+ddp:
+  nodes: 2
+  devices: 2
+  find_unused_parameters: ${oc.select:debug, true, false}
+  detect_anomaly: ${oc.select:debug, true, false}

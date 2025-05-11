@@ -1,0 +1,18 @@
+lr: 0.0001
+max_grad_norm: 0.1
+batch_size: 1
+num_steps: 10000
+warmup_percentage: 0.1
+
+resume_file: null
+
+eval_steps: 1000
+
+print_interval: 10
+log_tensorboard: true
+tensorboard_name: null
+log_level: "INFO"
+
+clear_cache_interval: 1000
+
+compile: false

@@ -361,33 +361,15 @@ class EMTransformer(nn.Module):
 
     def get_position_encoding(
         self,
-        # encoded_features: Union[list[spconv.SparseConvTensor], list[ME.SparseTensor]],
         encoded_features: list[ME.SparseTensor],
         full_spatial_shape: Tensor,
     ):
         if full_spatial_shape.ndim == 2:
             full_spatial_shape = full_spatial_shape[0]
-        if isinstance(encoded_features[0], ME.SparseTensor):
-            ij_indices = [encoded.C[:, 1:] for encoded in encoded_features]
-            normalized_xy = [
-                ij_indices_to_normalized_xy(ij, full_spatial_shape) for ij in ij_indices
-            ]
-        # elif isinstance(encoded_features[0], spconv.SparseConvTensor):
-        #     spatial_sizes = [
-        #         encoded.indices.new_tensor(encoded.spatial_shape)
-        #         for encoded in encoded_features
-        #     ]
-        #     ij_indices = [encoded.indices[:, 1:] for encoded in encoded_features]
-        #     normalized_xy = [
-        #         ij_indices_to_normalized_xy(ij, ss)
-        #         for ij, ss in zip(ij_indices, spatial_sizes)
-        #     ]
-        else:
-            raise ValueError(
-                "Expected features to be either spconv.SparseConvTensor or "
-                f"MinkowskiEngine.SparseTensor, got {type(encoded_features[0])}"
-            )
-
+        ij_indices = [encoded.C[:, 1:] for encoded in encoded_features]
+        normalized_xy = [
+            ij_indices_to_normalized_xy(ij, full_spatial_shape) for ij in ij_indices
+        ]
         normalized_x_y_level = [
             torch.cat(
                 [xy, xy.new_full([xy.shape[0], 1], i / (len(encoded_features) - 1))], -1

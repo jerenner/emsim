@@ -1,17 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
-
-@dataclass
-class DDPConfig:
-    """Configuration for distributed data parallel"""
-
-    nodes: int = 2
-    devices: int = 2
-
-    # debugging settings
-    find_unused_parameters: False  # leave off if not needed
-    detect_anomaly: False  # sets torch.autograd.set_detect_anomaly for finding nans
 
 @dataclass
 class TrainingConfig:
@@ -40,5 +29,3 @@ class TrainingConfig:
 
     log_level: str = "INFO"  # passed to logger
     compile: bool = False  # whether to use torch.compile
-
-    ddp: DDPConfig = field(default_factory=DDPConfig)

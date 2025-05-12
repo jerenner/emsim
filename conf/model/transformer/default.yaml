@@ -1,3 +1,4 @@
+spatial_dimension: ${spatial_dimension}
 d_model: 256
 n_heads: 8
 dropout: 0.1
@@ -6,7 +7,9 @@ activation_fn: "gelu"
 attn_proj_bias: false
 norm_first: false
 
-n_feature_levels: ${array_length:model.modules.backbone.decoder.layers}
+# to compute number of feature levels
+backbone_decoder_layers: ${model.backbone.decoder.layers}
+
 n_deformable_points: 4
 
 neighborhood_sizes: [3, 5, 7 ,9]
@@ -17,22 +20,29 @@ layer_filter_ratio: [1.0, 0.8, 0.6, 0.6, 0.4, 0.2]
 
 query_embeddings: 500
 
-mask_main_queries_from_denoising: "${model.denoising.mask_main_queries_from_denoising}"
+mask_main_queries_from_denoising: ${model.denoising.mask_main_queries_from_denoising}
 
 encoder:
-  layers: 6
+  n_layers: 6
   topk_sa: 100
-  use_ms_deform_attn: true
+  
+  use_ms_deform_attn: false
   use_neighborhood_attn: true
+
   use_rope: true
 
 decoder:
-  layers: 6
-  use_ms_deform_attn: true
+  n_layers: 6
+  
+  use_ms_deform_attn: false
   use_neighborhood_attn: true
   use_full_cross_attn: false    
+  
   detach_updated_positions: true
   look_forward_twice: true
+  layers_share_heads: true
+  predict_box: ${model.predict_box}
+  
   use_rope: true
 
 rope:
@@ -40,4 +50,5 @@ rope:
   spatial_base_theta: 100.0
   level_base_theta: 10.0
   share_heads: false
-  freq_group_pattern: "partition"  # single, partition, closure
+  freq_group_pattern: PARTITION  # SINGLE, PARTITION, CLOSURE
+  enforce_freq_groups_equal: true

@@ -1,4 +1,5 @@
 defaults:
+  - base_config
   - model: default
   - dataset: default
   - training: default
@@ -14,5 +15,5 @@ debug: false
 ddp:
   nodes: 2
   devices: 2
-  find_unused_parameters: ${oc.select:debug, true, false}
-  detect_anomaly: ${oc.select:debug, true, false}
+  find_unused_parameters: ${debug}
+  detect_anomaly: ${debug}

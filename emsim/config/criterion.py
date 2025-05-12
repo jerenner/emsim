@@ -30,7 +30,15 @@ class AuxLossConfig:
     use_aux_loss: bool = True
     use_final_matches: bool = False
     aux_loss_weight: float = 1.0
-    n_aux_losses: int = "${n_aux_losses:}"
+    transformer_decoder_layers: int = "${model.transformer.decoder.n_layers}"
+    n_aux_losses: int = field(init=False)
+
+    def __post_init__(self):
+        if not isinstance(self.transformer_decoder_layers, str):
+            self.n_aux_losses = max(0, self.transformer_decoder_layers - 1)
+        else:
+            # Default if not resolved yet
+            self.n_aux_losses = 5
 
 
 @dataclass
@@ -43,9 +51,12 @@ class CriterionConfig:
     loss_coef_incidence_nll: float = 0.1
     loss_coef_incidence_likelihood: float = 10.0
     loss_coef_incidence_huber: float = 100.0
+    loss_coef_salience: float = 1.0
     loss_coef_box_l1: float = 1.0
     loss_coef_box_giou: float = 1.0
+
     no_electron_weight: float = 1.0
+
     detach_likelihood_mean: bool = False
 
     detection_metric_distance_thresholds: list[float] = field(

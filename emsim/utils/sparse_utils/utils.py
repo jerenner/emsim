@@ -22,21 +22,21 @@ except ImportError:
 
 
 def requires_minkowskiengine(func):
-    @functools.wraps
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         if not has_minkowskiengine:
             raise ModuleNotFoundError("Could not import MinkowskiEngine")
-        return func(**args, **kwargs)
+        return func(*args, **kwargs)
 
     return wrapper
 
 
 def requires_spconv(func):
-    @functools.wraps
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         if not has_spconv:
             raise ModuleNotFoundError("Could not import spconv")
-        return func(**args, **kwargs)
+        return func(*args, **kwargs)
 
     return wrapper
 

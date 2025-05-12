@@ -1,5 +1,5 @@
 import copy
-from typing import Union
+from typing import Union, Optional
 
 import MinkowskiEngine as ME
 import numpy as np
@@ -27,6 +27,7 @@ from emsim.utils.sparse_utils.indexing.scatter import (
 from emsim.utils.sparse_utils.indexing.script_funcs import (
     linearize_sparse_and_index_tensors,
 )
+from emsim.config.transformer import RoPEConfig, TransformerEncoderConfig
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -35,18 +36,18 @@ class TransformerEncoderLayer(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
+        n_feature_levels: int = 4,
         use_msdeform_attn: bool = True,
-        n_deformable_value_levels: int = 4,
-        n_deformable_points: int = 4,
+        n_deformable_points: Optional[int] = 4,
         use_neighborhood_attn: bool = True,
-        neighborhood_sizes: list[int] = [3, 5, 7, 9],
+        neighborhood_sizes: Optional[list[int]] = None,
+        use_rope: bool = True,
+        rope_config: Optional[RoPEConfig] = None,
         dropout: float = 0.1,
         activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
         topk_sa: int = 1000,
-        use_rope: bool = False,
-        rope_base_theta: float = 10.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -62,21 +63,25 @@ class TransformerEncoderLayer(nn.Module):
                 d_model, n_heads, dropout, attn_proj_bias, norm_first
             )
         else:
+            assert rope_config is not None
             self.self_attn = MultilevelSelfAttentionBlockWithRoPE(
                 d_model,
                 n_heads,
-                n_deformable_value_levels,
-                2,
+                rope_config.spatial_dimension,
                 dropout,
                 attn_proj_bias,
                 norm_first,
-                rope_theta=rope_base_theta,
+                rope_spatial_base_theta=rope_config.spatial_base_theta,
+                rope_level_base_theta=rope_config.level_base_theta,
+                rope_share_heads=rope_config.share_heads,
+                rope_freq_group_pattern=rope_config.freq_group_pattern,
+                rope_enforce_freq_groups_equal=rope_config.enforce_freq_groups_equal,
             )
         if use_msdeform_attn:
             self.msdeform_attn = SparseDeformableAttentionBlock(
                 d_model,
                 n_heads,
-                n_deformable_value_levels,
+                n_feature_levels,
                 n_deformable_points,
                 dropout,
                 norm_first,
@@ -84,15 +89,22 @@ class TransformerEncoderLayer(nn.Module):
         else:
             self.msdeform_attn = None
         if use_neighborhood_attn:
+            assert rope_config is not None
+            assert neighborhood_sizes is not None
             self.neighborhood_attn = SparseNeighborhoodAttentionBlock(
                 d_model,
                 n_heads,
-                n_deformable_value_levels,
+                n_feature_levels,
                 neighborhood_sizes=neighborhood_sizes,
+                position_dim=rope_config.spatial_dimension,
                 dropout=dropout,
                 bias=attn_proj_bias,
                 norm_first=norm_first,
-                rope_theta=rope_base_theta,
+                rope_spatial_base_theta=rope_config.spatial_base_theta,
+                rope_level_base_theta=rope_config.level_base_theta,
+                rope_share_heads=rope_config.share_heads,
+                rope_freq_group_pattern=rope_config.freq_group_pattern,
+                rope_enforce_freq_groups_equal=rope_config.enforce_freq_groups_equal,
             )
         else:
             self.neighborhood_attn = None
@@ -228,16 +240,16 @@ class EMTransformerEncoder(nn.Module):
     def __init__(
         self,
         encoder_layer: nn.Module,
-        num_layers: int = 6,
+        config: TransformerEncoderConfig,
         score_predictor: nn.Module = None,
     ):
         super().__init__()
         self.layers: list[TransformerEncoderLayer] = nn.ModuleList(
-            [copy.deepcopy(encoder_layer) for _ in range(num_layers)]
+            [copy.deepcopy(encoder_layer) for _ in range(config.n_layers)]
         )
-        self.num_layers = num_layers
+        self.n_layers = config.n_layers
         self.d_model = encoder_layer.d_model
-        self.use_rope = self.layers[0].use_rope
+        self.use_rope = config.use_rope
 
         self.reset_parameters()
 
@@ -248,7 +260,7 @@ class EMTransformerEncoder(nn.Module):
         self,
         feature_maps: list[ME.SparseTensor],
         position_encoding: list[ME.SparseTensor],
-        spatial_shapes: Tensor,
+        level_spatial_shapes: Tensor,
         token_salience_scores: list[Tensor],  # foreground scores
         token_bijl_indices: list[Tensor],
         token_normalized_xy_positions: list[Tensor],
@@ -256,10 +268,10 @@ class EMTransformerEncoder(nn.Module):
     ):
         # stack the MinkowskiEngine tensors over the batch dimension for faster indexing
         stacked_feature_maps = self.stack_sparse_tensors(
-            feature_maps, spatial_shapes[-1]
+            feature_maps, level_spatial_shapes[-1]
         )
         stacked_pos_encodings = (
-            self.stack_sparse_tensors(position_encoding, spatial_shapes[-1])
+            self.stack_sparse_tensors(position_encoding, level_spatial_shapes[-1])
             if not self.use_rope
             else None
         )
@@ -328,7 +340,7 @@ class EMTransformerEncoder(nn.Module):
                 stacked_xy_positions_for_layer,
                 batch_offsets,
                 stacked_feature_maps,
-                spatial_shapes,
+                level_spatial_shapes,
                 token_scores_for_layer,
                 electron_prob,  # score_tgt
             )
@@ -345,7 +357,7 @@ class EMTransformerEncoder(nn.Module):
         background_ij = background_indices[:, 1:3]
         background_level = background_indices[:, 3]
         background_xy = ij_indices_to_normalized_xy(
-            background_ij, spatial_shapes[background_level]
+            background_ij, level_spatial_shapes[background_level]
         )
         background_xy_level = torch.cat(
             [

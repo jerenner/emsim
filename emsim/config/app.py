@@ -2,7 +2,19 @@ from dataclasses import dataclass, field
 
 from .model import EMModelConfig
 from .dataset import DatasetConfig
-from .training import TrainingConfig, DDPConfig
+from .training import TrainingConfig
+
+
+@dataclass
+class DDPConfig:
+    """Configuration for distributed data parallel"""
+
+    nodes: int = 2
+    devices: int = 2
+
+    # debugging settings
+    find_unused_parameters: bool = False  # leave off if not needed
+    detect_anomaly: bool = False  # sets torch.autograd.set_detect_anomaly for finding nans
 
 @dataclass
 class AppConfig:

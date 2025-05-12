@@ -10,7 +10,7 @@ from .denoising import DenoisingConfig
 class EMModelConfig:
     """Top-level configuration for the EM Model."""
 
-    unet: BackboneConfig = field(default_factory=BackboneConfig)
+    backbone: BackboneConfig = field(default_factory=BackboneConfig)
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     criterion: CriterionConfig = field(default_factory=CriterionConfig)
     denoising: DenoisingConfig = field(default_factory=DenoisingConfig)

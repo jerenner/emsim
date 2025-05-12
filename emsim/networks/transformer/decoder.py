@@ -20,6 +20,7 @@ from .blocks import (
     SparseNeighborhoodAttentionBlock,
 )
 from .std_dev_head import StdDevHead
+from emsim.config.transformer import RoPEConfig, TransformerDecoderConfig
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -28,41 +29,47 @@ class TransformerDecoderLayer(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
+        n_feature_levels: int = 4,
         use_ms_deform_attn: bool = True,
-        n_deformable_value_levels: int = 4,
         n_deformable_points: int = 4,
         use_neighborhood_attn: bool = True,
         neighborhood_sizes: list[int] = [3, 5, 7, 9],
         use_full_cross_attn: bool = False,
-        predict_box: bool = False,
+        use_rope: bool = True,
+        rope_config: Optional[RoPEConfig] = None,
         dropout: float = 0.1,
         activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
-        self_attn_use_rope: bool = True,
-        rope_base_theta: float = 10.0,
+        predict_box: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.dim_feedforward = dim_feedforward
-        self.self_attn_rope = self_attn_use_rope
         self.use_ms_deform_attn = use_ms_deform_attn
         self.use_neighborhood_attn = use_neighborhood_attn
         self.use_full_cross_attn = use_full_cross_attn
-        self.use_rope = self_attn_use_rope
+        self.use_rope = use_rope
         self.predict_box = predict_box
 
-        if self_attn_use_rope:
+        if use_rope:
             self.self_attn = MultilevelSelfAttentionBlockWithRoPE(
                 d_model,
                 n_heads,
-                n_deformable_value_levels,
-                6 if predict_box else 2,
+                (
+                    rope_config.spatial_dimension + 4
+                    if predict_box
+                    else rope_config.spatial_dimension
+                ),
                 dropout,
                 attn_proj_bias,
                 norm_first,
-                rope_theta=rope_base_theta,
+                rope_spatial_base_theta=rope_config.spatial_base_theta,
+                rope_level_base_theta=rope_config.level_base_theta,
+                rope_share_heads=rope_config.share_heads,
+                rope_freq_group_pattern=rope_config.freq_group_pattern,
+                rope_enforce_freq_groups_equal=rope_config.enforce_freq_groups_equal,
             )
         else:
             self.self_attn = SelfAttentionBlock(
@@ -72,7 +79,7 @@ class TransformerDecoderLayer(nn.Module):
             self.ms_deform_attn = SparseDeformableAttentionBlock(
                 d_model,
                 n_heads,
-                n_deformable_value_levels,
+                n_feature_levels,
                 n_deformable_points,
                 dropout,
                 norm_first,
@@ -80,15 +87,22 @@ class TransformerDecoderLayer(nn.Module):
         else:
             self.ms_deform_attn = None
         if use_neighborhood_attn:
+            assert rope_config is not None
+            assert neighborhood_sizes is not None
             self.neighborhood_attn = SparseNeighborhoodAttentionBlock(
                 d_model,
                 n_heads,
-                n_deformable_value_levels,
+                n_feature_levels,
                 neighborhood_sizes=neighborhood_sizes,
+                position_dim=rope_config.spatial_dimension,
                 dropout=dropout,
                 bias=attn_proj_bias,
                 norm_first=norm_first,
-                rope_theta=rope_base_theta,
+                rope_spatial_base_theta=rope_config.spatial_base_theta,
+                rope_level_base_theta=rope_config.level_base_theta,
+                rope_share_heads=rope_config.share_heads,
+                rope_freq_group_pattern=rope_config.freq_group_pattern,
+                rope_enforce_freq_groups_equal=rope_config.enforce_freq_groups_equal,
             )
         else:
             self.neighborhood_attn = None
@@ -96,7 +110,7 @@ class TransformerDecoderLayer(nn.Module):
             self.full_cross_attn = MultilevelCrossAttentionBlockWithRoPE(
                 d_model,
                 n_heads,
-                n_deformable_value_levels,
+                n_feature_levels,
                 dropout,
                 attn_proj_bias,
                 norm_first=norm_first,
@@ -196,35 +210,31 @@ class EMTransformerDecoder(nn.Module):
     def __init__(
         self,
         decoder_layer: nn.Module,
-        num_layers: int = 6,
-        predict_box: bool = False,
-        layers_share_heads: bool = True,
+        config: TransformerDecoderConfig,
         class_head: Optional[nn.Module] = None,
         position_offset_head: Optional[nn.Module] = None,
         std_head: Optional[nn.Module] = None,
         segmentation_head: Optional[nn.Module] = None,
-        look_forward_twice: bool = True,
-        detach_updated_positions: bool = True,
     ):
         super().__init__()
         self.layers: list[TransformerDecoderLayer] = nn.ModuleList(
-            [copy.deepcopy(decoder_layer) for _ in range(num_layers)]
+            [copy.deepcopy(decoder_layer) for _ in range(config.n_layers)]
         )
-        self.num_layers = num_layers
+        self.n_layers = config.n_layers
         self.d_model = decoder_layer.d_model
-        self.predict_box = predict_box
-        self.look_forward_twice = look_forward_twice
-        self.detach_updated_positions = detach_updated_positions
-        self.use_rope = self.layers[0].use_rope
+        self.predict_box = config.predict_box
+        self.look_forward_twice = config.look_forward_twice
+        self.detach_updated_positions = config.detach_updated_positions
+        self.use_rope = config.use_rope
         if self.use_rope:
             self.query_pos_encoding = nn.Identity()
         else:
-            assert not predict_box, "Box prediction only implemented for RoPE"
+            assert not config.predict_box, "Box prediction only implemented for RoPE"
             self.query_pos_encoding = FourierEncoding(
                 2, decoder_layer.d_model, dtype=torch.double
             )
 
-        self.layers_share_heads = layers_share_heads
+        self.layers_share_heads = config.layers_share_heads
         if self.layers_share_heads:
             if (
                 class_head is None
@@ -253,7 +263,7 @@ class EMTransformerDecoder(nn.Module):
             self.std_head = None
             self.segmentation_head = None
             self.per_layer_class_heads = nn.ModuleList(
-                [nn.Linear(self.d_model, 1) for _ in range(num_layers)]
+                [nn.Linear(self.d_model, 1) for _ in range(config.n_layers)]
             )
             self.per_layer_position_heads = nn.ModuleList(
                 [
@@ -264,16 +274,16 @@ class EMTransformerDecoder(nn.Module):
                         nn.ReLU(),
                         nn.Linear(self.d_model, 2, dtype=torch.double),
                     )
-                    for _ in range(num_layers)
+                    for _ in range(config.n_layers)
                 ]
             )
             self.per_layer_std_heads = nn.ModuleList(
-                [StdDevHead(self.d_model) for _ in range(num_layers)]
+                [StdDevHead(self.d_model) for _ in range(config.n_layers)]
             )
             self.per_layer_segmentation_heads = nn.ModuleList(
                 [
                     PatchedSegmentationMapPredictor(self.d_model)
-                    for _ in range(num_layers)
+                    for _ in range(config.n_layers)
                 ]
             )
         # self.ref_point_head = nn.Sequential(

@@ -1,8 +1,8 @@
 defaults:
-  - modules/backbone: default
-  - modules/transformer: default
-  - modules/criterion: default
-  - modules/denoising: default
+  - backbone: default
+  - transformer: default
+  - criterion: default
+  - denoising: default
   - _self_
 
 include_aux_outputs: false

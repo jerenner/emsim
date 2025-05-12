@@ -35,39 +35,7 @@ from ...config.criterion import CriterionConfig
 
 
 class EMCriterion(nn.Module):
-    def __init__(
-        self,
-        config: CriterionConfig,
-        loss_coef_class: float = 1.0,
-        loss_coef_mask_bce: float = 1.0,
-        loss_coef_mask_dice: float = 1.0,
-        loss_coef_incidence_nll: float = 1.0,
-        loss_coef_incidence_likelihood: float = 1.0,
-        loss_coef_incidence_huber: float = 1.0,
-        loss_coef_salience: float = 1.0,
-        loss_coef_box_l1: float = 1.0,
-        loss_coef_box_giou: float = 1.0,
-        no_electron_weight: float = 0.1,
-        salience_alpha: float = 0.25,
-        salience_gamma: float = 2.0,
-        matcher_cost_coef_class: float = 1.0,
-        matcher_cost_coef_mask: float = 1.0,
-        matcher_cost_coef_dice: float = 1.0,
-        matcher_cost_coef_dist: float = 1.0,
-        matcher_cost_coef_nll: float = 1.0,
-        matcher_cost_coef_likelihood: float = 1.0,
-        matcher_cost_coef_box_l1: float = 1.0,
-        matcher_cost_coef_box_giou: float = 1.0,
-        use_aux_loss=True,
-        aux_loss_use_final_matches=False,
-        aux_loss_weight: float = 1.0,
-        n_aux_losses: int = 0,
-        detach_likelihood_mean: bool = False,
-        use_denoising_loss: bool = False,
-        denoising_loss_weight: float = 1.0,
-        detection_metric_distance_thresholds: list[float] = [0.5, 1.0, 5.0],
-        detection_metric_interval: int = 10,
-    ):
+    def __init__(self, config: CriterionConfig):
         super().__init__()
         self.loss_coef_class = config.loss_coef_class
         self.loss_coef_mask_bce = config.loss_coef_mask_bce
@@ -79,12 +47,12 @@ class EMCriterion(nn.Module):
         self.loss_coef_box_l1 = config.loss_coef_box_l1
         self.loss_coef_box_giou = config.loss_coef_box_giou
         self.no_electron_weight = config.no_electron_weight
-        self.aux_loss = config.aux_loss.use_aux_loss
+        self.use_aux_loss = config.aux_loss.use_aux_loss
         self.aux_loss_use_final_matches = config.aux_loss.use_final_matches
         self.aux_loss_weight = config.aux_loss.aux_loss_weight
         self.detach_likelihood_mean = config.detach_likelihood_mean
-        self.use_denoising_loss = config.denoising.use_denoising_loss
-        self.denoising_loss_weight = config.denoising.denoising_loss_weight
+        self.use_denoising_loss = config.use_denoising_loss
+        self.denoising_loss_weight = config.denoising_loss_weight
         self.detection_metric_distance_thresholds = (
             config.detection_metric_distance_thresholds
         )

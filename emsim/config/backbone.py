@@ -7,7 +7,8 @@ class BackboneEncoderConfig:
     channels: list[int] = field(default_factory=lambda: [32, 64, 128, 256])
     drop_path_rate: float = 0.0
 
-    output_stride = "${backbone_encoder_output_stride:}"
+    # To be computed
+    output_stride: int = field(init=False)
 
     # Values from parent config
     in_channels: int = "${model.backbone.in_channels}"
@@ -18,6 +19,17 @@ class BackboneEncoderConfig:
     bias: bool = "${model.backbone.bias}"
     act_layer: str = "${model.backbone.act_layer}"
     norm_layer: str = "${model.backbone.norm_layer}"
+
+    def __post_init__(self):
+        """Calculate output stride based on number of encoder layers."""
+        # Check if layers is resolved yet
+        if not isinstance(self.layers, str) and hasattr(self, 'layers'):
+            try:
+                self.output_stride = 2 ** len(self.layers)
+            except (TypeError, ValueError):
+                self.output_stride = 16  # Default (2^4)
+        else:
+            self.output_stride = 16  # Default (2^4)
 
 @dataclass
 class BackboneDecoderConfig:

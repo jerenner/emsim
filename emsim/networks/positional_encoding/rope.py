@@ -1,4 +1,5 @@
 import warnings
+from enum import Enum
 from typing import Optional, Union
 
 from emsim.utils.sparse_utils.ops.subset_attn.rotary_encoding import (
@@ -13,6 +14,15 @@ from torch import Tensor, nn
 
 # Based on code from
 # https://github.com/naver-ai/rope-vit/blob/main/self-attn/rope_self_attn.py
+
+
+class FreqGroupPattern(Enum):
+    SINGLE = "single"
+    PARTITION = "partition"
+    CLOSURE = "closure"
+
+    def __str__(self):
+        return self.value
 
 
 def _validate_head_dim_even(head_dim: int):
@@ -286,7 +296,7 @@ class RoPEEncodingND(nn.Module):
             a ValueError if the (head_dim/2) available elements of the RoPE vector
             cannot be evenly split between the frequency groups. If False, then
             trailing frequency groups may have fewer RoPE encodings assigned to them.
-        thetas (Union[Tensor], float]): Base value(s) for frequency scaling.
+        rope_base_theta (Union[Tensor], float]): Base value(s) for frequency scaling.
             Can be a single float (applied to all dimensions and frequency groups)
             or a 2D tensor of shape [n_freq_groups, position_dim], with either
             component dimension allowed to be 1 for broadcasting. Entries corresponding
@@ -834,7 +844,7 @@ def prep_multilevel_positions(
 
 
 def get_multilevel_freq_group_pattern(
-    position_dim: int, pattern_name: str, device=None
+    position_dim: int, pattern_name: Union[str, FreqGroupPattern], device=None
 ) -> Tensor:
     """Get a predefined frequency group pattern for RoPE encodings of multilevel features.
 
@@ -845,10 +855,14 @@ def get_multilevel_freq_group_pattern(
         position_dim (int): Spatial dimension of the features to be encoded (2 for 2D
             images, etc.). The output tensor will have this many spatial dimensions
             plus 1 dimension for the feature level
-        pattern_name (str): Name of the pattern to use. Options:
-            - "single": All dimensions (*spatial, level) in a single frequency group
-            - "partition": Spatial dimensions and level in separate groups
-            - "closure": Three groups - Spatial, level, and (*spatial, level)
+        pattern_name (Union[str, FreqGroupPattern]): Pattern to use, either as a string
+            or enum value. Options:
+            - "single" or FreqGroupPattern.SINGLE: All dimensions (*spatial, level) in
+                a single frequency group
+            - "partition" or FreqGroupPattern.PARTITION: Spatial dimensions and level
+                in separate groups
+            - "closure" or FreqGroupPattern.CLOSURE: Three groups - Spatial, level,
+                and (*spatial, level)
         device (torch.device, optional): Device for the created tensor. Defaults to None.
 
     Returns:
@@ -858,6 +872,9 @@ def get_multilevel_freq_group_pattern(
     Raises:
         ValueError: If an unrecognized pattern name is provided.
     """
+    if isinstance(pattern_name, FreqGroupPattern):
+        pattern_name = pattern_name.value
+
     if pattern_name == "single":
         out = torch.ones(1, position_dim + 1, device=device)
     elif pattern_name == "partition":

@@ -387,7 +387,21 @@ class EMTransformer(nn.Module):
 
     def rope_encode_backbone_out(
         self, backbone_features: list[ME.SparseTensor], image_size: Tensor
-    ):
+    ) -> list[ME.SparseTensor]:
+        """Applies rotary positional encoding (RoPE) to the multi-level feature maps
+        obtained form the backbone.
+
+        Args:
+            backbone_features (list[ME.SparseTensor]): List of MinkowskiEngine sparse
+                representing the per-stage encoded outputs from the image backbone.
+            image_size (Tensor): Tensor of shape [D], where D is the position
+                dimension, that contains the size of the image in pixels.
+
+        Returns:
+            list[ME.SparseTensor]: List of MinkowskiEngine tensors with the same
+                indices and metadata as the input backbone_features, but with the
+                features having been encoded with RoPE.
+        """
         coords: list[Tensor] = [feat.C.clone() for feat in backbone_features]
         # each tensor in coords is [n_pts, (batch,i,j)]
         spatial_shapes = []
@@ -397,7 +411,7 @@ class EMTransformer(nn.Module):
             spatial_shapes.append(image_size // stride)
 
         stacked_feats = torch.cat([feat.F for feat in backbone_features])
-        stacked_coords = torch.cat([coord[:, :1] for coord in coords])
+        stacked_coords = torch.cat([coord[:, 1:] for coord in coords])
 
         batch_indices = torch.cat([coord[:, 0] for coord in coords])
         level_indices = torch.repeat_interleave(

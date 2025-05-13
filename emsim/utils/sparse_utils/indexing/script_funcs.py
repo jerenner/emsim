@@ -36,7 +36,7 @@ def flatten_nd_indices(indices: Tensor, sizes: Tensor) -> tuple[Tensor, Tensor]:
     """Flattens N-dimensional indices into 1-dimensional scalar indices
 
     Args:
-        indices (Tensor): Integer coordinate tensor of shape [B, N], where N
+        indices (Tensor): Integer coordinate tensor of shape [N, B], where N
             is the number of dimensions to be flattened and B is the batch dimension.
         sizes (Tensor): Extents of every dimension, of shape [N]
 

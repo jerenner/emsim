@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, Optional
 
 import torch
 from torch import Tensor, nn
@@ -130,6 +130,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
+        query_level_indices: Optional[Tensor] = None,
     ) -> Tensor:
         """Forward pass of sparse neighborhood attention.
 
@@ -140,7 +141,11 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         Args:
             query (Tensor): Query features of shape [n_queries, embed_dim].
             query_spatial_positions (Tensor): Spatial positions of queries,
-                shape [n_queries, position_dim].
+                shape [n_queries, position_dim]. The positions must be floating-point
+                values scaled in the range of the highest-resolution of the spatial
+                shapes. This function will error if the positions are integers. If you
+                have integer positions (i.e, position indices), use
+                prep_multilevel_positions to get full-resolution decimal positions.
             query_batch_offsets (Tensor): Tensor of shape [batch_size+1]
                 indicating where each batch starts in the queries.
             stacked_feature_maps (Tensor): Sparse tensor containing feature maps
@@ -150,22 +155,35 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             level_spatial_shapes (Tensor): Spatial dimensions of each level,
                 shape [n_levels, position_dim]. Contains the height, width, etc.
                 of feature maps at each resolution level.
+            query_level_indices (Optional[Tensor]): Level indices of each query, shape
+                [n_queries]. If None, it defaults to every query being from the level
+                of the maximum spatial shape. This value should be specified in the
+                encoder, where queries are tokens at various levels, but may be
+                unspecified in the decoder, where queries are the object queries that
+                are given as being at the full-scale level.
 
         Returns:
             Tensor: Output embeddings after neighborhood attention,
                 shape [n_queries, embed_dim].
 
         Raises:
-            ValueError: If input tensors don't have expected shapes.
+            ValueError: If input tensors don't have expected shapes, or if
+                query_spatial_positions is an integer tensor.
         """
 
         validate_nd(query, 2, "query")
         validate_nd(query_spatial_positions, 2, "query_spatial_positions")
         n_queries = query.shape[0]
+        if not torch.is_floating_point(query_spatial_positions):
+            raise ValueError(
+                "Expected query_spatial_positions to be floating-point, got dtype "
+                f"{query_spatial_positions.dtype}"
+            )
         if query_spatial_positions.size(1) != self.position_dim:
             raise ValueError(
                 "Expected second dim of query_spatial_positions to be equal to "
-                f"position dim (={self.position_dim}), but got shape {query.shape}"
+                f"position dim (={self.position_dim}), but got shape "
+                f"{query_spatial_positions.shape}"
             )
 
         req_feat_map_dim = self.position_dim + 3
@@ -181,16 +199,17 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             query = self.norm(query)
         q = self.q_in_proj(query)
 
-        # Prep query
-        max_spatial_level = level_spatial_shapes.prod(1).argmax(0)
-
-        # Add level "dimension" to query position for pos encoding.
-        # We treat each query as living in the full-scale level
-        query_spatial_level_positions = query_spatial_positions.new_zeros(
+        # Prep query: add level dimension to query position for pos encoding.
+        query_spatial_level_positions = query_spatial_positions.new_empty(
             (n_queries, self.pos_encoding.position_dim)
         )
         query_spatial_level_positions[:, :-1] = query_spatial_positions
-        query_spatial_level_positions[:, -1] = max_spatial_level
+        if query_level_indices is not None:
+            query_spatial_level_positions[:, -1] = query_level_indices
+        else:
+            # We treat each query as living in the full-scale level
+            max_spatial_level = level_spatial_shapes.prod(1).argmax(0)
+            query_spatial_level_positions[:, -1] = max_spatial_level
 
         # Position encode queries
         query_rotated = self.pos_encoding(q, query_spatial_level_positions)
@@ -246,7 +265,8 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         # sanity check that the out of bounds indices were correctly identified as
         # unspecified
         assert torch.all(
-            (out_of_bounds_nhood_mask & (~is_specified_mask)) == out_of_bounds_nhood_mask
+            (out_of_bounds_nhood_mask & (~is_specified_mask))
+            == out_of_bounds_nhood_mask
         )
 
         x = self.out_proj(x)

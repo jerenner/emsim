@@ -126,7 +126,7 @@ def simple_input_tensors(
 
 @st.composite
 def neighborhood_data_strategy(
-    draw, require_grads: bool = False, max_float_mag=1e6
+    draw, require_grads: bool = False, standard_float_range=False,
 ) -> dict[str, Any]:
     # Draw basic shape parameters
     n_heads = draw(st.integers(1, 8))
@@ -167,12 +167,16 @@ def neighborhood_data_strategy(
     seed = draw(st.integers(0, 1e8))
     float_dtype = draw(st.just(torch.float32))
 
-    min_float_value = draw(
-        st.floats(min_value=-max_float_mag, max_value=max_float_mag, exclude_max=True)
-    )
-    max_float_value = draw(
-        st.floats(min_value=min_float_value, max_value=max_float_mag)
-    )
+    if standard_float_range:
+        min_float_value = -1
+        max_float_value = 1
+    else:
+        min_float_value = draw(
+            st.floats(min_value=-1e6, max_value=1e6, exclude_max=True)
+        )
+        max_float_value = draw(
+            st.floats(min_value=min_float_value, max_value=1e6)
+        )
 
     position_dtype = draw(st.just(torch.float32))
 
@@ -206,6 +210,9 @@ def neighborhood_data_strategy(
     else:
         rope_enforce_freq_groups_equal = True
 
+    # Decide whether to include optional level indices
+    make_level_indices = draw(st.booleans())
+
     return {
         "config": {
             "embed_dim": embed_dim,
@@ -230,6 +237,7 @@ def neighborhood_data_strategy(
             "neighborhood_sizes": neighborhood_sizes,
             "query_full_neighborhood_portion": query_full_neighborhood_portion,
             "sparse_region_sparsity": sparse_region_sparsity,
+            "make_level_indices": make_level_indices,
             "min_float_value": min_float_value,
             "max_float_value": max_float_value,
             "float_dtype": float_dtype,
@@ -248,6 +256,7 @@ def strategy_input_tensors(
     neighborhood_sizes: list[int],
     query_full_neighborhood_portion: float,
     sparse_region_sparsity: float,
+    make_level_indices: bool,
     min_float_value: float,
     max_float_value: float,
     float_dtype: torch.dtype,
@@ -295,6 +304,14 @@ def strategy_input_tensors(
     query_spatial_positions *= max_spatial_shape
     if "query_spatial_positions" in tensors_requiring_grads:
         query_spatial_positions.requires_grad_(True)
+
+    # make level indices, or don't
+    if make_level_indices:
+        query_level_indices = torch.randint(
+            level_spatial_shapes.size(-2), size=(n_queries,), device=device
+        )
+    else:
+        query_level_indices = None
 
     # Create stacked feature maps sparse tensor
     # 1. Obtain full neighborhood indices for specified queries
@@ -373,6 +390,7 @@ def strategy_input_tensors(
         device=device,
     ).coalesce()
 
+    # Check validity of the sparse tensor
     assert (stacked_feature_maps.indices() >= 0).all()
     for level in range(n_levels):
         level_mask = stacked_feature_maps.indices()[-1] == level
@@ -394,6 +412,7 @@ def strategy_input_tensors(
         "query_batch_offsets": query_batch_offsets,
         "stacked_feature_maps": stacked_feature_maps,
         "level_spatial_shapes": level_spatial_shapes,
+        "query_level_indices": query_level_indices,
     }
 
 
@@ -1154,7 +1173,7 @@ class TestCorrectness:
 @pytest.mark.cuda_if_available
 class TestProperties:
     @settings(deadline=None)
-    @given(inputs=neighborhood_data_strategy(require_grads=True))
+    @given(inputs=neighborhood_data_strategy(require_grads=True, standard_float_range=True))
     def test_gradient_magnitude_consistency(self, inputs: dict[str, Any], device: str):
         """Test that gradient magnitudes are reasonable and don't explode or vanish."""
         config = inputs["config"]
@@ -1361,9 +1380,9 @@ class TestProperties:
 
         small_specified_indices = small_key_index_tensor[small_is_specified_mask]
         large_specified_indices = large_key_index_tensor[large_is_specified_mask]
-        assert small_specified_indices.shape[0] < large_specified_indices.shape[0], (
-            f"query positions: {input_data['query_spatial_positions']}"
-        )
+        assert (
+            small_specified_indices.shape[0] < large_specified_indices.shape[0]
+        ), f"query positions: {input_data['query_spatial_positions']}"
 
         # Test that nonzero attended keys are different
         small_specified_unique = small_specified_indices.unique(dim=0)
@@ -1381,7 +1400,7 @@ class TestProperties:
         )
 
     @settings(deadline=None)
-    @given(inputs=neighborhood_data_strategy(max_float_mag=1e3))
+    @given(inputs=neighborhood_data_strategy(standard_float_range=True))
     def test_multi_level_contribution(self, inputs: dict[str, Any], device: str):
         """Test that multiple levels contribute to the output."""
         # assume at least 2 queries

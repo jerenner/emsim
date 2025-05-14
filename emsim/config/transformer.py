@@ -22,10 +22,13 @@ class TransformerEncoderConfig:
     """Configuration for the transformer encoder."""
 
     n_layers: int = 6
-    topk_sa: int = 100
 
     use_ms_deform_attn: bool = False
     use_neighborhood_attn: bool = True
+
+    layer_filter_ratio: list[float] = "${model.transformer.layer_filter_ratio}"
+    max_tokens_sa: int = 1000
+    max_tokens_non_sa: int = 10000
 
     use_rope: bool = True
 
@@ -75,7 +78,6 @@ class TransformerConfig:
     query_embeddings: int = 500
 
     # Salience filtering parameters
-    max_tokens: int = 10000
     level_filter_ratio: list[float] = field(
         default_factory=lambda: [0.25, 0.5, 1.0, 1.0]
     )

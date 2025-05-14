@@ -18,7 +18,11 @@ from emsim.networks.transformer.blocks import (
     SparseDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
-from emsim.utils.sparse_utils.batching.batching import deconcat_add_batch_dim
+from emsim.utils.sparse_utils.batching.batching import (
+    deconcat_add_batch_dim,
+    seq_lengths_to_batch_offsets,
+    batch_offsets_to_seq_lengths,
+)
 from emsim.utils.sparse_utils.conversion import minkowski_to_torch_sparse
 from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index
 from emsim.utils.sparse_utils.indexing.scatter import (
@@ -26,6 +30,7 @@ from emsim.utils.sparse_utils.indexing.scatter import (
 )
 from emsim.utils.sparse_utils.indexing.script_funcs import (
     linearize_sparse_and_index_tensors,
+    flatten_nd_indices,
 )
 from emsim.config.transformer import RoPEConfig, TransformerEncoderConfig
 
@@ -47,13 +52,13 @@ class TransformerEncoderLayer(nn.Module):
         activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
-        topk_sa: int = 1000,
+        max_tokens_sa: int = 1000,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.dim_feedforward = dim_feedforward
-        self.topk_sa = topk_sa
+        self.max_tokens_sa = max_tokens_sa
         self.use_msdeform_attn = use_msdeform_attn
         self.use_neighborhood_attn = use_neighborhood_attn
         self.use_rope = use_rope
@@ -114,115 +119,89 @@ class TransformerEncoderLayer(nn.Module):
 
     def forward(
         self,
-        queries: Tensor,
-        query_pos_encoding: Tensor,
-        query_bijl_indices: Tensor,
-        query_normalized_xy_positions: Tensor,
-        batch_offsets: Tensor,
+        queries: Tensor,  # [query_batch_offsets[-1]]
+        query_batch_offsets: Tensor,  # [bsz+1]
+        token_predicted_salience_score: Tensor,  # [query_batch_offsets[-1]]
+        query_spatial_indices: Tensor,  # [spatial_dim+2, query_batch_offsets[-1]]
         stacked_feature_maps: Tensor,
-        spatial_shapes: Tensor,
-        token_predicted_salience: Tensor,
-        token_electron_probs: Tensor,
+        level_spatial_shapes: Tensor,
+        token_electron_scores: Tensor,
+        query_pos_encoding: Optional[Tensor] = None,
     ):
-        token_scores = token_electron_probs * token_predicted_salience.sigmoid()
-        token_scores_batched, pad_mask = deconcat_add_batch_dim(
-            token_scores.unsqueeze(-1), batch_offsets, -torch.inf
-        )
-        token_scores_batched = token_scores_batched.squeeze(-1)
-        queries_batched, pad_mask_2 = deconcat_add_batch_dim(queries, batch_offsets)
-        ij_indices_batched, pad_mask_4 = deconcat_add_batch_dim(
-            query_bijl_indices, batch_offsets
-        )
-        assert torch.equal(pad_mask, pad_mask_2)
-        assert torch.equal(pad_mask, pad_mask_4)
+        token_scores = token_electron_scores + token_predicted_salience_score
 
-        k = min(self.topk_sa, token_scores_batched.shape[1])
-        indices = torch.topk(token_scores_batched, k, dim=1)[1]
-        selected_pad_mask = torch.gather(pad_mask, 1, indices)
-        selected_ij_indices = torch.gather(
-            ij_indices_batched,
-            1,
-            indices.unsqueeze(-1).expand(-1, -1, ij_indices_batched.shape[-1]),
-        )
-        indices_unsq = indices.unsqueeze(-1).expand(-1, -1, queries_batched.shape[-1])
-        selected_queries = torch.gather(queries_batched, 1, indices_unsq)
-        # selected_queries = queries_batched
-        # selected_pos_encoding = pos_encoding_batched
-        # selected_pad_mask = pad_mask
+        # Find the max_tokens_sa topk for self attention
+        token_seq_lens: Tensor = batch_offsets_to_seq_lengths(query_batch_offsets)
+        min_len, max_len = torch.aminmax(token_seq_lens)
 
-        ### unbatched gather
-        indices_flat = torch.flatten(
-            indices + batch_offsets.unsqueeze(-1).expand_as(indices)
-        )[selected_pad_mask.flatten().logical_not()]
-        batch_offsets_flat = torch.arange(
-            0,
-            indices_flat.numel(),
-            indices.shape[-1],
-            device=indices_flat.device,
-            dtype=torch.int32,
-        ) - torch.cat([indices.new_zeros([1]), selected_pad_mask.sum(-1)[:-1]], 0)
-        # selected_queries_flat = queries[indices_flat]
-        selected_bijl_indices_flat = torch.gather(
-            query_bijl_indices,
-            0,
-            indices_flat.unsqueeze(-1).expand(-1, query_bijl_indices.shape[-1]),
-        )
-        indices_flat_unsq = indices_flat.unsqueeze(-1).expand(-1, queries.shape[-1])
-        selected_queries_flat = torch.gather(queries, 0, indices_flat_unsq)
-        assert torch.equal(selected_queries_flat, selected_queries[~selected_pad_mask])
-        ###
+        if min_len == max_len:  # sequences same length, batchify for efficiency
+            k = min_len.clamp_max(self.max_tokens_sa)
+            _, topk_indices = token_scores.reshape(-1, min_len).topk(k)
+            topk_indices += query_batch_offsets.unsqueeze(1)
+            topk_indices = topk_indices.flatten()
+        else:  # sequences different length, run topk for each
+            batch_ks = token_seq_lens.clamp_max(self.max_tokens_sa)
+            topk_offsets = seq_lengths_to_batch_offsets(batch_ks)
+            topk_indices = torch.empty(
+                topk_offsets[-1], dtype=torch.long, device=queries.device
+            )
+
+            # holder for topk's first (values) output
+            scratch_values = token_scores.new_empty(batch_ks.max())
+
+            # per-batch topk
+            for b, k in enumerate(batch_ks):
+                k = int(k)
+                batch_start, batch_end = query_batch_offsets[b : b + 2]
+                slice_topk = slice(*topk_offsets[b : b + 2])
+
+                torch.topk(
+                    token_scores[batch_start:batch_end].detach(),
+                    k,
+                    out=(scratch_values[:k], topk_indices[slice_topk]),
+                )
+                topk_indices[slice_topk] += batch_start
+            del scratch_values
+
+        queries_sa = queries[topk_indices]
+        spatial_indices_sa = query_spatial_indices[:, topk_indices]
 
         if not self.use_rope:
-            pos_encoding_batched, pad_mask_3 = deconcat_add_batch_dim(
-                query_pos_encoding, batch_offsets
-            )
-            selected_pos_encoding = torch.gather(pos_encoding_batched, 1, indices_unsq)
-            assert torch.equal(pad_mask, pad_mask_3)
-            selected_pos_encoding_flat = torch.gather(
-                query_pos_encoding, 0, indices_flat_unsq
-            )
-            assert torch.equal(
-                selected_pos_encoding_flat, selected_pos_encoding[~selected_pad_mask]
-            )
-            self_attn_out = self.self_attn(
-                selected_queries_flat,
-                selected_pos_encoding_flat,
-                batch_offsets=batch_offsets_flat,
-            )
+            raise NotImplementedError("Non-RoPE SA not implemented")
         else:
-            positions = prep_multilevel_positions(
-                selected_bijl_indices_flat, spatial_shapes
-            )
             self_attn_out = self.self_attn(
-                selected_queries_flat,
-                positions[:, 1:3],
-                positions[:, -1],
-                batch_offsets_flat,
+                x=queries_sa,
+                spatial_positions=spatial_indices_sa[1:-1].T,
+                level_indices=spatial_indices_sa[-1],
+                level_spatial_shapes=level_spatial_shapes,
+                batch_offsets=topk_offsets,
             )
-        # queries_batched = queries_batched.scatter(1, indices_unsq, self_attn_out)
-        # queries_batched = self_attn_out
-        # queries_2, batch_offsets_2 = remove_batch_dim_and_concat(
-        #     queries_batched, pad_mask
-        # )
-        # assert torch.equal(batch_offsets, batch_offsets_2)
-        queries = queries.scatter(0, indices_flat_unsq, self_attn_out)
+        queries = queries.index_copy(0, topk_indices, self_attn_out)
 
         if self.use_msdeform_attn:
-            queries = self.msdeform_attn(
-                queries,
-                query_pos_encoding,
-                query_normalized_xy_positions,
-                batch_offsets,
-                stacked_feature_maps,
-                spatial_shapes,
-            )
+            raise NotImplementedError("SparseMSDeformAttention not updated yet")
+            # queries = self.msdeform_attn(
+            #     queries,
+            #     query_pos_encoding,
+            #     query_normalized_xy_positions,
+            #     query_batch_offsets,
+            #     stacked_feature_maps,
+            #     level_spatial_shapes,
+            # )
         if self.use_neighborhood_attn:
+            query_positions = prep_multilevel_positions(
+                query_spatial_indices[1:-1].T,
+                query_spatial_indices[0],
+                query_spatial_indices[-1],
+                level_spatial_shapes,
+            )
             queries = self.neighborhood_attn(
-                queries,
-                query_bijl_indices,
-                batch_offsets,
-                stacked_feature_maps,
-                spatial_shapes,
+                query=queries,
+                query_spatial_positions=query_positions[:, :-1],
+                query_batch_offsets=query_batch_offsets,
+                stacked_feature_maps=stacked_feature_maps,
+                level_spatial_shapes=level_spatial_shapes,
+                query_level_indices=query_spatial_indices[-1],
             )
         queries = self.ffn(queries)
         return queries
@@ -250,105 +229,296 @@ class EMTransformerEncoder(nn.Module):
         self.n_layers = config.n_layers
         self.d_model = encoder_layer.d_model
         self.use_rope = config.use_rope
+        self.max_tokens_sa = config.max_tokens_sa
+        self.max_tokens_non_sa = config.max_tokens_non_sa
+
+        self.register_buffer(
+            "layer_filter_ratio", torch.as_tensor(config.layer_filter_ratio)
+        )
 
         self.reset_parameters()
 
         self.enhance_score_predictor = score_predictor
-        self.background_embedding = FourierEncoding(3, self.d_model, dtype=torch.double)
 
     def forward(
         self,
-        feature_maps: list[ME.SparseTensor],
-        position_encoding: list[ME.SparseTensor],
+        sparse_feature_maps: list[ME.SparseTensor],
         level_spatial_shapes: Tensor,
         token_salience_scores: list[Tensor],  # foreground scores
-        token_bijl_indices: list[Tensor],
-        token_normalized_xy_positions: list[Tensor],
-        token_layer_subset_indices: list[Tensor],
+        token_spatial_indices: list[Tensor],
+        token_level_indices: list[Tensor],
+        position_encoding: Optional[list[ME.SparseTensor]] = None,
     ):
         # stack the MinkowskiEngine tensors over the batch dimension for faster indexing
         stacked_feature_maps = self.stack_sparse_tensors(
-            feature_maps, level_spatial_shapes[-1]
+            sparse_feature_maps, level_spatial_shapes[-1]
         )
-        stacked_pos_encodings = (
-            self.stack_sparse_tensors(position_encoding, level_spatial_shapes[-1])
-            if not self.use_rope
-            else None
+        if position_encoding is not None:
+            assert not self.use_rope
+            stacked_pos_encodings = self.stack_sparse_tensors(
+                position_encoding, level_spatial_shapes[-1]
+            )
+        else:
+            stacked_pos_encodings = None
+
+        device = stacked_feature_maps.device
+        spatial_dim = level_spatial_shapes.size(-1)
+        n_batch_tokens = torch.tensor(
+            [scores.size(0) for scores in token_salience_scores],
+            device=sparse_feature_maps[0].device,
         )
-        for layer_index, layer in enumerate(self.layers):
-            indices_for_layer = [
-                indices[layer_index] for indices in token_layer_subset_indices
+
+        for layer_idx, layer in enumerate(self.layers):
+            # Get the top tokens for this layer according to ratio
+
+            # Per-batch number of tokens for this layer, capped by the predetermined
+            # cap (max_tokens_non_sa) and tokens actually available (n_batch_tokens)
+            batch_k = (
+                (n_batch_tokens * self.layer_filter_ratio[layer_idx])
+                .long()
+                .clamp_max_(self.max_tokens_non_sa)
+                .clamp_max_(n_batch_tokens)
+            )
+            token_batch_offsets = seq_lengths_to_batch_offsets(batch_k)
+            total_topk_tokens = token_batch_offsets[-1]
+
+            # Pre-allocate the buffers to hold the topk token data
+            batch_topk_scores = token_salience_scores[0].new_empty(total_topk_tokens)
+            topk_indices = [
+                torch.empty(k, device=device, dtype=torch.long) for k in batch_k
             ]
-            ij_indices_for_layer = [
-                ij_indices[indices]
-                for ij_indices, indices in zip(
-                    token_bijl_indices,
-                    indices_for_layer,
-                )
-            ]
-            xy_positions_for_layer = [
-                xy_positions[indices]
-                for xy_positions, indices in zip(
-                    token_normalized_xy_positions, indices_for_layer
-                )
-            ]
-            tokens_per_batch = [indices.shape[0] for indices in ij_indices_for_layer]
-            batch_offsets = torch.tensor(
-                [0, *tokens_per_batch],
-                device=stacked_feature_maps.device,
-                dtype=torch.int32,
-            ).cumsum(0)[:-1]
-            stacked_ij_indices_for_layer = torch.cat(ij_indices_for_layer, 0)
-            stacked_xy_positions_for_layer = torch.cat(xy_positions_for_layer, 0)
+            batch_topk_spatial_indices = token_spatial_indices[0].new_empty(
+                spatial_dim + 2, total_topk_tokens
+            )
+            batch_topk_spatial_indices[0] = torch.repeat_interleave(
+                torch.arange(batch_k.size(0), device=device), batch_k
+            )
+
+            # Take each batch's topk
+            cursor = 0
+            for b, batch_scores in enumerate(token_salience_scores):
+                k = int(batch_k[b])
+                slice_b = slice(cursor, cursor + k)
+                scores_b = batch_topk_scores[slice_b]
+                indices_b = topk_indices[b]
+                torch.topk(batch_scores.detach(), k, out=(scores_b, indices_b))
+
+                # Collate spatial index info
+                batch_topk_spatial_indices[1:-1, slice_b] = token_spatial_indices[b][
+                    indices_b
+                ].T
+                batch_topk_spatial_indices[-1, slice_b] = token_level_indices[b][
+                    indices_b
+                ]
+                cursor += k
+
+            # Extract the embeddings at each spatial index
+            batch_topk_spatial_indices_t = batch_topk_spatial_indices.T.contiguous()
             query_for_layer = batch_sparse_index(
-                stacked_feature_maps, stacked_ij_indices_for_layer, True
+                stacked_feature_maps, batch_topk_spatial_indices_t, True
             )[0]
-            # query_for_layer = torch.nested.as_nested_tensor(
-            #     list(
-            #         torch.tensor_split(
-            #             query_for_layer, np.cumsum(tokens_per_batch)[:-1].tolist()
-            #         )
-            #     )
-            # )
-            pos_encoding_for_layer = (
-                batch_sparse_index(
-                    stacked_pos_encodings, stacked_ij_indices_for_layer, True
+            if position_encoding is not None:
+                pos_encoding_for_layer = batch_sparse_index(
+                    stacked_pos_encodings, batch_topk_spatial_indices_t, True
                 )[0]
-                if not self.use_rope
-                else None
-            )
-            # pos_encoding_for_layer = torch.nested.as_nested_tensor(
-            #     list(
-            #         torch.tensor_split(
-            #             pos_encoding_for_layer,
-            #             np.cumsum(tokens_per_batch)[:-1].tolist(),
-            #         )
-            #     )
-            # )
-            token_scores_for_layer = [
-                scores[indices]
-                for scores, indices in zip(token_salience_scores, indices_for_layer)
-            ]
-            token_scores_for_layer = torch.cat(token_scores_for_layer)
-            electron_prob = (
-                self.enhance_score_predictor(query_for_layer).squeeze(-1).sigmoid()
-            )
-            query = layer(
+            else:
+                pos_encoding_for_layer = None
+
+            # Compute classification score for each embedding
+            electron_score = self.enhance_score_predictor(query_for_layer).squeeze(-1)
+            query_for_layer = layer(
                 query_for_layer,
-                pos_encoding_for_layer,
-                stacked_ij_indices_for_layer,
-                stacked_xy_positions_for_layer,
-                batch_offsets,
+                token_batch_offsets,
+                batch_topk_scores,
+                batch_topk_spatial_indices,
                 stacked_feature_maps,
                 level_spatial_shapes,
-                token_scores_for_layer,
-                electron_prob,  # score_tgt
+                electron_score,  # score_tgt
+                pos_encoding_for_layer,
             )
 
             stacked_feature_maps = scatter_to_sparse_tensor(
-                stacked_feature_maps, stacked_ij_indices_for_layer, query
+                stacked_feature_maps, batch_topk_spatial_indices_t, query_for_layer
             )
 
+        stacked_feature_maps = self.update_background_embedding(stacked_feature_maps)
+
+        return stacked_feature_maps
+
+    @staticmethod
+    def stack_sparse_tensors(
+        tensor_list: Union[list[ME.SparseTensor], list[Tensor]],
+        full_scale_spatial_shape: Union[Tensor, list[int]],
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
+        """Stacks a list of sparse tensors along a new _level_ dimension.
+
+        Every input tensor is expected to have shape
+        ``[batch, *spatial_shape, feature_dim]`` and identical sparse / dense
+        dimensionalities.  The function converts ``MinkowskiEngine`` tensors to
+        regular PyTorch COO format and concatenates their indices / values while
+        inserting a new _level_ coordinate, returning a single sparse COO tensor
+        whose shape is  ``[max_batch, *max_spatial, #levels, max_feature]``.
+
+        Args:
+            tensor_list (list[ME.SparseTensor | torch.Tensor]): Input sparse
+                tensors to be stacked.
+            full_scale_spatial_shape (Tensor | list[int]): Spatial extents
+                (``len == tensor.ndim - 2``) used when converting Minkowski
+                tensors.
+            device (torch.device, optional): Device for the resulting tensor.
+                Defaults to the device of the first tensor (or of the
+                ``full_scale_spatial_shape`` argument when the list is empty).
+
+        Returns:
+            torch.Tensor: A sparse COO tensor that contains all input tensors
+                stacked along the new level dimension.
+
+        Notes:
+            - If the input tensors are already coalesced, this function bypasses an
+                explicit coalescing of the output tensor by sorting the concatenated
+                sparse indices without the accompanying deduplication step.
+        """
+
+        # Determine device
+        if device is None:
+            if tensor_list:
+                device = tensor_list[0].device
+            else:  # empty input – use device of spatial shape tensor
+                device = (
+                    full_scale_spatial_shape.device
+                    if isinstance(full_scale_spatial_shape, torch.Tensor)
+                    else torch.device("cpu")
+                )
+
+        # Convert spatial shape to tensor if needed
+        full_scale_spatial_shape = torch.as_tensor(
+            full_scale_spatial_shape, device=device
+        )
+
+        # Convert possible Minkowski tensors to Pytorch sparse
+        converted = [
+            (
+                minkowski_to_torch_sparse(t, full_scale_spatial_shape)
+                if isinstance(t, ME.SparseTensor)
+                else t
+            )
+            for t in tensor_list
+        ]
+
+        # Early exit for empty tensor list
+        if len(converted) == 0:
+            empty_sz = torch.Size([0] + list(full_scale_spatial_shape) + [0, 0])
+            return torch.sparse_coo_tensor(
+                torch.empty(
+                    full_scale_spatial_shape.numel() + 2,
+                    0,
+                    dtype=torch.long,
+                    device=device,
+                ),
+                torch.empty(0, device=device),
+                empty_sz,
+                is_coalesced=True,
+            )
+
+        # Determine shape information and run shape checks
+        sparse_dims = [t.sparse_dim() for t in converted]
+        dense_dims = [t.dense_dim() for t in converted]
+        if len(set(sparse_dims)) != 1:
+            raise ValueError(f"Inconsistent sparse_dim values: {sparse_dims}")
+        if len(set(dense_dims)) != 1:
+            raise ValueError(f"Inconsistent dense_dim values:  {dense_dims}")
+
+        sparse_dim = sparse_dims[0]  # includes batch + spatial dims
+        dense_dim = dense_dims[0]  # usually 1  (feature)
+        level_dim = sparse_dim  # we append the level as last sparse dim
+
+        spatial_rank_expected = sparse_dim - 1  # batch excluded, feature excluded
+        if full_scale_spatial_shape.numel() != spatial_rank_expected:
+            raise ValueError(
+                "full_scale_spatial_shape must have length "
+                f"{spatial_rank_expected}, got {full_scale_spatial_shape.numel()}"
+            )
+
+        # Collect information for constructing output tensor
+        total_nnz = 0
+        max_sizes = list(converted[0].shape)  # copy to mutate in-place
+        all_coalesced = True
+
+        for t in converted:
+            total_nnz += t._nnz()
+            all_coalesced &= t.is_coalesced()
+            for i, dim_size in enumerate(t.shape):
+                max_sizes[i] = max(dim_size, max_sizes[i])
+
+        if total_nnz == 0:  # All tensors are empty
+            final_shape = torch.Size(max_sizes[:-1] + [len(converted), max_sizes[-1]])
+            return torch.sparse_coo_tensor(
+                torch.empty(level_dim + 1, 0, dtype=torch.long, device=device),
+                torch.empty(0, device=device),
+                final_shape,
+                is_coalesced=True,
+            )
+
+        # Allocate output index and value tensors
+        indices_out = torch.empty(
+            level_dim + 1, total_nnz, dtype=torch.long, device=device
+        )
+
+        sample_values = converted[0].values()
+        if dense_dim == 0:
+            values_out = torch.empty(
+                total_nnz, dtype=sample_values.dtype, device=device
+            )
+        else:
+            values_out = torch.empty(
+                (total_nnz,) + sample_values.shape[1:],
+                dtype=sample_values.dtype,
+                device=device,
+            )
+
+        # Fill output tensors
+        cursor = 0
+        for lvl, t in enumerate(converted):
+            nnz = t._nnz()
+            if nnz == 0:
+                continue
+            slicer = slice(cursor, cursor + nnz)
+            values_out[slicer] = t.values()
+            indices_out[:sparse_dim, slicer] = t.indices()
+            indices_out[level_dim, slicer] = lvl
+            cursor += nnz
+
+        # If the input tensors are all coalesced, we can "pre-coalesce" the output tensor
+        # with a flattening+sort since we know deduplication is not needed
+        if all_coalesced:
+            sparse_sizes = torch.tensor(
+                final_shape[:-1],
+                device=device,
+                dtype=torch.long,
+            )
+            flat_keys, _ = flatten_nd_indices(indices_out, sparse_sizes)
+            perm = torch.argsort(flat_keys.squeeze(0))
+            indices_out = indices_out[:, perm]
+            values_out = values_out[perm]
+
+        # Construct final output tensor
+        final_shape = torch.Size(max_sizes[:-1] + [len(converted), max_sizes[-1]])
+        return torch.sparse_coo_tensor(
+            indices_out,
+            values_out,
+            final_shape,
+            is_coalesced=all_coalesced,
+        ).coalesce()  # coalesce is no-op if already coalesced
+
+    def update_background_embedding(
+        self,
+        stacked_feature_maps: Tensor,
+        level_spatial_shapes: Tensor,
+        sparse_feature_maps: Tensor,
+        stacked_ij_indices_for_layer: Tensor,
+    ):
+        raise NotImplementedError("Not updated or used currently")
         # learned background embedding
         background_indices = self.get_background_indices(
             stacked_feature_maps, stacked_ij_indices_for_layer
@@ -363,7 +533,7 @@ class EMTransformerEncoder(nn.Module):
             [
                 background_xy,
                 background_level.unsqueeze(-1).to(background_xy)
-                / (len(feature_maps) - 1),
+                / (len(sparse_feature_maps) - 1),
             ],
             -1,
         )
@@ -373,45 +543,6 @@ class EMTransformerEncoder(nn.Module):
         stacked_feature_maps = scatter_to_sparse_tensor(
             stacked_feature_maps, background_indices, background_pos_encoding
         )
-
-        return stacked_feature_maps
-
-    @staticmethod
-    def stack_sparse_tensors(
-        tensor_list: list[ME.SparseTensor], full_scale_spatial_shape: Tensor
-    ):
-        converted_tensors = [
-            (
-                minkowski_to_torch_sparse(tensor, full_scale_spatial_shape)
-                if isinstance(tensor, ME.SparseTensor)
-                else tensor
-            )
-            for tensor in tensor_list
-        ]
-        max_size = (
-            np.stack([tensor.shape for tensor in converted_tensors], 0).max(0).tolist()
-        )
-        indices = []
-        values = []
-        for level_index, level_tensor in enumerate(converted_tensors):
-            values.append(level_tensor.values())
-            level_indices = level_tensor.indices()
-            indices.append(
-                torch.cat(
-                    [
-                        level_indices,
-                        level_indices.new_tensor([[level_index]]).expand(
-                            -1, level_indices.shape[-1]
-                        ),
-                    ],
-                    0,
-                )
-            )
-        return torch.sparse_coo_tensor(
-            torch.cat(indices, -1),
-            torch.cat(values, 0),
-            list(max_size[:-1]) + [len(tensor_list)] + [max_size[-1]],
-        ).coalesce()
 
     @staticmethod
     def get_background_indices(stacked_feature_maps, foreground_indices):

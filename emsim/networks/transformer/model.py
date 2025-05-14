@@ -78,7 +78,7 @@ class EMTransformer(nn.Module):
                 activation_fn=config.activation_fn,
                 norm_first=config.norm_first,
                 attn_proj_bias=config.attn_proj_bias,
-                topk_sa=config.encoder.topk_sa,
+                max_tokens_sa=config.encoder.max_tokens_sa,
             ),
             config=config.encoder,
             score_predictor=self.classification_head,
@@ -107,7 +107,7 @@ class EMTransformer(nn.Module):
         self.register_buffer(
             "layer_filter_ratio", torch.tensor(config.layer_filter_ratio)
         )
-        self.encoder_max_tokens = config.max_tokens
+        # self.encoder_max_tokens = config.max_tokens
 
         self.object_query_embedding = nn.Embedding(
             config.query_embeddings, config.d_model
@@ -171,7 +171,6 @@ class EMTransformer(nn.Module):
             )
             pos_embed = None
         else:
-
             pos_embed = self.get_position_encoding(backbone_features, image_size)
             pos_embed = [p.to(backbone_features[0].features.dtype) for p in pos_embed]
             pos_embed = [
@@ -186,7 +185,7 @@ class EMTransformer(nn.Module):
             backbone_features_pos_encoded = [
                 feat + pos for feat, pos in zip(backbone_features, pos_embed)
             ]
-        score_dict = self.level_wise_salience_filtering(
+        score_dict = self.compute_token_salience(
             backbone_features_pos_encoded, image_size
         )
 
@@ -195,8 +194,7 @@ class EMTransformer(nn.Module):
             score_dict["spatial_shapes"],
             score_dict["selected_token_scores"],
             score_dict["selected_token_spatial_indices"],
-            score_dict["selected_normalized_xy_positions"],
-            score_dict["per_layer_subset_indices"],
+            score_dict["selected_token_level_indices"],
             pos_embed,
         )
         encoder_out_batch_offsets = batch_offsets_from_sparse_tensor_indices(
@@ -441,7 +439,7 @@ class EMTransformer(nn.Module):
         ]
         return pos_encoded_feats
 
-    def level_wise_salience_filtering(
+    def compute_token_salience(
         self, features: list[ME.SparseTensor], full_spatial_shape: Tensor
     ) -> dict[str, Union[Tensor, list[Tensor], list[ME.SparseTensor]]]:
         batch_size = len(features[0].decomposition_permutations)
@@ -474,10 +472,10 @@ class EMTransformer(nn.Module):
         selected_batch_indices = [[] for _ in range(batch_size)]
         selected_spatial_indices = [[] for _ in range(batch_size)]
         selected_level_indices = [[] for _ in range(batch_size)]
-        for level_index, feature_map in enumerate(features):
-            if level_index > 0:
-                upsampler = self.salience_unpoolers[level_index - 1]
-                alpha = self.alpha[level_index - 1]
+        for level_idx, feature_map in enumerate(features):
+            if level_idx > 0:
+                upsampler = self.salience_unpoolers[level_idx - 1]
+                alpha = self.alpha[level_idx - 1]
                 upsampled_score = upsampler(score)
                 # map_times_upsampled = feature_map * upsampled_score
                 # feature_map = feature_map + map_times_upsampled
@@ -486,69 +484,52 @@ class EMTransformer(nn.Module):
             score: ME.SparseTensor = self.salience_mask_predictor(feature_map)
 
             # get the indices of each batch element's entries in the sparse values
-            batch_element_indices = score.decomposition_permutations
+            batch_token_indices = score.decomposition_permutations
 
             # get count of tokens for each batch element
             token_counts = torch.tensor(
-                [b.numel() for b in batch_element_indices],
+                [b.numel() for b in batch_token_indices],
                 device=self.level_filter_ratio.device,
             )
             focus_token_counts: Tensor = (
-                token_counts * self.level_filter_ratio[level_index]
+                token_counts * self.level_filter_ratio[level_idx]
             ).long()
 
-            score_values_split = [score.F[i].squeeze(1) for i in batch_element_indices]
-            spatial_indices_split = [score.C[i, 1:] for i in batch_element_indices]
-
-            # scale indices by tensor stride
-            spatial_indices_split = [
-                indices // indices.new_tensor(score.tensor_stride)
-                for indices in spatial_indices_split
-            ]
-
-            # take top k elements for each batch element for this level
-            top_elements = [
-                values.topk(count)
-                for values, count in zip(score_values_split, focus_token_counts)
-            ]
-
-            selected_scores_by_batch, selected_inds_by_batch = [
-                list(i) for i in zip(*top_elements)
-            ]
-            selected_spatial_indices_by_batch: list[Tensor] = [
-                spatial_indices[batch_indices]
-                for spatial_indices, batch_indices in zip(
-                    spatial_indices_split, selected_inds_by_batch
+            # Process each batch's tokens for this level
+            for batch_idx in range(batch_size):
+                # Pull out this batch's score values and indices
+                score_values: Tensor = score.F[batch_token_indices[batch_idx]].squeeze(
+                    1
                 )
-            ]
+                spatial_indices: Tensor = score.C[batch_token_indices[batch_idx], 1:]
 
-            # Create appropriate batch and level index tensors of same length
-            batch_indices = [
-                indices.new_full(
-                    (indices.shape[0],), fill_value=batch_index, dtype=torch.long
+                # scale indices by tensor stride
+                spatial_indices = spatial_indices // spatial_indices.new_tensor(
+                    score.tensor_stride
                 )
-                for batch_index, indices in enumerate(selected_spatial_indices_by_batch)
-            ]
-            level_indices = [
-                indices.new_full(
-                    (indices.shape[0],), fill_value=level_index, dtype=torch.long
+
+                # Get top k elements for this batch element for this level
+                topk_scores, topk_indices = score_values.topk(
+                    focus_token_counts[batch_idx]
                 )
-                for indices in selected_spatial_indices_by_batch
-            ]
+
+                # Get spatial indices for the selected tokens
+                topk_spatial_indices = spatial_indices[topk_indices]
+
+                # Create batch and level index tensors
+                batch_indices = torch.full_like(topk_indices, batch_idx)
+                level_indices = torch.full_like(topk_indices, level_idx)
+
+                # Store results for this batch
+                selected_scores[batch_idx].append(topk_scores)
+                selected_batch_indices[batch_idx].append(batch_indices)
+                selected_spatial_indices[batch_idx].append(topk_spatial_indices)
+                selected_level_indices[batch_idx].append(level_indices)
 
             scores.append(score)
             spatial_shapes.append(
                 full_spatial_shape // full_spatial_shape.new_tensor(score.tensor_stride)
             )
-            # Transpose selection: distribute the values for this level among the
-            # batches
-            for batch in range(batch_size):
-                selected_scores[batch].append(selected_scores_by_batch[batch])
-                selected_batch_indices[batch].append(batch_indices[batch])
-                selected_spatial_indices[batch].append(
-                    selected_spatial_indices_by_batch[batch]
-                )
-                selected_level_indices[batch].append(level_indices)
 
         # now concatenate over the level dimension for each batch
         selected_scores = [torch.cat(scores_b, 0) for scores_b in selected_scores]
@@ -562,36 +543,37 @@ class EMTransformer(nn.Module):
             torch.cat(indices_b, 0) for indices_b in selected_level_indices
         ]
 
-        selected_token_sorted_indices = [
-            torch.sort(scores_b, descending=True)[1] for scores_b in selected_scores
-        ]
-        per_layer_token_counts = [
-            (indices.shape[0] * self.layer_filter_ratio).long()
-            for indices in selected_token_sorted_indices
-        ]
+        # selected_token_sorted_indices = [
+        #     torch.sort(scores_b, descending=True)[1] for scores_b in selected_scores
+        # ]
+        # per_layer_token_counts = [
+        #     (indices.shape[0] * self.layer_filter_ratio).long()
+        #     for indices in selected_token_sorted_indices
+        # ]
 
         # cap the number of selected tokens at the given limit
-        per_layer_token_counts = [
-            counts.clamp_max((self.encoder_max_tokens * self.layer_filter_ratio).int())
-            for counts in per_layer_token_counts
-        ]
+        # per_layer_token_counts = [
+        #     counts.clamp_max((self.encoder_max_tokens * self.layer_filter_ratio).int())
+        #     for counts in per_layer_token_counts
+        # ]
 
-        per_layer_subset_indices = [
-            [indices[:count] for count in counts]
-            for indices, counts in zip(
-                selected_token_sorted_indices, per_layer_token_counts
-            )
-        ]
+        # per_layer_subset_indices = [
+        #     [indices[:count] for count in counts]
+        #     for indices, counts in zip(
+        #         selected_token_sorted_indices, per_layer_token_counts
+        #     )
+        # ]
 
         return {
             "score_feature_maps": scores,
             "spatial_shapes": torch.stack(spatial_shapes),
-            "selected_token_scores": selected_scores,  # list of len batchsize
-            "selected_batch_indices": selected_batch_indices,
+            "selected_token_scores": selected_scores,
+            # vv lists of len batchsize vv
+            "selected_token_batch_indices": selected_batch_indices,
             "selected_token_spatial_indices": selected_spatial_indices,
             "selected_token_level_indices": selected_level_indices,
-            "selected_token_sorted_indices": selected_token_sorted_indices,
-            "per_layer_subset_indices": per_layer_subset_indices,
+            # "selected_token_sorted_indices": selected_token_sorted_indices,
+            # "per_layer_subset_indices": per_layer_subset_indices,
         }
 
     def unstack_main_denoising_outputs(

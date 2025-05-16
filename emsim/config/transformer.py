@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Literal
 
 from emsim.networks.positional_encoding.rope import FreqGroupPattern
 
@@ -8,7 +7,7 @@ from emsim.networks.positional_encoding.rope import FreqGroupPattern
 class RoPEConfig:
     """Configuration for Rotary Position Embedding."""
 
-    spatial_dimension: int = "${spatial_dimension}"
+    spatial_dimension: int = "${spatial_dimension}"  # type: ignore
     spatial_base_theta: float = 100.0
     level_base_theta: float = 10.0
     share_heads: bool = False
@@ -26,7 +25,7 @@ class TransformerEncoderConfig:
     use_ms_deform_attn: bool = False
     use_neighborhood_attn: bool = True
 
-    layer_filter_ratio: list[float] = "${model.transformer.layer_filter_ratio}"
+    layer_filter_ratio: list[float] = "${model.transformer.layer_filter_ratio}"  # type: ignore
     max_tokens_sa: int = 1000
     max_tokens_non_sa: int = 10000
 
@@ -46,7 +45,7 @@ class TransformerDecoderConfig:
     look_forward_twice: bool = True
     detach_updated_positions: bool = True
     layers_share_heads: bool = False
-    predict_box: bool = "${model.predict_box}"
+    predict_box: bool = "${model.predict_box}"  # type: ignore
 
     use_rope: bool = True
 
@@ -56,7 +55,7 @@ class TransformerConfig:
     """Configuration for the transformer model."""
 
     # Architecture parameters
-    spatial_dimension: int = "${spatial_dimension}"
+    spatial_dimension: int = "${spatial_dimension}"  # type: ignore
     d_model: int = 256
     n_heads: int = 8
     dropout: float = 0.1
@@ -66,7 +65,7 @@ class TransformerConfig:
     norm_first: bool = True
 
     # MS Deform Attention parameters
-    backbone_decoder_layers: list[int] = "${model.backbone.decoder.layers}"
+    backbone_decoder_layers: list[int] = "${model.backbone.decoder.layers}"  # type: ignore
     n_feature_levels: int = field(init=False)
     n_deformable_points: int = 4
 
@@ -86,17 +85,16 @@ class TransformerConfig:
     )
 
     # predict box instead of point
-    predict_box: bool = "${model.predict_box}"
-
+    predict_box: bool = "${model.predict_box}"  # type: ignore
     # Denoising handling parameter
     mask_main_queries_from_denoising: bool = (
-        "${model.denoising.mask_main_queries_from_denoising}"
+        "${model.denoising.mask_main_queries_from_denoising}"  # type: ignore
     )
 
     # Nested configurations
-    rope: RoPEConfig = field(default_factory=RoPEConfig)
-    encoder: TransformerEncoderConfig = field(default_factory=TransformerEncoderConfig)
-    decoder: TransformerDecoderConfig = field(default_factory=TransformerDecoderConfig)
+    rope: RoPEConfig = field(default_factory=RoPEConfig)  # type: ignore
+    encoder: TransformerEncoderConfig = field(default_factory=TransformerEncoderConfig)  # type: ignore
+    decoder: TransformerDecoderConfig = field(default_factory=TransformerDecoderConfig)  # type: ignore
 
     def __post_init__(self):
         if not isinstance(self.backbone_decoder_layers, str):

@@ -121,7 +121,7 @@ def init_nd_freqs(
     num_heads: int,
     freq_group_pattern: Tensor,
     enforce_freq_groups_equal: bool = True,
-    thetas: Union[Tensor, float] = 10.0,
+    thetas: Union[Tensor, float, list[list[float]]] = 10.0,
     rotate: bool = True,
     max_rotation_angle: float = 2 * torch.pi,
     dtype: Optional[torch.dtype] = None,
@@ -148,9 +148,9 @@ def init_nd_freqs(
             a ValueError if the (head_dim/2) available elements of the RoPE vector
             cannot be evenly split between the frequency groups. If False, then
             trailing frequency groups may have fewer RoPE encodings assigned to them.
-        thetas (Union[Tensor], float]): Base value(s) for frequency scaling.
-            Can be a single float (applied to all dimensions and frequency groups)
-            or a 2D tensor of shape [n_freq_groups, position_dim], with either
+        thetas (Union[Tensor], float, list[list[float]]]): Base value(s) for frequency
+            scaling. Can be a single float (applied to all dimensions and frequency
+            groups) or a 2D tensor of shape [n_freq_groups, position_dim], with either
             component dimension allowed to be 1 for broadcasting. Entries corresponding
             to non-included position dimensions in a frequency group will be ignored.
             Larger values of theta result in lower-frequency rotations, and may be more
@@ -196,7 +196,7 @@ def init_nd_freqs(
     n_freq_groups = freq_group_pattern.size(0)
 
     # Validate thetas (base frequencies)
-    thetas: Tensor = torch.as_tensor(thetas, dtype=dtype, device=device)
+    thetas = torch.as_tensor(thetas, dtype=dtype, device=device)
     if thetas.ndim != 2 and thetas.numel() != 1:
         raise ValueError(
             "Expected thetas to either be a scalar or a 2D tensor, got shape "
@@ -204,7 +204,7 @@ def init_nd_freqs(
         )
 
     # broadcast thetas
-    if thetas.numel() == 1 or any(torch._shape_as_tensor(thetas) == 1):
+    if thetas.numel() == 1 or 1 in thetas.shape:
         thetas = thetas.expand(n_freq_groups, position_dim)
 
     if thetas.shape != (n_freq_groups, position_dim):
@@ -233,8 +233,8 @@ def init_nd_freqs(
     encoding_ranges: list[tuple[int, int]] = []
     encoding_start = 0
     for g in range(n_freq_groups):
-        freq_group_size = encodings_per_freq_group[g]
-        n_pos_dims_this_freq_group = freq_group_pattern[g].sum()
+        freq_group_size = int(encodings_per_freq_group[g].item())
+        n_pos_dims_this_freq_group = int(freq_group_pattern[g].sum().item())
         freqs_g = torch.zeros(
             (n_pos_dims_this_freq_group, num_heads, freq_group_size),
             dtype=dtype,
@@ -267,8 +267,8 @@ def init_nd_freqs(
 
         freqs.append(freqs_g)
 
-    encoding_ranges = torch.tensor(encoding_ranges, dtype=torch.long, device=device)
-    return freqs, encoding_ranges
+    encoding_ranges_t = torch.tensor(encoding_ranges, dtype=torch.long, device=device)
+    return freqs, encoding_ranges_t
 
 
 class RoPEEncodingND(nn.Module):
@@ -377,8 +377,8 @@ class RoPEEncodingND(nn.Module):
         # Precompute indices for grouped_rope_freqs_tensor
         indices_list = []
 
-        for g, ranges in enumerate(encoding_ranges):
-            range_start, range_end = ranges
+        for g, range in enumerate(encoding_ranges):
+            range_start, range_end = (int(r) for r in range)
             range_size = range_end - range_start
             pos_dims = torch.nonzero(self.freq_group_pattern[g], as_tuple=True)[0]
 
@@ -469,7 +469,7 @@ class RoPEEncodingND(nn.Module):
         n_heads_set = set(n_heads_list)
         if not (
             len(n_heads_set) == 1
-            or (len(n_heads_set) == 2 and len(n_heads_set - set((1,)) == 1))
+            or (len(n_heads_set) == 2 and len(n_heads_set - set((1,))) == 1)
         ):
             raise ValueError(
                 "Expected tensors in freqs to have number of attention heads "
@@ -543,6 +543,7 @@ class RoPEEncodingND(nn.Module):
                 UserWarning,
             )
         if key_pos is not None:
+            assert key is not None
             self.shape_check(key, key_pos)
         freq_tensor = self.grouped_rope_freqs_tensor(self.freqs)
 
@@ -613,7 +614,7 @@ class RoPEEncodingND(nn.Module):
         grid = torch.stack(
             torch.meshgrid(
                 *[
-                    torch.arange(size, device=device, dtype=dtype)
+                    torch.arange(int(size), device=device, dtype=dtype)
                     for size in embeddings_shape[start_dim:end_dim]
                 ],
                 indexing="ij",
@@ -624,7 +625,7 @@ class RoPEEncodingND(nn.Module):
 
     def grouped_rope_freqs_tensor(
         self,
-        grouped_rope_freqs: list[Tensor],
+        grouped_rope_freqs: Union[list[Tensor], nn.ParameterList],
     ) -> Tensor:
         """Use frequency group information to build the full RoPE frequency tensor that
         is multiplied by the positions to produce RoPE encodings.
@@ -825,7 +826,7 @@ def prep_multilevel_positions(
 
     if level_spatial_shapes.ndim == 2:
         level_spatial_shapes = level_spatial_shapes.unsqueeze(0).expand(
-            torch.max(batch_indices) + 1, -1, -1
+            int(torch.max(batch_indices).item()) + 1, -1, -1
         )
 
     batch_max_spatial_shape = level_spatial_shapes.max(-2)[0]

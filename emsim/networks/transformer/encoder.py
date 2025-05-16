@@ -83,6 +83,7 @@ class TransformerEncoderLayer(nn.Module):
                 rope_enforce_freq_groups_equal=rope_config.enforce_freq_groups_equal,
             )
         if use_msdeform_attn:
+            raise ValueError("Sparse MSDeformAttention not updated yet")
             self.msdeform_attn = SparseDeformableAttentionBlock(
                 d_model,
                 n_heads,
@@ -136,8 +137,11 @@ class TransformerEncoderLayer(nn.Module):
 
         if min_len == max_len:  # sequences same length, batchify for efficiency
             k = min_len.clamp_max(self.max_tokens_sa)
-            _, topk_indices = token_scores.reshape(-1, min_len).topk(k)
-            topk_indices += query_batch_offsets.unsqueeze(1)
+            topk_offsets = seq_lengths_to_batch_offsets(
+                torch.empty_like(token_seq_lens).copy_(k)
+            )
+            _, topk_indices = token_scores.reshape(-1, int(min_len)).topk(int(k))
+            topk_indices += query_batch_offsets[:-1].unsqueeze(1)
             topk_indices = topk_indices.flatten()
         else:  # sequences different length, run topk for each
             batch_ks = token_seq_lens.clamp_max(self.max_tokens_sa)
@@ -147,7 +151,7 @@ class TransformerEncoderLayer(nn.Module):
             )
 
             # holder for topk's first (values) output
-            scratch_values = token_scores.new_empty(batch_ks.max())
+            scratch_values = token_scores.new_empty(int(batch_ks.max()))
 
             # per-batch topk
             for b, k in enumerate(batch_ks):
@@ -188,7 +192,7 @@ class TransformerEncoderLayer(nn.Module):
             #     stacked_feature_maps,
             #     level_spatial_shapes,
             # )
-        if self.use_neighborhood_attn:
+        if self.neighborhood_attn is not None:
             query_positions = prep_multilevel_positions(
                 query_spatial_indices[1:-1].T,
                 query_spatial_indices[0],
@@ -208,9 +212,9 @@ class TransformerEncoderLayer(nn.Module):
 
     def reset_parameters(self):
         self.self_attn.reset_parameters()
-        if hasattr(self.msdeform_attn, "reset_parameters"):
+        if self.msdeform_attn is not None:
             self.msdeform_attn.reset_parameters()
-        if hasattr(self.neighborhood_attn, "reset_parameters"):
+        if self.neighborhood_attn is not None:
             self.neighborhood_attn.reset_parameters()
         self.ffn.reset_parameters()
 
@@ -220,10 +224,10 @@ class EMTransformerEncoder(nn.Module):
         self,
         encoder_layer: nn.Module,
         config: TransformerEncoderConfig,
-        score_predictor: nn.Module = None,
+        score_predictor: Optional[nn.Module] = None,
     ):
         super().__init__()
-        self.layers: list[TransformerEncoderLayer] = nn.ModuleList(
+        self.layers = nn.ModuleList(
             [copy.deepcopy(encoder_layer) for _ in range(config.n_layers)]
         )
         self.n_layers = config.n_layers
@@ -324,8 +328,12 @@ class EMTransformerEncoder(nn.Module):
             else:
                 pos_encoding_for_layer = None
 
-            # Compute classification score for each embedding
-            electron_score = self.enhance_score_predictor(query_for_layer).squeeze(-1)
+            if self.enhance_score_predictor is not None:
+                # Compute classification score for each embedding
+                electron_score = self.enhance_score_predictor(query_for_layer)
+                electron_score = electron_score.squeeze(-1)
+            else:
+                electron_score = None
             query_for_layer = layer(
                 query_for_layer,
                 token_batch_offsets,
@@ -341,7 +349,7 @@ class EMTransformerEncoder(nn.Module):
                 stacked_feature_maps, batch_topk_spatial_indices_t, query_for_layer
             )
 
-        stacked_feature_maps = self.update_background_embedding(stacked_feature_maps)
+        # stacked_feature_maps = self.update_background_embedding(stacked_feature_maps)
 
         return stacked_feature_maps
 
@@ -384,7 +392,7 @@ class EMTransformerEncoder(nn.Module):
         if device is None:
             if tensor_list:
                 device = tensor_list[0].device
-            else:  # empty input – use device of spatial shape tensor
+            else:  # empty input: use device of spatial shape tensor
                 device = (
                     full_scale_spatial_shape.device
                     if isinstance(full_scale_spatial_shape, torch.Tensor)
@@ -408,7 +416,7 @@ class EMTransformerEncoder(nn.Module):
 
         # Early exit for empty tensor list
         if len(converted) == 0:
-            empty_sz = torch.Size([0] + list(full_scale_spatial_shape) + [0, 0])
+            empty_sz = [0] + full_scale_spatial_shape.tolist() + [0, 0]
             return torch.sparse_coo_tensor(
                 torch.empty(
                     full_scale_spatial_shape.numel() + 2,
@@ -451,8 +459,9 @@ class EMTransformerEncoder(nn.Module):
             for i, dim_size in enumerate(t.shape):
                 max_sizes[i] = max(dim_size, max_sizes[i])
 
+        final_shape = torch.Size(max_sizes[:-1] + [len(converted), max_sizes[-1]])
+
         if total_nnz == 0:  # All tensors are empty
-            final_shape = torch.Size(max_sizes[:-1] + [len(converted), max_sizes[-1]])
             return torch.sparse_coo_tensor(
                 torch.empty(level_dim + 1, 0, dtype=torch.long, device=device),
                 torch.empty(0, device=device),
@@ -497,13 +506,12 @@ class EMTransformerEncoder(nn.Module):
                 device=device,
                 dtype=torch.long,
             )
-            flat_keys, _ = flatten_nd_indices(indices_out, sparse_sizes)
-            perm = torch.argsort(flat_keys.squeeze(0))
+            flat_indices, _ = flatten_nd_indices(indices_out, sparse_sizes)
+            perm = torch.argsort(flat_indices.squeeze(0))
             indices_out = indices_out[:, perm]
             values_out = values_out[perm]
 
         # Construct final output tensor
-        final_shape = torch.Size(max_sizes[:-1] + [len(converted), max_sizes[-1]])
         return torch.sparse_coo_tensor(
             indices_out,
             values_out,

@@ -68,6 +68,7 @@ def unflatten_nd_indices(
     """
     if offsets is None:
         offsets = _make_linear_offsets(dim_sizes)
+    assert offsets is not None
     N = dim_sizes.numel()
     B = flat_indices.size(-1)
     out = torch.empty(N, B, device=flat_indices.device, dtype=torch.long)
@@ -202,7 +203,9 @@ def linearize_sparse_and_index_tensors(
 
 @torch.jit.script
 def get_sparse_index_mapping(
-    sparse_tensor: Tensor, index_tensor: Tensor
+    sparse_tensor: Tensor,
+    index_tensor: Tensor,
+    sanitize_linear_index_tensor: bool = True,
 ) -> tuple[Tensor, Tensor]:
     """Finds the locations along a sparse tensor's values tensor for specified
     sparse indices. Also returns a mask indicating which indices have values
@@ -219,25 +222,34 @@ def get_sparse_index_mapping(
             bounds of the sparse dimensions are not supported and will
             be considered unspecified, with the corresponding entry in
             is_specified_mask being set to False.
+        sanitize_linear_index_tensor (bool): If False, then the output values at
+            linear_index_tensor[~is_specified_mask] will be the "insertion position"
+            that would keep the sparse tensor's indices ordered. This is useful if you
+            want to insert values, but means that
+            sparse_tensor.values()[linear_index_tensor] will be potentially unsafe if
+            some of the "insertion position" values are out of bounds. If this arg is
+            True, linear_index_tensor[~is_specified_mask] values will be set to 0.
+            Defaults to True.
 
     Returns:
         linear_index_tensor: Long tensor of dimension ... of the locations in
             sparse_tensor.values() corresponding to the indices in index_tensor.
-            Elements where is_specified_mask is False are junk data and should
-            not be used.
+            Elements where is_specified_mask is False are handled according to the
+            value of sanitize_linear_index_tensor.
         is_specified_mask: Boolean tensor of dimension ... that is True for
             indices in index_tensor where values where actually specified in
             the sparse tensor and False for indices that were unspecified in
             the sparse tensor.
     """
     sparse_dim = sparse_tensor.sparse_dim()
+    sparse_nnz = sparse_tensor._nnz()
     sparse_tensor_shape = torch._shape_as_tensor(sparse_tensor).to(
         device=index_tensor.device
     )
     sparse_shape = sparse_tensor_shape[:sparse_dim]
 
     # check for empty sparse tensor
-    if sparse_tensor._nnz() == 0:
+    if sparse_nnz == 0:
         linear_index_tensor = index_tensor.new_zeros(index_tensor.shape[:-1])
         is_specified_mask = index_tensor.new_zeros(
             index_tensor.shape[:-1], dtype=torch.bool
@@ -264,20 +276,24 @@ def get_sparse_index_mapping(
     linear_index_tensor = torch.searchsorted(  # binary search
         sparse_tensor_indices_linearized, index_tensor_linearized
     )
-    # guard against IndexError
-    linear_index_tensor.clamp_max_(sparse_tensor_indices_linearized.shape[0] - 1)
 
     # linear_index_tensor is distinct from index_tensor_linearized in that
     # index_tensor_linearized has the flattened version of the index in the sparse
     # tensor, while linear_index_tensor has the corresponding index in the sparse
     # tensor's values() tensor
 
+    # guard against IndexError
+    if sanitize_linear_index_tensor:
+        index_clamped = linear_index_tensor.clamp_max_(sparse_nnz - 1)
+    else:
+        index_clamped = linear_index_tensor.clamp_max(sparse_nnz - 1)
+
     # Check if the indices were specified by checking for an exact match at the
     # resultant searched indices
     is_specified_mask: Tensor = (
-        sparse_tensor_indices_linearized[linear_index_tensor] == index_tensor_linearized
+        sparse_tensor_indices_linearized[index_clamped] == index_tensor_linearized
     )
-    is_specified_mask &= (~out_of_bounds_indices.view(-1))
+    is_specified_mask &= ~out_of_bounds_indices.view(-1)
 
     linear_index_tensor = linear_index_tensor.view(index_tensor.shape[:-1])
     is_specified_mask = is_specified_mask.view(index_tensor.shape[:-1])
@@ -286,14 +302,12 @@ def get_sparse_index_mapping(
 
 
 @torch.jit.script
-def gather_and_mask(
-    values: Tensor, indices: Tensor, mask: Tensor, mask_inplace: bool = True
-) -> Tensor:
+def gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
     """Efficiently gathers elements from a 2D tensor and applies a mask.
 
     This function performs the equivalent of `values[indices].masked_fill(~mask, 0)`
-    but uses torch.gather for better performance. It retrieves values at the specified
-    indices and zeros out values where the mask is False.
+    but uses torch.index_select for better performance. It retrieves values at the
+    specified indices and zeros out values where the mask is False.
 
     Args:
         values (Tensor): Source tensor to gather from, may be 1D with shape (N)
@@ -303,10 +317,6 @@ def gather_and_mask(
             Can be of any shape.
         mask (Tensor): Boolean tensor with the same shape as indices. True indicates
             positions to keep, False indicates positions to zero out.
-        mask_inplace (bool, optional): If True, performs the masking operation
-            in-place, which is more memory efficient but affects backpropagation. Set
-            to False if gradient flow through the masked values is needed.
-            Defaults to True.
 
     Returns:
         Tensor: The gathered and masked values with shape
@@ -314,7 +324,7 @@ def gather_and_mask(
             at the specified indices, with masked positions filled with zeros.
 
     Raises:
-        ValueError: If values is not 2D or if indices and mask have different shapes.
+        ValueError: If indices and mask have different shapes.
     """
     input_values_1d = False
     if values.ndim == 1:
@@ -330,28 +340,19 @@ def gather_and_mask(
     indices_flat = indices.reshape(-1)
     mask_flat = mask.reshape(-1)
 
-    # gather with manually broadcasted indices is significantly faster than
-    # direct indexing with values[indices] for some reason
-
     # figure out how much to broadcast
     value_dims = values.shape[1:]
     n_value_dims = values.ndim - 1
 
-    # unsqueeze to proper dimensions
-    gather_indices = indices_flat.view((indices_flat.size(0),) + (1,) * n_value_dims)
+    # pre-mask the indices to guard against unsafe indices in the masked portion
+    indices_flat = torch.where(mask_flat, indices_flat, torch.zeros_like(indices_flat))
 
-    # expand to proper size: expand creates a view so memory-efficient
-    gather_indices = gather_indices.expand((indices_flat.size(0),) + value_dims)
-
-    # do the actual gather
-    selected = torch.gather(values, 0, gather_indices)
+    selected = values.index_select(0, indices_flat)
 
     # unsqueeze mask
     mask_flat = mask_flat.view((mask_flat.size(0),) + (1,) * n_value_dims)
-    if mask_inplace:
-        selected.masked_fill_(~mask_flat, 0)
-    else:
-        selected = selected.masked_fill(~mask_flat, 0)
+
+    selected.masked_fill_(~mask_flat, 0)
 
     new_shape = indices.shape
     if not input_values_1d:

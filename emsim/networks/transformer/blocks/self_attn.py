@@ -1,11 +1,12 @@
 import math
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
 from emsim.networks.positional_encoding.rope import (
+    FreqGroupPattern,
     RoPEEncodingND,
     get_multilevel_freq_group_pattern,
     prep_multilevel_positions,
@@ -162,7 +163,7 @@ class MultilevelSelfAttentionBlockWithRoPE(nn.Module):
         rope_spatial_base_theta: float = 100.0,
         rope_level_base_theta: float = 10.0,
         rope_share_heads: bool = False,
-        rope_freq_group_pattern: str = "single",
+        rope_freq_group_pattern: Union[str, FreqGroupPattern] = "single",
         rope_enforce_freq_groups_equal: bool = True,
     ):
         super().__init__()

@@ -49,7 +49,7 @@ def torch_sparse_to_minkowski(tensor: Tensor):
 
 @utils.requires_minkowskiengine
 def minkowski_to_torch_sparse(
-    tensor,
+    tensor: Union[Tensor, ME.SparseTensor],
     full_scale_spatial_shape: Optional[Union[Tensor, list[int]]] = None,
 ) -> Tensor:
     if isinstance(tensor, Tensor):
@@ -84,7 +84,7 @@ def torch_sparse_to_spconv(tensor: torch.Tensor):
     if isinstance(tensor, spconv.SparseConvTensor):
         return tensor
     assert tensor.is_sparse
-    spatial_shape = tensor.shape[1:-1]
+    spatial_shape = list(tensor.shape[1:-1])
     batch_size = tensor.shape[0]
     indices_th = tensor.indices()
     features_th = tensor.values()
@@ -152,7 +152,7 @@ def __me_sparse(
         assert min_coords.numel() == tensor._D
     if max_coords is not None:
         assert max_coords.dtype == torch.int
-        assert min_coords.numel() == tensor._D
+        assert max_coords.numel() == tensor._D
 
     def torch_sparse_Tensor(coords, feats, size=None):
         if size is None:

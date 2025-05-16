@@ -314,7 +314,7 @@ class RoPEEncodingND(nn.Module):
         share_heads: bool = False,
         freq_group_pattern: Optional[Tensor] = None,
         enforce_freq_groups_equal: bool = True,
-        rope_base_theta: Union[Tensor, float] = 10.0,
+        rope_base_theta: Union[Tensor, float, list[list[float]]] = 10.0,
         dtype=torch.float,
     ):
         """Initialize the module"""

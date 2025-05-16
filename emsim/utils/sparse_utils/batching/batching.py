@@ -253,7 +253,7 @@ def batch_dim_to_leading_index(tensor: Tensor) -> Tensor:
         torch.arange(batch_size, device=tensor.device), torch.prod(other_dims), 0
     )
     flattened = torch.concat([batch_index.unsqueeze(-1), tensor.view(-1, last_dim)], -1)
-    new_shape = tensor.shape
+    new_shape = list(tensor.shape)
     new_shape[-1] = last_dim + 1
     return flattened.reshape(new_shape)
 

@@ -10,22 +10,27 @@ norm_first: false
 # to compute number of feature levels
 backbone_decoder_layers: ${model.backbone.decoder.layers}
 
+# Sampling points for MSDeformAttention
 n_deformable_points: 4
 
+# Per-level neighborhood sizes for NeighborhoodAttention
 neighborhood_sizes: [3, 5, 7 ,9]
 
-max_tokens: 10000
+# Salience filtering parameters
 level_filter_ratio: [0.25, 0.5, 1.0, 1.0]
 layer_filter_ratio: [1.0, 0.8, 0.6, 0.6, 0.4, 0.2]
 
+# Number of object queries
 query_embeddings: 500
 
 mask_main_queries_from_denoising: ${model.denoising.mask_main_queries_from_denoising}
 
 encoder:
   n_layers: 6
-  topk_sa: 100
+  max_tokens_sa: 1000
+  max_tokens_non_sa: 10000
   
+  layer_filter_ratio: ${model.transformer.layer_filter_ratio}
   use_ms_deform_attn: false
   use_neighborhood_attn: true
 

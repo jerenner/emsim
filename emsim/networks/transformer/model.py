@@ -13,9 +13,11 @@ from emsim.networks.transformer.position_head import PositionOffsetHead
 from emsim.networks.transformer.std_dev_head import StdDevHead
 
 from ...utils.misc_utils import inverse_sigmoid
-from ...utils.sparse_utils.batching.batching import (
+from ...utils.sparse_utils.batching import (
     batch_offsets_from_sparse_tensor_indices,
     split_batch_concatted_tensor,
+    batch_offsets_to_seq_lengths,
+    batch_topk,
 )
 from ...utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
 from ...utils.sparse_utils.shape_ops import sparse_resize
@@ -93,10 +95,8 @@ class EMTransformer(nn.Module):
 
         self.salience_unpoolers = nn.ModuleList(
             [
-                torch.compiler.disable(
-                    ME.MinkowskiConvolutionTranspose(
-                        1, 1, 3, stride=2, dimension=config.spatial_dimension
-                    )
+                ME.MinkowskiConvolutionTranspose(
+                    1, 1, 3, stride=2, dimension=config.spatial_dimension
                 )
                 for _ in range(len(config.level_filter_ratio) - 1)
             ]
@@ -189,7 +189,7 @@ class EMTransformer(nn.Module):
             backbone_features_pos_encoded, image_size
         )
 
-        encoder_out = self.encoder(
+        encoder_out: Tensor = self.encoder(
             backbone_features,
             score_dict["spatial_shapes"],
             score_dict["selected_token_scores"],
@@ -197,15 +197,11 @@ class EMTransformer(nn.Module):
             score_dict["selected_token_level_indices"],
             pos_embed,
         )
-        encoder_out_batch_offsets = batch_offsets_from_sparse_tensor_indices(
+        encoder_out_batch_offsets: Tensor = batch_offsets_from_sparse_tensor_indices(
             encoder_out.indices()
         )
-        encoder_out_batch_sizes = torch.cat(
-            [
-                encoder_out_batch_offsets,
-                encoder_out_batch_offsets.new_tensor([encoder_out.indices().shape[1]]),
-            ]
-        ).diff()
+
+        # normalize encoder-out tokens and compute classification logits
         encoder_out_normalized = torch.sparse_coo_tensor(
             encoder_out.indices(),
             self.encoder_output_norm(encoder_out.values()),
@@ -214,25 +210,15 @@ class EMTransformer(nn.Module):
         ).coalesce()
         encoder_out_logits: Tensor = self.classification_head(
             encoder_out_normalized.values()
-        )
+        ).squeeze(-1)
 
+        # do topk of each sequence
         num_topk = self.two_stage_num_proposals * 4
-        topk_by_image = [
-            torch.topk(scores, min(num_topk, size), 0)
-            for scores, size in zip(
-                split_batch_concatted_tensor(
-                    encoder_out_logits.squeeze(-1), encoder_out_batch_offsets
-                ),
-                encoder_out_batch_sizes,
-            )
-        ]
-        topk_scores = torch.cat([topk[0] for topk in topk_by_image])
-        topk_indices = torch.cat(
-            [
-                topk[1] + offset
-                for topk, offset in zip(topk_by_image, encoder_out_batch_offsets)
-            ]
+        topk_indices, topk_offsets = batch_topk(
+            encoder_out_logits, encoder_out_batch_offsets, num_topk
         )
+        topk_scores = encoder_out_logits[topk_indices]
+
         topk_bijl_indices = encoder_out.indices()[:, topk_indices].T
 
         # deduplication via non-maximum suppression

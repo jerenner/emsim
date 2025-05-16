@@ -34,8 +34,8 @@ def sparse_split_heads(sparse_tensor: Tensor, n_heads: int) -> Tensor:
     )
     new_values = sparse_tensor.values().view(n_specified_elements * n_heads, head_dim)
 
-    new_shape: list[int] = torch._shape_as_tensor(sparse_tensor)[:-1].tolist()
-    new_shape.extend([n_heads, head_dim])
+    new_shape = sparse_tensor.shape[:-1]
+    new_shape = new_shape + (n_heads, head_dim)
     new_sparse_tensor = torch.sparse_coo_tensor(
         new_indices, new_values, new_shape, is_coalesced=sparse_tensor.is_coalesced()
     ).coalesce()

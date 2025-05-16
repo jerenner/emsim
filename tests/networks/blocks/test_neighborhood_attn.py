@@ -19,7 +19,7 @@ from emsim.networks.transformer.blocks.neighborhood_attn import (
     SparseNeighborhoodAttentionBlock,
     get_multilevel_neighborhoods,
 )
-from emsim.utils.sparse_utils.batching.batching import batch_offsets_to_indices
+from emsim.utils.sparse_utils.batching import batch_offsets_to_indices
 from emsim.utils.sparse_utils.indexing.script_funcs import unflatten_nd_indices
 from emsim.utils.sparse_utils.ops.subset_attn.subset_attn import (
     BatchSparseIndexSubsetAttention,

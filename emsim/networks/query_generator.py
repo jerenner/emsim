@@ -4,10 +4,10 @@ import spconv.pytorch as spconv
 import torch
 from torch import Tensor, nn
 
-from ..utils.sparse_utils import (
+from ..utils.sparse_utils.conversion import (
     spconv_to_torch_sparse,
 )
-from ..utils.sparse_utils.batching.batching import (
+from ..utils.sparse_utils.batching import (
     batch_offsets_from_sparse_tensor_indices,
 )
 from ..utils.sparse_utils.indexing.indexing import batch_sparse_index

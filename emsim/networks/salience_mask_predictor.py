@@ -2,7 +2,7 @@ import spconv.pytorch as spconv
 import torch
 from torch import Tensor, nn
 
-from emsim.utils.sparse_utils.batching.batching import (
+from emsim.utils.sparse_utils.batching import (
     batch_offsets_from_sparse_tensor_indices,
     split_batch_concatted_tensor,
 )

@@ -18,11 +18,7 @@ from emsim.networks.transformer.blocks import (
     SparseDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
-from emsim.utils.sparse_utils.batching.batching import (
-    deconcat_add_batch_dim,
-    seq_lengths_to_batch_offsets,
-    batch_offsets_to_seq_lengths,
-)
+from emsim.utils.sparse_utils.batching import seq_lengths_to_batch_offsets, batch_topk
 from emsim.utils.sparse_utils.conversion import minkowski_to_torch_sparse
 from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index
 from emsim.utils.sparse_utils.indexing.scatter import (
@@ -132,40 +128,9 @@ class TransformerEncoderLayer(nn.Module):
         token_scores = token_electron_scores + token_predicted_salience_score
 
         # Find the max_tokens_sa topk for self attention
-        token_seq_lens: Tensor = batch_offsets_to_seq_lengths(query_batch_offsets)
-        min_len, max_len = torch.aminmax(token_seq_lens)
-
-        if min_len == max_len:  # sequences same length, batchify for efficiency
-            k = min_len.clamp_max(self.max_tokens_sa)
-            topk_offsets = seq_lengths_to_batch_offsets(
-                torch.empty_like(token_seq_lens).copy_(k)
-            )
-            _, topk_indices = token_scores.reshape(-1, int(min_len)).topk(int(k))
-            topk_indices += query_batch_offsets[:-1].unsqueeze(1)
-            topk_indices = topk_indices.flatten()
-        else:  # sequences different length, run topk for each
-            batch_ks = token_seq_lens.clamp_max(self.max_tokens_sa)
-            topk_offsets = seq_lengths_to_batch_offsets(batch_ks)
-            topk_indices = torch.empty(
-                topk_offsets[-1], dtype=torch.long, device=queries.device
-            )
-
-            # holder for topk's first (values) output
-            scratch_values = token_scores.new_empty(int(batch_ks.max()))
-
-            # per-batch topk
-            for b, k in enumerate(batch_ks):
-                k = int(k)
-                batch_start, batch_end = query_batch_offsets[b : b + 2]
-                slice_topk = slice(*topk_offsets[b : b + 2])
-
-                torch.topk(
-                    token_scores[batch_start:batch_end].detach(),
-                    k,
-                    out=(scratch_values[:k], topk_indices[slice_topk]),
-                )
-                topk_indices[slice_topk] += batch_start
-            del scratch_values
+        topk_indices, topk_offsets = batch_topk(
+            token_scores, query_batch_offsets, self.max_tokens_sa
+        )
 
         queries_sa = queries[topk_indices]
         spatial_indices_sa = query_spatial_indices[:, topk_indices]

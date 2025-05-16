@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch import Tensor
 
-from emsim.utils.sparse_utils.batching.batching import (
+from emsim.utils.sparse_utils.batching.batch_utils import (
     split_batch_concatted_tensor,
     normalize_batch_offsets,
     batch_offsets_to_seq_lengths,
@@ -81,7 +81,7 @@ class TestValidateTensorDims:
         """Test with too few dimensions."""
         tensor = torch.rand(3, 4, device=device)
         with pytest.raises(
-            (ValueError, torch.jit.Error),
+            (ValueError, torch.jit.Error),  # type: ignore
             match="Expected tensor to have at least 3 dimensions",
         ):
             validate_atleast_nd(tensor, 3)
@@ -90,7 +90,7 @@ class TestValidateTensorDims:
         """Test with custom tensor name."""
         tensor = torch.rand(3, device=device)
         with pytest.raises(
-            (ValueError, torch.jit.Error),
+            (ValueError, torch.jit.Error),  # type: ignore
             match="Expected custom_tensor to have at least 2 dimensions",
         ):
             validate_atleast_nd(tensor, 2, name="custom_tensor")
@@ -223,7 +223,7 @@ class TestDeconcatAddBatchDim:
         batch_offsets = torch.tensor([0, 3], device=device)
 
         with pytest.raises(
-            (ValueError, torch.jit.Error),
+            (ValueError, torch.jit.Error),  # type: ignore
             match="Expected tensor to have at least 2 dimensions",
         ):
             deconcat_add_batch_dim(tensor_1d, batch_offsets)
@@ -318,7 +318,7 @@ class TestRemoveBatchDimAndConcat:
         # Test with tensor with less than 3 dimensions
         tensor_2d = torch.rand(3, 4, device=device)
         with pytest.raises(
-            (ValueError, torch.jit.Error),
+            (ValueError, torch.jit.Error),  # type: ignore
             match="Expected tensor to have at least 3 dimensions",
         ):
             remove_batch_dim_and_concat(tensor_2d)
@@ -327,7 +327,9 @@ class TestRemoveBatchDimAndConcat:
         tensor = torch.rand(3, 4, 2, device=device)
         padding_mask_wrong_batch = torch.zeros(2, 4, device=device, dtype=torch.bool)
         padding_mask_wrong_batch[0, -1] = True
-        with pytest.raises((ValueError, torch.jit.Error), match="Batch size mismatch"):
+        with pytest.raises(
+            (ValueError, torch.jit.Error), match="Batch size mismatch"  # type: ignore
+        ):
             remove_batch_dim_and_concat(tensor, padding_mask_wrong_batch)
 
 

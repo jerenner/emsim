@@ -29,7 +29,7 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor) -> list[
     if split_tensor[-1].size(0) == 0:
         split_tensor = split_tensor[:-1]
 
-    return split_tensor
+    return list(split_tensor)
 
 
 @torch.jit.script
@@ -91,7 +91,7 @@ def batch_indices_to_offsets(batch_indices: Tensor) -> Tensor:
     if batch_indices.numel() == 0:  # empty case
         return torch.zeros(1, device=batch_indices.device, dtype=batch_indices.dtype)
 
-    max_batch_index = batch_indices.max()
+    max_batch_index = int(batch_indices.max().item())
     batch_size = max_batch_index + 1
 
     counts = torch.bincount(batch_indices, minlength=batch_size)

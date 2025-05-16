@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-from emsim.utils.sparse_utils.batching.batching import split_batch_concatted_tensor
+from emsim.utils.sparse_utils.batching.batch_utils import split_batch_concatted_tensor
 
 
 @torch.jit.script

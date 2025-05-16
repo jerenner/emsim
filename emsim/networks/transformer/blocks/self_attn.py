@@ -11,7 +11,7 @@ from emsim.networks.positional_encoding.rope import (
     get_multilevel_freq_group_pattern,
     prep_multilevel_positions,
 )
-from emsim.utils.sparse_utils.batching.batching import (
+from emsim.utils.sparse_utils.batching import (
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
     batch_offsets_to_indices,
@@ -99,6 +99,7 @@ class SelfAttentionBlock(nn.Module):
         query_with_pos_embed, pad_mask_2 = deconcat_add_batch_dim(
             query_with_pos_embed, batch_offsets
         )
+        assert isinstance(pad_mask, Tensor)
         assert torch.equal(pad_mask, pad_mask_2)
         query = self.dropout(
             self.attn(

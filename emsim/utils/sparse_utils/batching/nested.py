@@ -1,4 +1,4 @@
-from emsim.utils.sparse_utils.batching.batching import split_batch_concatted_tensor
+from . import split_batch_concatted_tensor
 
 
 import torch

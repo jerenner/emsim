@@ -9,7 +9,7 @@ from emsim.networks.positional_encoding.rope import (
     get_multilevel_freq_group_pattern,
     prep_multilevel_positions,
 )
-from emsim.utils.sparse_utils.batching.batching import (
+from emsim.utils.sparse_utils.batching import (
     batch_offsets_to_indices,
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,

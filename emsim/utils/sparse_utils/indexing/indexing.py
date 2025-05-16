@@ -137,12 +137,6 @@ def batch_sparse_index(
         ValueError: If `check_all_specified` is set to True and not all indices in
             `index_tensor` had associated values specified in `sparse_tensor`, or if
             `index_tensor` is a nested tensor (feature planned but not implemented yet)
-
-    Implementation details:
-        This function first linearizes the sparse_tensor indices and index_tensor
-        entries, reducing the overall complexity from O(prod(B) * log(nnz) * n)
-        to O(prod(B) * (n + log(nnz))) and making it suitable for high-dimensional
-        sparse tensors.
     """
     if index_tensor.is_nested:
         raise ValueError("Nested index tensor not supported yet")

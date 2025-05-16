@@ -1,4 +1,4 @@
-from typing import Optional, Any
+from typing import Optional, Any, Union
 
 import math
 import torch
@@ -35,7 +35,7 @@ def traceable_subset_attention(
     training: bool = True,
     batch_kv_projection: bool = True,
     return_extended_outputs: bool = False,
-):
+) -> Union[Tensor, dict[str, Union[Tensor, None]]]:
     """Traceable implementation of subset attention using standard Pytorch ops.
 
     This implementation avoids the memory optimizations of the custom op by using
@@ -51,7 +51,7 @@ def traceable_subset_attention(
 
     # Gather values using the same helper as the custom op
     selected = gather_and_mask(
-        sparse_tensor_values, linear_index_tensor, is_specified_mask, mask_inplace=False
+        sparse_tensor_values, linear_index_tensor, is_specified_mask
     )
 
     if batch_kv_projection:
@@ -147,7 +147,7 @@ def traceable_batched_attention(
     dropout_p: float = 0.0,
     training: bool = True,
     return_extended_outputs: bool = False,
-):
+) -> Union[Tensor, dict[str, Union[Tensor, None]]]:
     batch_size, n_queries, embed_dim = query_tensor.size()
     n_keys = source_tensor.size(1)
     head_dim = embed_dim // n_heads
@@ -203,7 +203,8 @@ def traceable_batched_attention(
         return attn_output
     else:
         return {
-            "queries": queries.transpose(1, 2).flatten(-2, -1),  # batch, seq_len, embed_dim
+            # batch, seq_len, embed_dim
+            "queries": queries.transpose(1, 2).flatten(-2, -1),
             "keys": keys.transpose(1, 2).flatten(-2, -1),
             "values": values.transpose(1, 2).flatten(-2, -1),
             "attn_mask": attn_mask,
@@ -226,7 +227,7 @@ def scaled_dot_product_attention(
     is_causal=False,
     scale=None,
     enable_gqa=False,
-) -> torch.Tensor:
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
     attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)

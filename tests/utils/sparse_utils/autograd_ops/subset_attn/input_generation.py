@@ -1,4 +1,4 @@
-from typing import Optional, Union, Literal
+from typing import Optional, Union, Literal, Any
 
 import numpy as np
 from torch import Tensor
@@ -32,7 +32,7 @@ def attention_inputs(
     training: bool = True,
     seed: Optional[int] = None,
     **kwargs,
-):
+) -> dict[str, Any]:
     """Generate test inputs for sparse attention mechanisms.
 
     This function creates a comprehensive set of tensors needed for testing
@@ -369,10 +369,9 @@ def create_sparse_and_index_tensor(
     else:
         feature_size = (embed_dim,)
 
-    batch_size = len(n_queries)
-
     if isinstance(n_queries, int):
         n_queries = [n_queries]
+    batch_size = len(n_queries)
     max_queries = max(n_queries)
 
     # Calculate the total number of elements in the spatial dimensions

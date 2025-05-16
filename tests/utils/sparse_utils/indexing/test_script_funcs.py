@@ -4,9 +4,9 @@ import torch
 # Import the functions to test
 from emsim.utils.sparse_utils.indexing.script_funcs import (
     flatten_sparse_indices,
-    linearize_sparse_and_index_tensors,
-    get_sparse_index_mapping,
     gather_and_mask,
+    get_sparse_index_mapping,
+    linearize_sparse_and_index_tensors,
 )
 
 
@@ -90,7 +90,7 @@ class TestLinearizeSparseAndIndexTensors:
         # Create an index tensor with wrong last dimension
         index_tensor = torch.tensor([[0], [1], [2]], device=device)
 
-        with pytest.raises((ValueError, torch.jit.Error), match="Expected last dim"):
+        with pytest.raises((ValueError, torch.jit.Error), match="Expected last dim"):  # type: ignore
             linearize_sparse_and_index_tensors(sparse_tensor, index_tensor)
 
 
@@ -309,8 +309,7 @@ class TestGatherAndMask:
         indices = torch.tensor([0, 2, 1], device=device)
         mask = torch.tensor([True, False, True], device=device)
 
-        # Gather and mask with inplace=False for gradient flow
-        result = gather_and_mask(values, indices, mask, mask_inplace=False)
+        result = gather_and_mask(values, indices, mask)
 
         # Compute loss and check gradients
         loss = result.sum()
@@ -322,6 +321,7 @@ class TestGatherAndMask:
             device=device,
         )
 
+        assert values.grad is not None
         assert torch.allclose(values.grad, expected_grad)
 
     def test_gather_and_mask_gradient(self, device):
@@ -340,8 +340,7 @@ class TestGatherAndMask:
         indices = torch.tensor([0, 1, 0], device=device)
         mask = torch.tensor([True, False, True], device=device)
 
-        # Gather and mask with inplace=False for gradient flow
-        result = gather_and_mask(values, indices, mask, mask_inplace=False)
+        result = gather_and_mask(values, indices, mask)
 
         # Compute loss and check gradients
         loss = result.sum()
@@ -356,6 +355,7 @@ class TestGatherAndMask:
             device=device,
         )
 
+        assert values.grad is not None
         assert torch.allclose(values.grad, expected_grad)
 
     def test_gather_and_mask_errors(self, device):
@@ -366,7 +366,7 @@ class TestGatherAndMask:
         mask_3 = torch.ones(3, dtype=torch.bool, device=device)
 
         with pytest.raises(
-            (ValueError, torch.jit.Error),
+            (ValueError, torch.jit.Error),  # type: ignore
             match="Expected indices and mask to have same shape",
         ):
             gather_and_mask(values_2d, indices_2, mask_3)

@@ -84,8 +84,8 @@ def simple_input_tensors(
     for level, (h, w) in enumerate(level_spatial_shapes):
         hw_indices = torch.stack(
             torch.meshgrid(
-                torch.arange(h, device=device),
-                torch.arange(w, device=device),
+                torch.arange(int(h), device=device),
+                torch.arange(int(w), device=device),
                 indexing="ij",
             ),
             dim=-1,
@@ -126,7 +126,9 @@ def simple_input_tensors(
 
 @st.composite
 def neighborhood_data_strategy(
-    draw, require_grads: bool = False, standard_float_range=False,
+    draw,
+    require_grads: bool = False,
+    standard_float_range=False,
 ) -> dict[str, Any]:
     # Draw basic shape parameters
     n_heads = draw(st.integers(1, 8))
@@ -164,7 +166,7 @@ def neighborhood_data_strategy(
     assert np.array_equal(np.sort(level_shapes, 0), level_shapes)
 
     # Draw tensor generation parameters
-    seed = draw(st.integers(0, 1e8))
+    seed = draw(st.integers(0, int(1e8)))
     float_dtype = draw(st.just(torch.float32))
 
     if standard_float_range:
@@ -174,9 +176,7 @@ def neighborhood_data_strategy(
         min_float_value = draw(
             st.floats(min_value=-1e6, max_value=1e6, exclude_max=True)
         )
-        max_float_value = draw(
-            st.floats(min_value=min_float_value, max_value=1e6)
-        )
+        max_float_value = draw(st.floats(min_value=min_float_value, max_value=1e6))
 
     position_dtype = draw(st.just(torch.float32))
 
@@ -251,9 +251,9 @@ def neighborhood_data_strategy(
 def strategy_input_tensors(
     embed_dim: int,
     position_dim: int,
-    query_batch_offsets: list[int],
-    level_spatial_shapes: np.ndarray,
-    neighborhood_sizes: list[int],
+    query_batch_offsets: Union[list[int], Tensor],
+    level_spatial_shapes: Union[np.ndarray, Tensor],
+    neighborhood_sizes: Union[list[int], Tensor],
     query_full_neighborhood_portion: float,
     sparse_region_sparsity: float,
     make_level_indices: bool,
@@ -263,25 +263,26 @@ def strategy_input_tensors(
     position_dtype: torch.dtype,
     tensors_requiring_grads: list[str],
     seed: int,
-    device: str,
-) -> dict[str, torch.Tensor]:
+    device: Union[str, torch.device],
+) -> dict[str, Optional[torch.Tensor]]:
     """Create input tensors based on strategy parameters."""
-    device = torch.device(device, 0)
+    if isinstance(device, str):
+        device = torch.device(device, 0)
 
     # save rng state and set seed
     if device.type == "cuda":
         rng_state = torch.cuda.get_rng_state(device)
     else:
-        rng_state = torch.get_rng_state(device)
+        rng_state = torch.get_rng_state()
     torch.manual_seed(seed)
 
     # convert non-tensors to tensors
-    query_batch_offsets = torch.tensor(query_batch_offsets, device=device)
-    level_spatial_shapes = torch.tensor(level_spatial_shapes, device=device)
-    neighborhood_sizes = torch.tensor(neighborhood_sizes, device=device)
+    query_batch_offsets = torch.as_tensor(query_batch_offsets, device=device)
+    level_spatial_shapes = torch.as_tensor(level_spatial_shapes, device=device)
+    neighborhood_sizes = torch.as_tensor(neighborhood_sizes, device=device)
 
-    n_queries = query_batch_offsets[-1]
-    batch_size = torch.tensor(len(query_batch_offsets) - 1, device=device)
+    n_queries = int(query_batch_offsets[-1].item())
+    batch_size = len(query_batch_offsets) - 1
     n_levels = level_spatial_shapes.size(-2)
 
     # Create queries: embeddings and spatial positions
@@ -315,7 +316,7 @@ def strategy_input_tensors(
 
     # Create stacked feature maps sparse tensor
     # 1. Obtain full neighborhood indices for specified queries
-    n_full_nhood_queries = (n_queries * query_full_neighborhood_portion).long()
+    n_full_nhood_queries = int(n_queries * query_full_neighborhood_portion)
     shuffled_query_indices = torch.randperm(n_queries, device=device)
 
     full_neighborhood_query_idx = shuffled_query_indices[:n_full_nhood_queries]
@@ -344,7 +345,7 @@ def strategy_input_tensors(
             (level_shape.size(0) + 1,), fill_value=batch_size
         )
         extended_level_shape[1:] = level_shape
-        n_level_indices = torch.prod(extended_level_shape)
+        n_level_indices = int(torch.prod(extended_level_shape).item())
 
         n_sampled_indices = int(n_level_indices * (1 - sparse_region_sparsity))
         n_sampled_indices = min(
@@ -473,7 +474,7 @@ class TestGetMultilevelNeighborhoods:
         invalid_query = torch.ones(3, 2, 2, device=device)  # 3D tensor
         valid_shapes = torch.tensor([[32, 32], [16, 16]], device=device)
 
-        with pytest.raises((ValueError, torch.jit.Error)):
+        with pytest.raises((ValueError, torch.jit.Error)):  # type: ignore
             get_multilevel_neighborhoods(invalid_query, valid_shapes)
 
         # Invalid neighborhood sizes (should be odd)
@@ -481,7 +482,8 @@ class TestGetMultilevelNeighborhoods:
         even_sizes = [2, 4]  # Even sizes should raise error
 
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="odd neighborhood_sizes"
+            (ValueError, torch.jit.Error),  # type: ignore
+            match="odd neighborhood_sizes",
         ):
             get_multilevel_neighborhoods(valid_query, valid_shapes, even_sizes)
 
@@ -904,6 +906,7 @@ class TestForward:
         output = module(**input_data)
 
         # Check output shape and validity
+        assert input_data["query"] is not None
         assert output.shape == input_data["query"].shape
         assert not torch.isnan(output).any()
         assert not torch.isinf(output).any()
@@ -982,7 +985,10 @@ class TestEdgeCases:
         invalid_data["query"] = torch.randn(10, device=device)
 
         # This should raise an error due to incorrect query dimensions
-        with pytest.raises((ValueError, torch.jit.Error), match="Expected.*2D"):
+        with pytest.raises(
+            (ValueError, torch.jit.Error),  # type: ignore
+            match="Expected.*2D"
+        ):
             base_module_instance(**invalid_data)
 
         # Create invalid position tensor (3D instead of 2D)
@@ -990,7 +996,7 @@ class TestEdgeCases:
         invalid_data["query_spatial_positions"] = torch.randn(2, 3, 2, device=device)
 
         # This should raise an error due to incorrect position dimensions
-        with pytest.raises((ValueError, torch.jit.Error)):
+        with pytest.raises((ValueError, torch.jit.Error)):  # type: ignore
             base_module_instance(**invalid_data)
 
     def test_batch_size_mismatch(
@@ -1009,7 +1015,7 @@ class TestEdgeCases:
             output = base_module_instance(**invalid_data)
             # If it doesn't raise an error, check that output shape is correct
             assert output.shape == input_data["query"].shape
-        except (ValueError, torch.jit.Error, IndexError):
+        except (ValueError, torch.jit.Error, IndexError):  # type: ignore
             # It's acceptable for this to raise an error too
             pass
 
@@ -1063,6 +1069,7 @@ class TestCorrectness:
         # Create input data
         input_data = strategy_input_tensors(**config["tensor_config"], device=device)
         query = input_data["query"]
+        assert query is not None
 
         # ensure input isn't all zeros
         assume(not torch.allclose(query, torch.zeros_like(query)))
@@ -1173,7 +1180,9 @@ class TestCorrectness:
 @pytest.mark.cuda_if_available
 class TestProperties:
     @settings(deadline=None)
-    @given(inputs=neighborhood_data_strategy(require_grads=True, standard_float_range=True))
+    @given(
+        inputs=neighborhood_data_strategy(require_grads=True, standard_float_range=True)
+    )
     def test_gradient_magnitude_consistency(self, inputs: dict[str, Any], device: str):
         """Test that gradient magnitudes are reasonable and don't explode or vanish."""
         config = inputs["config"]
@@ -1191,6 +1200,7 @@ class TestProperties:
 
         # Check gradient magnitudes for inputs
         for name, tensor in input_data.items():
+            assert tensor is not None
             if hasattr(tensor, "grad") and tensor.grad is not None:
                 # Check that gradients are finite
                 assert not torch.isnan(tensor.grad).any(), f"{name} has NaN gradients"
@@ -1245,6 +1255,8 @@ class TestProperties:
 
         # Make a copy with shifted positions
         shifted_data = input_data.copy()
+        assert shifted_data["query_spatial_positions"] is not None
+        assert input_data["level_spatial_shapes"] is not None
         shift_amount = shifted_data["query_spatial_positions"].new_ones(
             config["position_dim"]
         ) * max(1.0, input_data["level_spatial_shapes"].min().item() * 0.05)
@@ -1273,6 +1285,7 @@ class TestProperties:
 
         # 2. The relative change is similar across queries in the same batch
         batch_indices = batch_offsets_to_indices(input_data["query_batch_offsets"])
+        assert input_data["query_batch_offsets"] is not None
         for batch_idx in range(len(input_data["query_batch_offsets"]) - 1):
             batch_mask = batch_indices == batch_idx
             if batch_mask.sum() >= 2:
@@ -1428,6 +1441,7 @@ class TestProperties:
         # Create input data
         input_data = strategy_input_tensors(**inputs["tensor_config"], device=device)
         sparse_tensor = input_data["stacked_feature_maps"]
+        assert sparse_tensor is not None
         original_indices = sparse_tensor.indices()
 
         # Run with all levels

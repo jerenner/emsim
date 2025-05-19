@@ -1,5 +1,5 @@
 import math
-from typing import Any, Union
+from typing import Any, Union, Optional
 
 import numpy as np
 import pytest
@@ -83,7 +83,7 @@ def input_data_strategy(draw) -> dict[str, Any]:
     )
 
     # Draw tensor generation parameters
-    seed = draw(st.integers(min_value=0, max_value=1e8))
+    seed = draw(st.integers(min_value=0, max_value=int(1e8)))
     float_dtype = draw(st.just(torch.float32))
 
     min_float_value = draw(st.floats(min_value=-1e6, max_value=1e6, exclude_max=True))
@@ -166,16 +166,17 @@ def make_input_tensors(
     attn_mask_sparsity: float,
     attn_mask_shape: tuple[int, ...],
     seed: int,
-    device: str,
+    device: Union[str, torch.device],
     force_non_normalized_coords: bool = True,
 ) -> dict[str, Tensor]:
-    device = torch.device(device, 0)
+    if isinstance(device, str):
+        device = torch.device(device, 0)
 
     # save rng state and set seed
     if device.type == "cuda":
         rng_state = torch.cuda.get_rng_state(device)
     else:
-        rng_state = torch.get_rng_state(device)
+        rng_state = torch.get_rng_state()
     torch.manual_seed(seed)
 
     total_seq_lengths = batch_offsets[-1]
@@ -189,6 +190,7 @@ def make_input_tensors(
         (total_seq_lengths, position_dim), device=device, dtype=position_dtype
     )
     if position_dtype == torch.long:
+        assert isinstance(min_position, int)
         spatial_positions.random_(min_position, min_position + 1)
     else:
         spatial_positions.uniform_(min_position, max_position)
@@ -217,7 +219,7 @@ def make_input_tensors(
 
 
 @pytest.fixture(params=["simple", "complex", "variable_length"])
-def input_data(request, device: str) -> dict[str, torch.Tensor]:
+def input_data(request, device: str) -> dict[str, Optional[torch.Tensor]]:
     """Parametrized fixture generating different input data types."""
     if request.param == "simple":
         return generate_input_data(
@@ -257,6 +259,8 @@ def input_data(request, device: str) -> dict[str, torch.Tensor]:
             ],
             random_seed=44,
         )
+    else:
+        raise ValueError(f"Unrecognized param {request.param}")
 
 
 def generate_input_data(
@@ -265,13 +269,13 @@ def generate_input_data(
     embed_dim: int,
     position_dim: int,
     batch_size: int,
-    num_levels: int = None,
-    level_distribution: list[int] = None,
-    level_shapes: list[list[int]] = None,
-    tokens_per_batch: list[int] = None,
+    num_levels: int,
+    level_distribution: Optional[list[int]] = None,
+    level_shapes: Optional[list[list[int]]] = None,
+    tokens_per_batch: Optional[list[int]] = None,
     with_attn_mask: bool = False,
-    random_seed: int = None,
-) -> dict[str, torch.Tensor]:
+    random_seed: Optional[int] = None,
+) -> dict[str, Optional[torch.Tensor]]:
     """Generate input tensors for testing with customizable parameters."""
     if random_seed is not None:
         torch.manual_seed(random_seed)
@@ -310,9 +314,9 @@ def generate_input_data(
         batch_offsets[1:] = torch.tensor(tokens_per_batch, device=device).cumsum(0)
     else:
         # Equal distribution of tokens across batches
-        tokens_per_batch = stacked_sequence_length // batch_size
+        tokens = stacked_sequence_length // batch_size
         batch_offsets = torch.arange(
-            0, stacked_sequence_length + 1, tokens_per_batch, device=device
+            0, stacked_sequence_length + 1, tokens, device=device
         )
         if batch_offsets.size(0) > batch_size + 1:
             batch_offsets = batch_offsets[: batch_size + 1]
@@ -323,7 +327,7 @@ def generate_input_data(
     if with_attn_mask:
         # Create simple mask: first token in each batch can't attend to last token
         tokens_per_batch = [
-            batch_offsets[i + 1] - batch_offsets[i] for i in range(batch_size)
+            int(batch_offsets[i + 1] - batch_offsets[i]) for i in range(batch_size)
         ]
         max_tokens = max(tokens_per_batch)
         attn_mask = torch.zeros(
@@ -350,8 +354,8 @@ def generate_variable_length_input_data(
     num_levels: int,
     level_shapes: list[list[int]],
     tokens_per_level: list[list[int]],
-    random_seed: int = None,
-) -> dict[str, torch.Tensor]:
+    random_seed: Optional[int] = None,
+) -> dict[str, Optional[torch.Tensor]]:
     """Generate input data with variable sequence lengths."""
     if random_seed is not None:
         torch.manual_seed(random_seed)
@@ -383,10 +387,12 @@ def generate_variable_length_input_data(
 
             # Generate positions on a grid
             if num_tokens > 0:
-                h_use = min(h, num_tokens // w + (1 if num_tokens % w > 0 else 0))
+                h_use = torch.minimum(
+                    h, num_tokens // w + (1 if num_tokens % w > 0 else 0)
+                )
                 positions = []
                 for i in range(h_use):
-                    for j in range(min(w, num_tokens - i * w)):
+                    for j in range(torch.minimum(w, num_tokens - i * w)):
                         positions.append([i, j])
 
                 # For random positions instead of grid:
@@ -547,6 +553,7 @@ class TestForward:
         output = module_instance(**input_data)
 
         # Check output
+        assert input_data["x"] is not None
         assert output.shape == input_data["x"].shape
         assert not torch.isnan(output).any()
         assert not torch.isinf(output).any()
@@ -594,6 +601,7 @@ class TestForward:
             assert abs(pre_qkv_input.std() - 1.0) < 0.5
         else:
             # Post-norm: input to QKV should be the original input
+            assert input_data["x"] is not None
             assert torch.abs(pre_qkv_input.mean() - input_data["x"].mean()) < 0.1
 
     @pytest.mark.parametrize("dropout_value", [0.0, 0.3])
@@ -731,6 +739,7 @@ class TestAttentionMechanism:
 
         # Create modified data with different positions
         modified_data = original_data.copy()
+        assert original_data["spatial_positions"] is not None
         modified_positions = original_data["spatial_positions"].clone() + 1.0
         modified_data["spatial_positions"] = modified_positions
 
@@ -791,7 +800,9 @@ class TestEdgeCases:
         invalid_data = input_data.copy()
         invalid_data["x"] = torch.randn(10, device=input_data["x"].device)
 
-        with pytest.raises((ValueError, torch.jit.Error), match="Expected.*2D"):
+        with pytest.raises(
+            (ValueError, torch.jit.Error), match="Expected.*2D"  # type: ignore
+        ):
             module_instance(**invalid_data)
 
     def test_empty_batch_handling(

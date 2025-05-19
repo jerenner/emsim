@@ -1,15 +1,9 @@
-import math
-from typing import Callable, Dict
 from functools import wraps
+from typing import Any, Callable, Dict
 
+import torch
 from hypothesis import strategies as st
-import torch
 from torch import Tensor, nn
-
-
-import torch
-import torch.nn as nn
-from typing import Dict, Callable, Any, Union, List, Tuple
 
 
 class ModuleHook:
@@ -24,8 +18,8 @@ class ModuleHook:
             points_to_hook: Dict mapping hook names to functions that return the component to hook
         """
         self.module = module
-        self.captured_values = {
-            hook_name: {"inputs": [], "outputs": []} for hook_name in points_to_hook
+        self.captured_values: dict[str, dict[str, Any]] = {
+            hook_name: {"inputs": {}, "outputs": []} for hook_name in points_to_hook
         }
         self.original_methods = {}
 
@@ -54,7 +48,7 @@ class ModuleHook:
             return {k: self._process_value(v) for k, v in value.items()}
         return value
 
-    def _normalize_to_list(self, value: Any) -> List[Any]:
+    def _normalize_to_list(self, value: Any) -> list[Any]:
         """Normalize input or output to a list, handling single values and tuples."""
         if isinstance(value, tuple):
             return list(self._process_value(value))

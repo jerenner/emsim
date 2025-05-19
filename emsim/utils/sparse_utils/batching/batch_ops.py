@@ -172,7 +172,7 @@ def batch_topk(
     if batch_size == 0 or tensor.numel() == 0:
         topk_indices = torch.empty(0, device=tensor.device, dtype=torch.long)
         topk_offsets = torch.zeros(1, device=tensor.device, dtype=torch.long)
-        topk_values = tensor.new_empty(0) if return_values else None
+        topk_values = tensor[0:0].flatten() if return_values else None
         return BatchTopK(topk_indices, topk_offsets, topk_values)
 
     # Find product of dims besides seq and topk dims
@@ -203,7 +203,7 @@ def batch_topk(
 
         if k_int == 0:
             topk_indices = torch.empty(0, device=tensor.device, dtype=torch.long)
-            topk_values = tensor.new_empty(0) if return_values else None
+            topk_values = tensor[0:0].flatten() if return_values else None
             return BatchTopK(topk_indices, topk_offsets, topk_values)
 
         # reshape to [bsz, seq_len, ...]
@@ -217,7 +217,7 @@ def batch_topk(
         # If topk is along sequence length, need to add offsets to topk_indices
         if dim == 0:
             unsqueeze_shape = (batch_size,) + (1,) * (topk_indices.ndim - 1)
-            topk_indices += batch_offsets[:-1].view(unsqueeze_shape)
+            topk_indices = topk_indices + batch_offsets[:-1].view(unsqueeze_shape)
 
         topk_indices = topk_indices.flatten()
         if return_values:
@@ -244,7 +244,7 @@ def batch_topk(
     )
     topk_values: Optional[Tensor] = None
     if return_values:
-        topk_values = tensor.new_empty(int(topk_offsets[-1].item()))
+        topk_values = tensor.new_empty(int(topk_offsets[-1]))
 
     # Allocate a "scratch" buffer to hold the topk values outputs
     max_seq_len = int(seq_lens.max().item())
@@ -259,13 +259,13 @@ def batch_topk(
     # per-batch topk
     for b, k_b in enumerate(batch_seq_ks):
         k_b = int(k_b)
-        if k_b == 0:  # no topk to take
-            continue
+        # if k_b == 0:  # no topk to take
+        #     continue
         batch_start, batch_end = int(batch_offsets[b]), int(batch_offsets[b + 1])
         slice_start, slice_end = int(topk_offsets[b]), int(topk_offsets[b + 1])
 
         # slice of the big concatted sequence tensor that represents this subsequence
-        subseq_b = tensor[batch_start:batch_end].detach()
+        subseq_b = tensor[batch_start:batch_end]
 
         # Set up the view into the output topk tensor
         subseq_shape = list(subseq_b.shape)
@@ -280,7 +280,7 @@ def batch_topk(
             val_buffer = val_buffer.narrow(dim, 0, k_b)
 
         _topk_out(
-            tensor[batch_start:batch_end].detach(),
+            subseq_b.detach(),
             k_b,
             dim=dim,
             largest=largest,
@@ -288,9 +288,96 @@ def batch_topk(
             out_values=val_buffer,
             out_indices=topk_inds_subseq_view,
         )
+        if return_values:
+            # clone topk inds to save unmodified tensor for take_along_dim backward
+            values = torch.take_along_dim(subseq_b, topk_inds_subseq_view.clone(), dim)
+            assert topk_values is not None
+            topk_values[slice_start:slice_end] = values.reshape(-1)
         if dim == 0:
             topk_inds_subseq_view.add_(batch_start)
-        if topk_values is not None:  # return_values == True
-            topk_values[slice_start:slice_end].copy_(val_buffer.flatten())
+
+    if topk_values is not None:
+        topk_values.requires_grad_(tensor.requires_grad)
 
     return BatchTopK(topk_indices, topk_offsets, topk_values)
+
+
+@torch.jit.script
+def unpack_batch_topk(
+    result: BatchTopK,
+    batch_offsets: Tensor,
+    original_shape: list[int],
+    dim: int = 0,
+) -> tuple[list[Tensor], Optional[list[Tensor]]]:
+    """
+    Re-shape and localize the flattened `indices`/`values` inside `BatchTopK` object.
+
+    Args:
+        result (BatchTopK): The object returned by :pyfunc:`batch_topk`.
+        batch_offsets (Tensor): Same offsets that were passed to `batch_topk`.
+        original_shape ([list[int]): ``tensor.shape`` of the concatenated tensor that
+            was given to `batch_topk`.
+        dim (int): Dimension along which top-k was computed (same value that was given
+            to `batch_topk`).
+
+    Returns
+    -------
+    indices_per_batch, values_per_batch
+        Lists containing one tensor per input sequence.  Each tensor has
+        the exact shape returned by a direct call to
+        ``torch.topk(subseq, …)`` for that sequence.
+
+        ``values_per_batch`` is *None* when the call to
+        :pyfunc:`batch_topk` was made with ``return_values=False``.
+    """
+    # Normalize possibly negative dim
+    dim = dim if dim >= 0 else dim + len(original_shape)
+
+    indices_per_batch: list[Tensor] = []
+    values_per_batch: Optional[list[Tensor]] = [] if result.values is not None else None
+
+    # Compute the product of the other dims to determine subsequence topk size
+    prod_other_dims = 1
+    for i, s in enumerate(original_shape):
+        if i not in (0, dim):
+            prod_other_dims *= s
+
+    for b in range(batch_offsets.numel() - 1):
+        # Sub-range of the concatenated tensor
+        start, end = int(batch_offsets[b]), int(batch_offsets[b + 1])
+        seq_len_b = end - start
+
+        # Slice into the flattened top-k output
+        slice_start, slice_end = int(result.offsets[b]), int(result.offsets[b + 1])
+        idx_flat_global = result.indices[slice_start:slice_end]
+
+        # Convert to local coordinates when top-k was along the sequence dim
+        idx_flat_local = idx_flat_global - start if dim == 0 else idx_flat_global
+
+        # Derive k_b from the number of elements
+        if idx_flat_local.numel() == 0:
+            k_b = 0
+        elif dim == 0:
+            k_b = idx_flat_local.numel() // prod_other_dims
+        else:
+            k_b = idx_flat_local.numel() // (seq_len_b * prod_other_dims)
+
+        # Build the full output shape for this subsequence
+        out_shape = list(original_shape)
+        if dim == 0:
+            out_shape[0] = k_b
+        else:
+            out_shape[0] = seq_len_b
+            out_shape[dim] = k_b
+
+        # Reshape and store
+        indices_per_batch.append(idx_flat_local.view(out_shape))
+
+        if result.values is not None:
+            vals = result.values
+            assert vals is not None
+            vals_b = vals[slice_start:slice_end]
+            assert values_per_batch is not None
+            values_per_batch.append(vals_b.view(out_shape))  # type: ignore
+
+    return indices_per_batch, values_per_batch

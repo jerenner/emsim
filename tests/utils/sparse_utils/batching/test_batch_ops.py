@@ -1,265 +1,273 @@
+from typing import Any, Sequence, Union
+
 import pytest
 import torch
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 from torch import Tensor
 
-from emsim.utils.sparse_utils.batching.batch_ops import batch_topk
+from emsim.utils.sparse_utils.batching.batch_ops import batch_topk, BatchTopK
 from emsim.utils.sparse_utils.batching.batch_utils import (
-    batch_offsets_to_seq_lengths,
     seq_lengths_to_batch_offsets,
 )
 
 
-@pytest.fixture
-def uniform_lengths_tensor(device) -> Tensor:
-    """Create a tensor with uniform sequence lengths for testing."""
-    # Create 3 sequences, each with 4 elements
-    return torch.tensor(
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
-        device=device
+# Helper utils
+def random_tensor(
+    seq_lens: Sequence[int], extra_dims: Sequence[int], seed: int, device: str
+) -> tuple[Tensor, Tensor]:
+    """
+    Generate a concatenated tensor together with its batch offsets.
+
+    We reseed to make the result reproducible across CPU / CUDA.
+    """
+    gen = torch.Generator(device=device).manual_seed(seed)
+    total = int(sum(seq_lens))
+    tensor = torch.randn((total, *extra_dims), generator=gen, device=device)
+    batch_offsets = seq_lengths_to_batch_offsets(
+        torch.tensor(seq_lens, dtype=torch.long, device=device)
     )
+    return tensor, batch_offsets
 
 
-@pytest.fixture
-def uniform_lengths_offsets(device) -> Tensor:
-    """Create batch offsets for uniform sequence lengths."""
-    return torch.tensor([0, 4, 8, 12], device=device)
+def topk_reference(
+    tensor: Tensor,
+    batch_offsets: Tensor,
+    k: Sequence[int],
+    dim: int,
+    largest: bool,
+    sorted_: bool,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Pure-Python reference that applies torch.topk separately on every subsequence.
+    Returned indices are mapped back to the global (concatenated-tensor) index space
+    exactly like `batch_topk` does.
+    """
+    all_idx: list[Tensor] = []
+    all_val: list[Tensor] = []
+    lengths: list[int] = []
 
+    for b, k_b in enumerate(k):
+        start, end = map(int, (batch_offsets[b], batch_offsets[b + 1]))
+        subseq = tensor[start:end]
 
-@pytest.fixture
-def variable_lengths_tensor(device) -> Tensor:
-    """Create a tensor with variable sequence lengths for testing."""
-    return torch.tensor(
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-        device=device
+        # normalize the topk dim
+        norm_dim = dim if dim >= 0 else subseq.ndim + dim
+        k_eff = min(k_b, subseq.shape[norm_dim])  # clamp
+        if k_eff == 0:
+            lengths.append(0)
+            continue
+
+        values, idx = torch.topk(
+            subseq, k_eff, dim=norm_dim, largest=largest, sorted=sorted_
+        )
+        norm_dim = dim if dim >= 0 else subseq.ndim + dim
+        if norm_dim == 0:
+            idx = idx + start
+        all_idx.append(idx.flatten())
+        all_val.append(values.flatten())
+        lengths.append(idx.numel())
+
+    if all_idx:
+        idx_cat = torch.cat(all_idx)
+        val_cat = torch.cat(all_val)
+    else:  # empty batch
+        device = tensor.device
+        idx_cat = torch.empty(0, dtype=torch.long, device=device)
+        val_cat = torch.empty(0, dtype=tensor.dtype, device=device)
+    offsets_out = seq_lengths_to_batch_offsets(
+        torch.tensor(lengths, dtype=torch.long, device=tensor.device)
     )
+    return idx_cat, offsets_out, val_cat
 
 
-@pytest.fixture
-def variable_lengths_offsets(device) -> Tensor:
-    """Create batch offsets for variable sequence lengths."""
-    return torch.tensor([0, 2, 5, 9], device=device)
+@st.composite
+def batch_topk_inputs(draw) -> dict[str, Any]:
+    # Sample sequence lengths
+    seq_lens = draw(st.lists(st.integers(0, 7), min_size=0, max_size=6))
+    # force at least one element overall so that tensor shape is valid
+    if sum(seq_lens) == 0:
+        seq_lens = [0, 1]
 
+    # Sample tensor shape
+    extra_dims = draw(st.lists(st.integers(1, 4), min_size=0, max_size=3))
+    tensor_ndim = 1 + len(extra_dims)
 
-@pytest.fixture
-def multidim_tensor(device) -> Tensor:
-    """Create a multi-dimensional tensor for testing."""
-    return torch.tensor(
-        [
-            [1.0, 10.0],
-            [2.0, 20.0],
-            [3.0, 30.0],
-            [4.0, 40.0],
-            [5.0, 50.0],
-            [6.0, 60.0]
-        ],
-        device=device
+    # Sample topk dim
+    dim = draw(st.integers(-tensor_ndim, tensor_ndim - 1))
+
+    # Sample k
+    norm_dim = dim if dim >= 0 else dim + (1 + len(extra_dims))
+    if norm_dim == 0:  # sequence dimension
+        max_len_along_dim = max(seq_lens) if seq_lens else 0
+    else:  # one of the extra dims
+        max_len_along_dim = extra_dims[norm_dim - 1]
+
+    k_scalar = draw(st.integers(0, max(0, max_len_along_dim)))
+    k_kind = draw(st.sampled_from(["scalar", "list", "tensor"]))
+    if k_kind == "scalar":
+        k = k_scalar
+    else:
+        ks = [
+            draw(st.integers(0, max(0, len_ if dim == 0 else max_len_along_dim)))
+            for len_ in seq_lens
+        ]
+        k = ks if k_kind == "list" else torch.tensor(ks)
+
+    # Sample flags
+    largest = draw(st.booleans())
+    sorted_ = draw(st.booleans())
+    seed = draw(st.integers(0, 2**32 - 1))
+
+    return dict(
+        seq_lens=seq_lens,
+        extra_dims=extra_dims,
+        dim=dim,
+        k=k,
+        largest=largest,
+        sorted_=sorted_,
+        seed=seed,
     )
-
-
-@pytest.fixture
-def multidim_offsets(device) -> Tensor:
-    """Create batch offsets for multi-dimensional tensor."""
-    return torch.tensor([0, 2, 4, 6], device=device)
 
 
 @pytest.mark.cpu_and_cuda
 class TestBatchTopK:
-    def test_uniform_length_scalar_k(self, uniform_lengths_tensor, uniform_lengths_offsets, device):
-        """Test basic functionality with uniform sequence lengths and scalar k."""
-        # Get top 2 elements from each sequence
-        topk_indices, topk_offsets = batch_topk(
-            uniform_lengths_tensor, uniform_lengths_offsets, k=2
+    # Basic tests
+    @pytest.mark.parametrize(
+        "seq_lens,k,dim,largest,sorted_",
+        [
+            # previously hard-coded examples
+            ([4, 4, 4], 2, 0, True, True),  # uniform, scalar k
+            ([2, 3, 4], 2, 0, True, True),  # variable, scalar k
+            ([2, 3, 4], [1, 2, 3], 0, True, True),  # per-sequence k
+            ([2, 3, 4], 10, 0, True, True),  # k larger than any len
+            ([4, 4, 4], 2, 0, False, True),  # smallest values
+            ([4, 4, 4], 2, 0, True, False),  # unsorted
+            ([2, 2, 2], 1, -1, True, True),  # negative dim
+            ([4], 2, 0, True, True),  # single batch
+            ([], 2, 0, True, True),  # empty batch
+        ],
+    )
+    def test_examples(
+        self,
+        seq_lens: list[int],
+        k: Union[int, list[int]],
+        dim: int,
+        largest: bool,
+        sorted_: bool,
+        device,
+    ):
+        tensor, offsets = random_tensor(
+            seq_lens, extra_dims=(), seed=1, device=device
         )
 
-        # Expected indices: [3, 2, 7, 6, 11, 10]
-        # These are the indices of the 2 largest elements in each sequence
-        expected_indices = torch.tensor([3, 2, 7, 6, 11, 10], device=device)
-        expected_offsets = torch.tensor([0, 2, 4, 6], device=device)
+        out = batch_topk(tensor, offsets, k, dim=dim, largest=largest, sorted=sorted_)
+        idx, off, val = out
 
-        assert torch.equal(topk_indices, expected_indices)
-        assert torch.equal(topk_offsets, expected_offsets)
+        # shape / basic invariants
+        assert off[-1] == idx.numel(), "offsets must mark the end of the last slice"
+        if isinstance(k, int):
+            k_as_list = [k] * len(seq_lens)
+        else:
+            k_as_list = list(k)
 
-        # Verify the values by indexing into the original tensor
-        values = uniform_lengths_tensor[topk_indices]
-        expected_values = torch.tensor([4.0, 3.0, 8.0, 7.0, 12.0, 11.0], device=device)
-        assert torch.equal(values, expected_values)
-
-    def test_variable_length_scalar_k(self, variable_lengths_tensor, variable_lengths_offsets, device):
-        """Test with variable sequence lengths and scalar k."""
-        # Get top 2 elements from each sequence (note: first sequence has only 2 elements)
-        topk_indices, topk_offsets = batch_topk(
-            variable_lengths_tensor, variable_lengths_offsets, k=2
+        # Compare to reference
+        ref_idx, ref_off, _ = topk_reference(
+            tensor, offsets, k_as_list, dim, largest, sorted_
         )
+        assert torch.equal(idx, ref_idx)
+        assert torch.equal(off, ref_off)
+        # With return_values=False we do not get the values tensor
+        assert val is None
 
-        # Expected indices: [1, 0, 4, 3, 8, 7]
-        expected_indices = torch.tensor([1, 0, 4, 3, 8, 7], device=device)
-        expected_offsets = torch.tensor([0, 2, 4, 6], device=device)
+    def test_return_values(self, device):
+        seq_lens = [3, 1, 5]
+        tensor, offsets = random_tensor(seq_lens, (), seed=1, device=device)
+        k = torch.tensor([2, 1, 4], device=device)
 
-        assert torch.equal(topk_indices, expected_indices)
-        assert torch.equal(topk_offsets, expected_offsets)
+        out = batch_topk(tensor, offsets, k, return_values=True)
+        idx, off, val = out
+        assert val is not None and val.shape == idx.shape
 
-        # Verify values
-        values = variable_lengths_tensor[topk_indices]
-        expected_values = torch.tensor([2.0, 1.0, 5.0, 4.0, 9.0, 8.0], device=device)
-        assert torch.equal(values, expected_values)
+        # Check that each val == tensor[idx]
+        assert torch.allclose(val, tensor[idx])
 
-    def test_tensor_k(self, variable_lengths_tensor, variable_lengths_offsets, device):
-        """Test with k as a tensor with different values per batch."""
-        # Different k for each sequence: [1, 2, 3]
-        k_tensor = torch.tensor([1, 2, 3], device=device)
+        # Offsets consistency
+        assert off[-1] == idx.numel()
 
-        topk_indices, topk_offsets = batch_topk(
-            variable_lengths_tensor, variable_lengths_offsets, k=k_tensor
+    # Error tests
+    @pytest.mark.parametrize("bad_dim", [-10, 5])
+    def test_invalid_dim_raises(self, device: str, bad_dim: int):
+        t = torch.randn(5, 4, device=device)
+        off = torch.tensor([0, 5], device=device)
+        with pytest.raises((ValueError, torch.jit.Error)):  # type: ignore
+            batch_topk(t, off, 1, dim=bad_dim)
+
+    def test_negative_k_raises(self, device):
+        t = torch.randn(3, device=device)
+        off = torch.tensor([0, 3], device=device)
+        with pytest.raises((ValueError, torch.jit.Error)):  # type: ignore
+            batch_topk(t, off, k=-1)
+
+    # Property-based test
+    @settings(deadline=None, suppress_health_check=[HealthCheck.differing_executors])
+    @given(params=batch_topk_inputs())
+    def test_property(self, params, device):
+        tensor, offsets = random_tensor(
+            params["seq_lens"], params["extra_dims"], params["seed"], device
         )
-
-        # Expected indices: [1, 4, 3, 8, 7, 6]
-        expected_indices = torch.tensor([1, 4, 3, 8, 7, 6], device=device)
-        expected_offsets = torch.tensor([0, 1, 3, 6], device=device)
-
-        assert torch.equal(topk_indices, expected_indices)
-        assert torch.equal(topk_offsets, expected_offsets)
-
-        # Verify values
-        values = variable_lengths_tensor[topk_indices]
-        expected_values = torch.tensor([2.0, 5.0, 4.0, 9.0, 8.0, 7.0], device=device)
-        assert torch.equal(values, expected_values)
-
-    def test_k_greater_than_length(self, variable_lengths_tensor, variable_lengths_offsets, device):
-        """Test with k > sequence length - should clamp to sequence length."""
-        topk_indices, topk_offsets = batch_topk(
-            variable_lengths_tensor, variable_lengths_offsets, k=10
+        out: BatchTopK = batch_topk(
+            tensor,
+            offsets,
+            params["k"].to(device) if isinstance(params["k"], Tensor) else params["k"],
+            dim=params["dim"],
+            largest=params["largest"],
+            sorted=params["sorted_"],
+            return_values=True,
         )
+        assert out.values is not None
+        assert out.offsets[-1] == out.indices.numel()
 
-        # All elements should be returned in each sequence
-        expected_indices = torch.tensor([1, 0, 4, 3, 2, 8, 7, 6, 5], device=device)
-        expected_offsets = torch.tensor([0, 2, 5, 9], device=device)
+        if isinstance(params["k"], (int, list)):
+            k_per_batch = (
+                [params["k"]] * len(params["seq_lens"])
+                if isinstance(params["k"], int)
+                else params["k"]
+            )
+        else:  # tensor
+            k_per_batch = params["k"].tolist()
 
-        assert torch.equal(topk_indices, expected_indices)
-        assert torch.equal(topk_offsets, expected_offsets)
-
-        # All values should be returned
-        values = variable_lengths_tensor[topk_indices]
-        assert torch.equal(values, variable_lengths_tensor)
-
-    def test_smallest_elements(self, uniform_lengths_tensor, uniform_lengths_offsets, device):
-        """Test getting smallest elements instead of largest."""
-        topk_indices, topk_offsets = batch_topk(
-            uniform_lengths_tensor, uniform_lengths_offsets, k=2, largest=False
+        ref_idx, ref_off, ref_vals = topk_reference(
+            tensor,
+            offsets,
+            k_per_batch,
+            params["dim"],
+            params["largest"],
+            params["sorted_"],
         )
+        assert torch.equal(out.indices, ref_idx)
+        assert torch.equal(out.offsets, ref_off)
+        assert torch.equal(out.values, ref_vals.to(out.values))
 
-        # Expected indices: [0, 1, 4, 5, 8, 9]
-        expected_indices = torch.tensor([0, 1, 4, 5, 8, 9], device=device)
-        expected_offsets = torch.tensor([0, 2, 4, 6], device=device)
+        dim = params["dim"] if params["dim"] >= 0 else params["dim"] + tensor.ndim
+        for b in range(len(offsets) - 1):
+            b_start, b_end = offsets[b], offsets[b + 1]
+            if b_end == b_start:
+                continue
+            subseq_b = tensor[b_start:b_end]
+            if dim == 0:
+                k_b = min(k_per_batch[b], int(b_end - b_start))
+            else:
+                k_b = min(k_per_batch[b], tensor.shape[dim])
 
-        assert torch.equal(topk_indices, expected_indices)
-        assert torch.equal(topk_offsets, expected_offsets)
+            out_shape = list(subseq_b.shape)
+            out_shape[params["dim"]] = k_b
 
-        # Verify values (smallest 2 from each sequence)
-        values = uniform_lengths_tensor[topk_indices]
-        expected_values = torch.tensor([1.0, 2.0, 5.0, 6.0, 9.0, 10.0], device=device)
-        assert torch.equal(values, expected_values)
+            idx_b = out.indices[out.offsets[b] : out.offsets[b+1]]
+            idx_b = idx_b.view(out_shape)
+            if dim == 0:
+                idx_b = idx_b - offsets[b]
 
-    def test_unsorted_elements(self, uniform_lengths_tensor, uniform_lengths_offsets, device):
-        """Test with sorted=False - order may not be preserved."""
-        topk_indices, topk_offsets = batch_topk(
-            uniform_lengths_tensor, uniform_lengths_offsets, k=2, sorted=False
-        )
-
-        # Since order is not guaranteed, we sort the indices within each batch
-        # and compare after sorting
-        for i in range(len(topk_offsets) - 1):
-            start, end = topk_offsets[i], topk_offsets[i+1]
-            topk_indices[start:end] = torch.sort(topk_indices[start:end])[0]
-
-        # Expected indices after sorting: [2, 3, 6, 7, 10, 11]
-        expected_indices = torch.tensor([2, 3, 6, 7, 10, 11], device=device)
-
-        assert torch.equal(topk_indices, expected_indices)
-
-    def test_multidimensional_tensor(self, multidim_tensor, multidim_offsets, device):
-        """Test with multi-dimensional tensor."""
-        # Get top 1 element from each sequence using the first column
-        topk_indices, topk_offsets = batch_topk(
-            multidim_tensor[:, 0], multidim_offsets, k=1
-        )
-
-        # Expected indices: [1, 3, 5]
-        expected_indices = torch.tensor([1, 3, 5], device=device)
-        expected_offsets = torch.tensor([0, 1, 2, 3], device=device)
-
-        assert torch.equal(topk_indices, expected_indices)
-        assert torch.equal(topk_offsets, expected_offsets)
-
-        # Verify the full tensor values
-        values = multidim_tensor[topk_indices]
-        expected_values = torch.tensor(
-            [[2.0, 20.0], [4.0, 40.0], [6.0, 60.0]], device=device
-        )
-        assert torch.equal(values, expected_values)
-
-    def test_empty_tensor(self, device):
-        """Test with empty tensor."""
-        empty_tensor = torch.tensor([], device=device)
-        batch_offsets = torch.tensor([0], device=device)
-
-        topk_indices, topk_offsets = batch_topk(empty_tensor, batch_offsets, k=2)
-
-        assert topk_indices.shape[0] == 0
-        assert torch.equal(topk_offsets, torch.tensor([0], device=device))
-
-    def test_single_batch(self, device):
-        """Test with a single batch."""
-        tensor = torch.tensor([3.0, 1.0, 4.0, 2.0], device=device)
-        batch_offsets = torch.tensor([0, 4], device=device)
-
-        topk_indices, topk_offsets = batch_topk(tensor, batch_offsets, k=2)
-
-        expected_indices = torch.tensor([2, 0], device=device)
-        expected_offsets = torch.tensor([0, 2], device=device)
-
-        assert torch.equal(topk_indices, expected_indices)
-        assert torch.equal(topk_offsets, expected_offsets)
-
-        # Verify values
-        values = tensor[topk_indices]
-        expected_values = torch.tensor([4.0, 3.0], device=device)
-        assert torch.equal(values, expected_values)
-
-    def test_different_dim(self, device):
-        """Test topk along a different dimension."""
-        tensor = torch.tensor([[1.0, 3.0], [4.0, 2.0], [6.0, 5.0]], device=device)
-        batch_offsets = torch.tensor([0, 3], device=device)
-
-        # Get top element along dim 1 (columns)
-        topk_indices, topk_offsets = batch_topk(
-            tensor, batch_offsets, k=1, dim=1
-        )
-
-        # This is trickier to test directly since we're doing topk on dim 1
-        # Instead, let's verify by checking if the result gives us the correct values
-        selected_values = torch.zeros_like(tensor)
-        for i, idx in enumerate(topk_indices):
-            row = i // 1  # Since k=1
-            selected_values[row, idx % tensor.shape[1]] = 1  # Mark selected positions
-
-        # We expect the largest element in each row to be selected
-        expected_selections = torch.tensor([[0, 1], [1, 0], [1, 0]], device=device)
-        assert torch.equal(selected_values.bool(), expected_selections.bool())
-
-    def test_integration_with_helper_functions(self, device):
-        """Test integration with seq_lengths_to_batch_offsets."""
-        # Create sequence lengths and convert to batch offsets
-        seq_lengths = torch.tensor([3, 4, 2], device=device)
-        batch_offsets = seq_lengths_to_batch_offsets(seq_lengths)
-
-        # Create tensor based on these sequence lengths
-        tensor = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], device=device)
-
-        # Get top 2 elements from each sequence
-        topk_indices, topk_offsets = batch_topk(tensor, batch_offsets, k=2)
-
-        # Convert topk_offsets back to sequence lengths
-        result_seq_lengths = batch_offsets_to_seq_lengths(topk_offsets)
-        expected_seq_lengths = torch.tensor([2, 2, 2], device=device)
-
-        assert torch.equal(result_seq_lengths, expected_seq_lengths)
+            val_b = out.values[out.offsets[b] : out.offsets[b+1]].view(out_shape)
+            val_b_topk = torch.take_along_dim(subseq_b, idx_b, params["dim"])
+            assert torch.equal(val_b, val_b_topk)

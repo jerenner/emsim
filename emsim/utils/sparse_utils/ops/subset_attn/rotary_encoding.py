@@ -170,10 +170,8 @@ def rotate_embeddings(
     rope_encoding = _upcast_if_needed(rope_encoding)
 
     # Convert to complex and apply rotation
-    embeddings_complex_shape = embeddings.shape[:-1] + (embeddings.size(-1) // 2, 2)
-    embeddings_complex = torch.view_as_complex(
-        embeddings.view(embeddings_complex_shape)
-    )
+    emb_complex_shape = embeddings.shape[:-1] + (embeddings.size(-1) // 2, 2)
+    embeddings_complex = torch.view_as_complex(embeddings.reshape(emb_complex_shape))
     rope_encoding_complex = torch.polar(torch.ones_like(rope_encoding), rope_encoding)
 
     # multiply and convert back to real
@@ -274,14 +272,14 @@ def rotate_embeddings_backward(
         2,
     )
     grad_embeddings_rotated_complex = torch.view_as_complex(
-        grad_embeddings_rotated.view(to_complex_shape)
+        grad_embeddings_rotated.reshape(to_complex_shape)
     )
 
     # Complex multiplication gradient
     # For z = x * y, we have dL/dx = dL/dz * conj(y) and dL/dy = dL/dz * conj(x)
 
     # Unconditionally recompute complex version of rope_encoding tensor since it's
-    # required by both branches
+    # required by both output grads
     rope_encoding_complex = torch.polar(torch.ones_like(rope_encoding), rope_encoding)
 
     # Gradient for embeddings tensor
@@ -307,7 +305,9 @@ def rotate_embeddings_backward(
     if needs_grad_rope_encoding:
         # Recompute complex version of embeddings tensor
         emb_complex_shape = embeddings.shape[:-1] + (embeddings.size(-1) // 2, 2)
-        embeddings_complex = torch.view_as_complex(embeddings.view(emb_complex_shape))
+        embeddings_complex = torch.view_as_complex(
+            embeddings.reshape(emb_complex_shape)
+        )
 
         # Compute gradient with respect to rope_encoding_complex
         if needs_autograd:

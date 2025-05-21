@@ -11,11 +11,8 @@ from emsim.networks.positional_encoding.rope import (
 )
 from emsim.utils.sparse_utils.batching import (
     batch_offsets_to_indices,
-    deconcat_add_batch_dim,
-    remove_batch_dim_and_concat,
     seq_lengths_to_batch_offsets,
 )
-from emsim.utils.sparse_utils.ops.linear.linear import batch_sparse_index_linear
 from emsim.utils.sparse_utils.ops.subset_attn.subset_attn import (
     BatchSparseIndexSubsetAttention,
 )
@@ -290,7 +287,7 @@ def get_multilevel_neighborhoods(
     query_fullscale_spatial_positions: Tensor,
     level_spatial_shapes: Tensor,
     neighborhood_sizes: Union[Tensor, list[int]] = [3, 5, 7, 9],
-) -> Tensor:
+) -> tuple[Tensor, Tensor, Tensor]:
     """Computes multi-resolution neighborhood indices for query positions.
 
     Generates neighborhood indices at multiple resolution levels for each query
@@ -355,12 +352,13 @@ def get_multilevel_neighborhoods(
 
     # Compute neighborhood cardinality for each level
     n_neighborhood_elements = neighborhood_sizes.pow(position_dim)
+    total_neighborhood_size = int(n_neighborhood_elements.sum().item())
 
     # Create the centered neighborhood offset grids for each level
     # [size^position_dim x position_dim] * n_level
     neighborhood_offset_grids = []
     for size in neighborhood_sizes:
-        axes = [torch.arange(size, device=device)] * position_dim
+        axes = [torch.arange(int(size), device=device)] * position_dim
         grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)
         offsets = grid.flatten(0, -2) - (size - 1) / 2
         neighborhood_offset_grids.append(offsets)
@@ -374,14 +372,14 @@ def get_multilevel_neighborhoods(
     # Initialize output tensor holding all neighborhood indices
     multilevel_neighborhood_indices = torch.zeros(
         n_queries,
-        n_neighborhood_elements.sum(),
+        total_neighborhood_size,
         query_fullscale_spatial_positions.size(-1),
         device=device,
         dtype=torch.long,
     )
 
     out_of_bounds_mask = torch.zeros(
-        n_queries, n_neighborhood_elements.sum(), device=device, dtype=torch.bool
+        n_queries, total_neighborhood_size, device=device, dtype=torch.bool
     )
 
     # Compute the neighborhood indices and fill in the output tensor

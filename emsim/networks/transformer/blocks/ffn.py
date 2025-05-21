@@ -11,7 +11,7 @@ class FFNBlock(nn.Module):
         d_model: int,
         hidden_dim: int,
         dropout: float = 0.0,
-        activation_fn: Union[str, nn.Module] = nn.GELU,
+        activation_fn: Union[str, nn.Module] = "gelu",
         norm_first: bool = True,
     ):
         super().__init__()

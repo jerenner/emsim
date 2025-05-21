@@ -1,23 +1,22 @@
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
 import MinkowskiEngine as ME
 import torch
 import torchvision
 from torch import Tensor, nn
 
+from emsim.config.transformer import TransformerConfig
 from emsim.networks.positional_encoding import (
     ij_indices_to_normalized_xy,
     normalized_xy_of_stacked_feature_maps,
 )
-from emsim.networks.transformer.position_head import PositionOffsetHead
-from emsim.networks.transformer.std_dev_head import StdDevHead
 
 from ...utils.misc_utils import inverse_sigmoid
 from ...utils.sparse_utils.batching import (
     batch_offsets_from_sparse_tensor_indices,
-    split_batch_concatted_tensor,
     batch_offsets_to_seq_lengths,
     batch_topk,
+    split_batch_concatted_tensor,
 )
 from ...utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
 from ...utils.sparse_utils.shape_ops import sparse_resize
@@ -26,13 +25,15 @@ from ..me_salience_mask_predictor import MESparseMaskPredictor
 from ..positional_encoding import FourierEncoding
 from ..positional_encoding.rope import (
     RoPEEncodingND,
-    prep_multilevel_positions,
     get_multilevel_freq_group_pattern,
+    prep_multilevel_positions,
 )
 from ..segmentation_map import PatchedSegmentationMapPredictor
+from .classification_head import ClassificationHead
 from .decoder import EMTransformerDecoder, TransformerDecoderLayer
 from .encoder import EMTransformerEncoder, TransformerEncoderLayer
-from emsim.config.transformer import TransformerConfig
+from .position_head import PositionOffsetHead
+from .std_dev_head import StdDevHead
 
 
 class EMTransformer(nn.Module):
@@ -60,7 +61,12 @@ class EMTransformer(nn.Module):
         else:
             self.pos_embedding = FourierEncoding(3, config.d_model, dtype=torch.double)
         self.n_levels = config.n_feature_levels
-        self.classification_head = nn.Linear(config.d_model, 1)
+        self.classification_head = ClassificationHead(
+            config.d_model,
+            config.decoder.classification_head.hidden_dim,
+            config.decoder.classification_head.n_layers,
+            config.decoder.classification_head.activation_fn,
+        )
 
         self.alpha = nn.Parameter(torch.Tensor(3), requires_grad=True)
 
@@ -91,7 +97,14 @@ class EMTransformer(nn.Module):
         )
         self.predict_box = config.predict_box
         self.segmentation_head = PatchedSegmentationMapPredictor(config.d_model)
-        self.std_head = StdDevHead(config.d_model)
+        self.std_head = StdDevHead(
+            config.d_model,
+            config.decoder.std_dev_head.hidden_dim,
+            config.decoder.std_dev_head.n_layers,
+            activation_fn=config.decoder.std_dev_head.activation_fn,
+            scaling_factor=config.decoder.std_dev_head.scaling_factor,
+            eps=config.decoder.std_dev_head.eps,
+        )
 
         self.salience_unpoolers = nn.ModuleList(
             [
@@ -214,18 +227,19 @@ class EMTransformer(nn.Module):
 
         # do topk of each sequence
         num_topk = self.two_stage_num_proposals * 4
-        topk_indices, topk_offsets = batch_topk(
-            encoder_out_logits, encoder_out_batch_offsets, num_topk
+        topk_indices, topk_offsets, topk_scores = batch_topk(
+            encoder_out_logits, encoder_out_batch_offsets, num_topk, return_values=True
         )
-        topk_scores = encoder_out_logits[topk_indices]
 
-        topk_bijl_indices = encoder_out.indices()[:, topk_indices].T
+        topk_spatial_indices = encoder_out.indices()[:, topk_indices].T
 
-        # deduplication via non-maximum suppression
+        # deduplication via non-maximum suppression to get the final object queries
         nms_topk_indices = self.nms_on_topk_index(
-            topk_scores, topk_indices, topk_bijl_indices, iou_threshold=0.3
+            topk_scores, topk_indices, topk_spatial_indices, iou_threshold=0.3
         )
-        # sparse tensor with the
+        # sparse tensor with the nms-filtered pixels/queries
+        # pre-sort nms topk indices to skip explicit coalesce call
+        nms_topk_indices = nms_topk_indices.sort()[0]
         nms_encoder_out = torch.sparse_coo_tensor(
             encoder_out.indices()[:, nms_topk_indices],
             encoder_out.values()[nms_topk_indices],
@@ -233,56 +247,63 @@ class EMTransformer(nn.Module):
         ).coalesce()
         nms_encoder_out_normalized = encoder_out_normalized.values()[nms_topk_indices]
         nms_topk_logits = encoder_out_logits[nms_topk_indices]
-        nms_topk_query_batch_offsets = batch_offsets_from_sparse_tensor_indices(
-            nms_encoder_out.indices()
+        nms_encoder_out_indices = nms_encoder_out.indices()
+        nms_query_batch_offsets: Tensor = batch_offsets_from_sparse_tensor_indices(
+            nms_encoder_out_indices
         )
-        nms_topk_query_batch_sizes = torch.cat(
-            [
-                nms_topk_query_batch_offsets,
-                nms_topk_query_batch_offsets.new_tensor(
-                    [nms_encoder_out.indices().shape[1]]
-                ),
-            ]
-        ).diff()
-        nms_topk_position_offsets = self.query_pos_offset_head(
+        nms_query_batch_sizes: Tensor = batch_offsets_to_seq_lengths(
+            nms_query_batch_offsets
+        )
+        nms_topk_position_offsets: Tensor = self.query_pos_offset_head(
             nms_encoder_out_normalized.to(self.query_pos_offset_head.dtype)
         )
         # nms_topk_masks = self.segmentation_head(
         #     encoder_out, nms_encoder_out_normalized, nms_topk_query_batch_offsets
         # )
 
-        nms_proposal_normalized_xy = normalized_xy_of_stacked_feature_maps(
-            nms_encoder_out, score_dict["spatial_shapes"]
+        # [..., (i, j, level)]
+        nms_proposal_positions = prep_multilevel_positions(
+            nms_encoder_out_indices[1:-1].T,
+            nms_encoder_out_indices[0],
+            nms_encoder_out_indices[-1],
+            cast(Tensor, score_dict["spatial_shapes"]),
         )
-        nms_proposal_xy = inverse_sigmoid(nms_proposal_normalized_xy)
+        nms_proposal_positions = nms_proposal_positions[..., :-1]  # [..., (i, j)]
         if self.predict_box:
             # add 1-pixel-sized proposal boxes
-            nms_proposal_xy = torch.cat(
+            nms_proposal_positions = torch.cat(
                 [
-                    nms_proposal_xy,
-                    nms_proposal_xy.new_ones(nms_proposal_xy.shape[:-1] + (4,)),
+                    nms_proposal_positions,
+                    nms_proposal_positions.new_ones(
+                        nms_proposal_positions.shape[:-1] + (4,)
+                    ),
                 ],
                 -1,
             )
-        nms_encoder_out_positions = torch.sigmoid(
-            nms_proposal_xy + nms_topk_position_offsets
-        )
-        #####
-        reference_points = nms_encoder_out_positions.detach()  # \in [0, 1]
-        queries = self.object_query_embedding.weight.unsqueeze(0).expand(
-            encoder_out.shape[0], -1, -1
-        )
-        queries = [q[:size] for q, size in zip(queries, nms_topk_query_batch_sizes)]
-        queries = torch.cat(queries)
+        nms_encoder_out_positions = nms_proposal_positions + nms_topk_position_offsets
 
-        if self.training and (
-            denoising_queries is not None and denoising_reference_points is not None
-        ):
+        # Save initial reference points (no grad)
+        reference_points = nms_encoder_out_positions.detach()
+
+        # Get query embeddings for each batch: randomly shuffle them to ensure all are
+        # trained for dynamic numbers of queries
+        device = nms_query_batch_sizes.device
+        query_permutation = torch.randperm(self.two_stage_num_proposals, device=device)
+        starts_expanded = torch.repeat_interleave(
+            nms_query_batch_offsets[:-1], nms_query_batch_sizes
+        )
+        flat_pos = torch.arange(nms_query_batch_offsets[-1].item(), device=device)
+        query_indices = query_permutation[flat_pos - starts_expanded]
+        queries = self.object_query_embedding.weight.index_select(0, query_indices)
+
+        if self.training and denoising_queries is not None:
+            assert denoising_batch_offsets is not None
+            assert denoising_reference_points is not None
             queries, reference_points, attn_mask, dn_batch_mask_dict = (
                 DenoisingGenerator.stack_main_and_denoising_queries(
                     queries,
                     reference_points,
-                    nms_topk_query_batch_offsets,
+                    nms_query_batch_offsets,
                     denoising_queries,
                     denoising_reference_points,
                     denoising_batch_offsets,
@@ -295,7 +316,7 @@ class EMTransformer(nn.Module):
         else:
             attn_mask = None
             denoising = False
-            query_batch_offsets = nms_topk_query_batch_offsets
+            query_batch_offsets = nms_query_batch_offsets
 
         decoder_out = self.decoder(
             queries=queries,
@@ -327,18 +348,18 @@ class EMTransformer(nn.Module):
             decoder_out["std"],
             decoder_out["queries"],
             decoder_out["segmentation_logits"],
-            nms_topk_query_batch_offsets,
+            nms_query_batch_offsets,
             denoising_out,
             nms_topk_logits,
             nms_encoder_out_positions,
             nms_topk_position_offsets,
-            nms_proposal_normalized_xy,
+            nms_encoder_out_positions,
             score_dict,
             encoder_out,
             encoder_out_logits,
             topk_scores,
             topk_indices,
-            topk_bijl_indices,
+            topk_spatial_indices,
             backbone_features,  # backbone out
             backbone_features_pos_encoded,  # salience filtering in
         )
@@ -451,7 +472,7 @@ class EMTransformer(nn.Module):
         ).T
         assert token_nums.shape == (batch_size, len(features))  # batch x n_feature_maps
 
-        score = None
+        score: None | ME.SparseTensor = None
         scores = []
         spatial_shapes = []
         selected_scores = [[] for _ in range(batch_size)]
@@ -467,7 +488,8 @@ class EMTransformer(nn.Module):
                 # feature_map = feature_map + map_times_upsampled
                 feature_map = upsampled_score * alpha + feature_map * (1 - alpha)
 
-            score: ME.SparseTensor = self.salience_mask_predictor(feature_map)
+            score = self.salience_mask_predictor(feature_map)
+            assert score is not None
 
             # get the indices of each batch element's entries in the sparse values
             batch_token_indices = score.decomposition_permutations
@@ -496,7 +518,7 @@ class EMTransformer(nn.Module):
 
                 # Get top k elements for this batch element for this level
                 topk_scores, topk_indices = score_values.topk(
-                    focus_token_counts[batch_idx]
+                    int(focus_token_counts[batch_idx].item())
                 )
 
                 # Get spatial indices for the selected tokens
@@ -598,9 +620,7 @@ class EMTransformer(nn.Module):
                         main_i = sparse_index_select(
                             logits,
                             logits.ndim - 1,
-                            torch.arange(
-                                0, main_end, device=logits.device, dtype=torch.int32
-                            ),
+                            torch.arange(main_end, device=logits.device),
                         )
                         main.append(main_i)
                         denoising.append(
@@ -611,7 +631,6 @@ class EMTransformer(nn.Module):
                                     main_end,
                                     dn_end,
                                     device=logits.device,
-                                    dtype=torch.int32,
                                 ),
                             )
                         )

@@ -4,9 +4,6 @@ from typing import Optional, Union
 import torch
 from torch import Tensor, nn
 
-from ...utils.misc_utils import (
-    inverse_sigmoid,
-)
 from ..positional_encoding import (
     FourierEncoding,
 )
@@ -19,6 +16,7 @@ from .blocks import (
     SparseDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
+from .position_head import PositionOffsetHead
 from .std_dev_head import StdDevHead
 from emsim.config.transformer import RoPEConfig, TransformerDecoderConfig
 
@@ -54,6 +52,7 @@ class TransformerDecoderLayer(nn.Module):
         self.predict_box = predict_box
 
         if use_rope:
+            assert rope_config is not None
             self.self_attn = MultilevelSelfAttentionBlockWithRoPE(
                 d_model,
                 n_heads,
@@ -110,7 +109,6 @@ class TransformerDecoderLayer(nn.Module):
             self.full_cross_attn = MultilevelCrossAttentionBlockWithRoPE(
                 d_model,
                 n_heads,
-                n_feature_levels,
                 dropout,
                 attn_proj_bias,
                 norm_first=norm_first,
@@ -124,40 +122,27 @@ class TransformerDecoderLayer(nn.Module):
 
     def forward(
         self,
-        queries: Tensor,
-        query_pos_encoding: Tensor,
-        query_normalized_xy_positions: Tensor,
-        batch_offsets: Tensor,
+        queries: Tensor,  # shape: [query_batch_offsets[-1]]
+        query_batch_offsets: Tensor,
+        query_spatial_positions: Tensor,
         stacked_feature_maps: Tensor,
-        spatial_shapes: Tensor,
+        level_spatial_shapes: Tensor,
         attn_mask: Optional[Tensor] = None,
+        query_pos_encoding: Optional[Tensor] = None,
     ):
-        if self.self_attn_rope:
-            max_spatial_shape, max_level_index = spatial_shapes.max(dim=0)
-            max_level_index = torch.unique(max_level_index)
-            assert len(max_level_index) == 1
+        max_spatial_shape, max_level_index = level_spatial_shapes.max(dim=0)
+        max_level_index = torch.unique(max_level_index)
+        assert len(max_level_index) == 1
+        query_level_indices = max_level_index.expand(query_spatial_positions.shape[0])
+        if self.use_rope:
             if self.predict_box:
                 raise NotImplementedError("Box prediction not finished yet")
-                spatial_scaler = max_spatial_shape.repeat(3)
-                query_positions_ij = (
-                    torch.cat(
-                        [
-                            query_normalized_xy_positions[..., :2].flip(-1),
-                            query_normalized_xy_positions[..., 2:],
-                        ],
-                        -1,
-                    )
-                    * spatial_scaler
-                )
-            else:
-                query_positions_ij = (
-                    query_normalized_xy_positions.flip(-1) * max_spatial_shape
-                )
             x = self.self_attn(
                 queries,
-                query_positions_ij,
-                max_level_index.expand(query_positions_ij.shape[0]),
-                batch_offsets,
+                spatial_positions=query_spatial_positions,
+                level_indices=query_level_indices,
+                level_spatial_shapes=level_spatial_shapes,
+                batch_offsets=query_batch_offsets,
                 attn_mask=attn_mask,
             )
         else:
@@ -165,43 +150,46 @@ class TransformerDecoderLayer(nn.Module):
                 queries,
                 query_pos_encoding,
                 attn_mask=attn_mask,
-                batch_offsets=batch_offsets,
+                batch_offsets=query_batch_offsets,
             )
         if self.use_ms_deform_attn:
+            raise ValueError("MSDeformAttn not updated yet")
             x = self.ms_deform_attn(
                 x,
                 query_pos_encoding,
-                query_normalized_xy_positions,
-                batch_offsets,
+                query_spatial_positions,
+                query_batch_offsets,
                 stacked_feature_maps,
-                spatial_shapes,
+                level_spatial_shapes,
             )
-        if self.use_neighborhood_attn:
+        if self.neighborhood_attn is not None:
             x = self.neighborhood_attn(
                 x,
-                query_positions_ij,
-                batch_offsets,
-                stacked_feature_maps,
-                spatial_shapes,
+                query_spatial_positions=query_spatial_positions,
+                query_batch_offsets=query_batch_offsets,
+                stacked_feature_maps=stacked_feature_maps,
+                level_spatial_shapes=level_spatial_shapes,
+                query_level_indices=query_level_indices,
             )
         if self.use_full_cross_attn:
+            raise ValueError("Full cross attn no updated yet")
             x = self.full_cross_attn(
                 query=x,
-                query_normalized_xy_positions=query_normalized_xy_positions,
-                query_batch_offsets=batch_offsets,
+                query_normalized_xy_positions=query_spatial_positions,
+                query_batch_offsets=query_batch_offsets,
                 stacked_feature_maps=stacked_feature_maps,
-                level_spatial_shapes=spatial_shapes,
+                level_spatial_shapes=level_spatial_shapes,
             )
         x = self.ffn(x)
         return x
 
     def reset_parameters(self):
         self.self_attn.reset_parameters()
-        if hasattr(self.ms_deform_attn, "reset_parameters"):
+        if self.ms_deform_attn is not None:
             self.ms_deform_attn.reset_parameters()
-        if hasattr(self.neighborhood_attn, "reset_parameters"):
+        if self.neighborhood_attn is not None:
             self.neighborhood_attn.reset_parameters()
-        if hasattr(self.full_cross_attn, "reset_parameters"):
+        if self.full_cross_attn is not None:
             self.full_cross_attn.reset_parameters()
         self.ffn.reset_parameters()
 
@@ -217,7 +205,7 @@ class EMTransformerDecoder(nn.Module):
         segmentation_head: Optional[nn.Module] = None,
     ):
         super().__init__()
-        self.layers: list[TransformerDecoderLayer] = nn.ModuleList(
+        self.layers = nn.ModuleList(
             [copy.deepcopy(decoder_layer) for _ in range(config.n_layers)]
         )
         self.n_layers = config.n_layers
@@ -267,18 +255,28 @@ class EMTransformerDecoder(nn.Module):
             )
             self.per_layer_position_heads = nn.ModuleList(
                 [
-                    nn.Sequential(
-                        nn.Linear(self.d_model, self.d_model, dtype=torch.double),
-                        nn.ReLU(),
-                        nn.Linear(self.d_model, self.d_model, dtype=torch.double),
-                        nn.ReLU(),
-                        nn.Linear(self.d_model, 2, dtype=torch.double),
+                    PositionOffsetHead(
+                        self.d_model,
+                        config.position_head.hidden_dim,
+                        config.position_head.n_layers,
+                        predict_box=config.predict_box,
+                        activation_fn=config.position_head.activation_fn,
                     )
                     for _ in range(config.n_layers)
                 ]
             )
             self.per_layer_std_heads = nn.ModuleList(
-                [StdDevHead(self.d_model) for _ in range(config.n_layers)]
+                [
+                    StdDevHead(
+                        self.d_model,
+                        config.std_dev_head.hidden_dim,
+                        config.std_dev_head.n_layers,
+                        activation_fn=config.std_dev_head.activation_fn,
+                        scaling_factor=config.std_dev_head.scaling_factor,
+                        eps=config.std_dev_head.eps,
+                    )
+                    for _ in range(config.n_layers)
+                ]
             )
             self.per_layer_segmentation_heads = nn.ModuleList(
                 [
@@ -286,13 +284,6 @@ class EMTransformerDecoder(nn.Module):
                     for _ in range(config.n_layers)
                 ]
             )
-        # self.ref_point_head = nn.Sequential(
-        #     nn.Linear(2 * self.d_model, self.d_model),
-        #     nn.ReLU(),
-        #     nn.Linear(self.d_model, self.d_model),
-        #     nn.ReLU(),
-        #     nn.Linear(self.d_model, self.d_model),
-        # )
 
         self.norm = nn.LayerNorm(self.d_model)
 
@@ -339,9 +330,7 @@ class EMTransformerDecoder(nn.Module):
             query_delta_pos = delta_pos_head(queries_normed.to(delta_pos_head.dtype))
             query_std = std_head(queries_normed)
 
-            new_reference_points = torch.sigmoid(
-                query_delta_pos + inverse_sigmoid(query_reference_points)
-            )
+            new_reference_points = query_reference_points + query_delta_pos
 
             query_segmentation = segmentation_head(
                 stacked_feature_maps,
@@ -376,28 +365,36 @@ class EMTransformerDecoder(nn.Module):
             "segmentation_logits": layer_output_segmentation,
         }
 
-    def _get_class_head(self, layer_index):
+    def _get_class_head(self, layer_index) -> nn.Module:
         if self.layers_share_heads:
+            assert self.class_head is not None
             return self.class_head
         else:
+            assert self.per_layer_class_heads is not None
             return self.per_layer_class_heads[layer_index]
 
-    def _get_position_head(self, layer_index):
+    def _get_position_head(self, layer_index) -> nn.Module:
         if self.layers_share_heads:
+            assert self.position_offset_head is not None
             return self.position_offset_head
         else:
+            assert self.per_layer_position_heads is not None
             return self.per_layer_position_heads[layer_index]
 
-    def _get_std_head(self, layer_index):
+    def _get_std_head(self, layer_index) -> nn.Module:
         if self.layers_share_heads:
+            assert self.std_head is not None
             return self.std_head
         else:
+            assert self.per_layer_std_heads is not None
             return self.per_layer_std_heads[layer_index]
 
     def _get_segmentation_head(self, layer_index):
         if self.layers_share_heads:
+            assert self.segmentation_head is not None
             return self.segmentation_head
         else:
+            assert self.per_layer_segmentation_heads is not None
             return self.per_layer_segmentation_heads[layer_index]
 
     def reset_parameters(self):
@@ -408,9 +405,8 @@ class EMTransformerDecoder(nn.Module):
                 head.reset_parameters()
         if self.per_layer_position_heads is not None:
             for head in self.per_layer_position_heads:
-                for layer in head:
-                    if hasattr(layer, "reset_parameters"):
-                        layer.reset_parameters()
+                if hasattr(head, "reset_parameters"):
+                    layer.reset_parameters()
         if self.per_layer_std_heads is not None:
             for head in self.per_layer_std_heads:
                 head.reset_parameters()

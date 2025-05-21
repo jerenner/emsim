@@ -33,6 +33,35 @@ class TransformerEncoderConfig:
 
 
 @dataclass
+class ClassificationHeadConfig:
+    """Configuration for the classification head."""
+
+    hidden_dim: int = "${model.transformer.d_model}"  # type: ignore
+    n_layers: int = 2
+    activation_fn: str = "gelu"
+
+
+@dataclass
+class PositionHeadConfig:
+    """Configuration for the position offset head."""
+
+    hidden_dim: int = "${model.transformer.d_model}"  # type: ignore
+    n_layers: int = 2
+    activation_fn: str = "gelu"
+
+
+@dataclass
+class StdDevHeadConfig:
+    """Configuration for the standard deviation head."""
+
+    hidden_dim: int = "${model.transformer.d_model}"  # type: ignore
+    n_layers: int = 2
+    activation_fn: str = "gelu"
+    scaling_factor: float = 0.001
+    eps: float = 1e-6
+
+
+@dataclass
 class TransformerDecoderConfig:
     """Configuration for the transformer decoder."""
 
@@ -48,6 +77,10 @@ class TransformerDecoderConfig:
     predict_box: bool = "${model.predict_box}"  # type: ignore
 
     use_rope: bool = True
+
+    classification_head: ClassificationHeadConfig = field(default_factory=ClassificationHeadConfig)  # type: ignore
+    position_head: PositionHeadConfig = field(default_factory=PositionHeadConfig)  # type: ignore
+    std_dev_head: StdDevHeadConfig = field(default_factory=StdDevHeadConfig)  # type: ignore
 
 
 @dataclass

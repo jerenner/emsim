@@ -1,15 +1,33 @@
+from typing import Union
+
 import torch
 from torch import nn
 
+from emsim.utils.misc_utils import _get_layer
+
 
 class StdDevHead(nn.Module):
-    def __init__(self, d_model: int, scaling_factor: float = .001, eps: float = 1e-6):
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        n_layers: int,
+        activation_fn: Union[str, nn.Module] = "gelu",
+        scaling_factor: float = 0.001,
+        eps: float = 1e-6,
+    ):
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, 3)
-        )
+        assert n_layers > 1, "Expected at least 1 hidden layer"
+        if isinstance(activation_fn, str):
+            activation_fn = _get_layer(activation_fn)
+        layers = [nn.Linear(in_dim, hidden_dim), activation_fn()]
+        for _ in range(n_layers - 1):
+            layers.extend(
+                [nn.Linear(hidden_dim, hidden_dim), activation_fn()]
+            )
+        layers.append(nn.Linear(hidden_dim, 3))
+        self.layers = nn.Sequential(*layers)
+
         self.register_buffer("scaling_factor", torch.as_tensor(scaling_factor))
         self.eps = eps
 

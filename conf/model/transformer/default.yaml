@@ -50,6 +50,23 @@ decoder:
   
   use_rope: true
 
+  classification_head:
+    hidden_dim: ${model.transformer.d_model}
+    n_layers: 2
+    activation_fn: "gelu"
+
+  position_head:
+    hidden_dim: ${model.transformer.d_model}
+    n_layers: 2
+    activation_fn: "gelu"
+
+  std_dev_head:
+    hidden_dim: ${model.transformer.d_model}
+    n_layers: 2
+    activation_fn: "gelu"
+    scaling_factor: 0.001
+    eps: 1e-6
+
 rope:
   spatial_dimension: ${spatial_dimension}
   spatial_base_theta: 100.0

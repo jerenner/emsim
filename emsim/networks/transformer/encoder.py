@@ -18,7 +18,12 @@ from emsim.networks.transformer.blocks import (
     SparseDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
-from emsim.utils.sparse_utils.batching import seq_lengths_to_batch_offsets, batch_topk
+from emsim.utils.sparse_utils.batching import (
+    seq_lengths_to_batch_offsets,
+    batch_topk,
+    BatchTopK,
+    batch_offsets_to_seq_lengths,
+)
 from emsim.utils.sparse_utils.conversion import minkowski_to_torch_sparse
 from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index
 from emsim.utils.sparse_utils.indexing.scatter import (
@@ -116,7 +121,7 @@ class TransformerEncoderLayer(nn.Module):
 
     def forward(
         self,
-        queries: Tensor,  # [query_batch_offsets[-1]]
+        queries: Tensor,  # shape: [query_batch_offsets[-1]]
         query_batch_offsets: Tensor,  # [bsz+1]
         token_predicted_salience_score: Tensor,  # [query_batch_offsets[-1]]
         query_spatial_indices: Tensor,  # [spatial_dim+2, query_batch_offsets[-1]]
@@ -128,7 +133,7 @@ class TransformerEncoderLayer(nn.Module):
         token_scores = token_electron_scores + token_predicted_salience_score
 
         # Find the max_tokens_sa topk for self attention
-        topk_indices, topk_offsets = batch_topk(
+        topk_indices, topk_offsets, _ = batch_topk(
             token_scores, query_batch_offsets, self.max_tokens_sa
         )
 
@@ -230,12 +235,12 @@ class EMTransformerEncoder(nn.Module):
         else:
             stacked_pos_encodings = None
 
-        device = stacked_feature_maps.device
         spatial_dim = level_spatial_shapes.size(-1)
         n_batch_tokens = torch.tensor(
             [scores.size(0) for scores in token_salience_scores],
             device=sparse_feature_maps[0].device,
         )
+        batch_offsets = seq_lengths_to_batch_offsets(n_batch_tokens)
 
         for layer_idx, layer in enumerate(self.layers):
             # Get the top tokens for this layer according to ratio
@@ -249,46 +254,41 @@ class EMTransformerEncoder(nn.Module):
                 .clamp_max_(n_batch_tokens)
             )
             token_batch_offsets = seq_lengths_to_batch_offsets(batch_k)
-            total_topk_tokens = token_batch_offsets[-1]
 
-            # Pre-allocate the buffers to hold the topk token data
-            batch_topk_scores = token_salience_scores[0].new_empty(total_topk_tokens)
-            topk_indices = [
-                torch.empty(k, device=device, dtype=torch.long) for k in batch_k
-            ]
+            batch_topk_out: BatchTopK = batch_topk(
+                torch.cat([score.detach() for score in token_salience_scores]),
+                batch_offsets,
+                batch_k,
+                return_values=True,
+            )
+            assert torch.equal(token_batch_offsets, batch_topk_out.offsets)
+
+            # Fill in the spatial indices from the token seq indices
             batch_topk_spatial_indices = token_spatial_indices[0].new_empty(
-                spatial_dim + 2, total_topk_tokens
+                int(batch_topk_out.offsets[-1]), spatial_dim + 2
             )
-            batch_topk_spatial_indices[0] = torch.repeat_interleave(
-                torch.arange(batch_k.size(0), device=device), batch_k
-            )
-
-            # Take each batch's topk
-            cursor = 0
-            for b, batch_scores in enumerate(token_salience_scores):
-                k = int(batch_k[b])
-                slice_b = slice(cursor, cursor + k)
-                scores_b = batch_topk_scores[slice_b]
-                indices_b = topk_indices[b]
-                torch.topk(batch_scores.detach(), k, out=(scores_b, indices_b))
-
-                # Collate spatial index info
-                batch_topk_spatial_indices[1:-1, slice_b] = token_spatial_indices[b][
-                    indices_b
-                ].T
-                batch_topk_spatial_indices[-1, slice_b] = token_level_indices[b][
-                    indices_b
-                ]
-                cursor += k
+            for b in range(len(token_salience_scores)):
+                slice_start = int(batch_topk_out.offsets[b])
+                slice_end = int(batch_topk_out.offsets[b + 1])
+                batch_start = int(batch_offsets[b])
+                batch_topk_indices = (
+                    batch_topk_out.indices[slice_start:slice_end] - batch_start
+                )
+                batch_topk_spatial_indices[slice_start:slice_end, 0] = b
+                batch_topk_spatial_indices[slice_start:slice_end, 1:-1] = (
+                    token_spatial_indices[b].index_select(0, batch_topk_indices)
+                )
+                batch_topk_spatial_indices[slice_start:slice_end, -1] = (
+                    token_level_indices[b].index_select(0, batch_topk_indices)
+                )
 
             # Extract the embeddings at each spatial index
-            batch_topk_spatial_indices_t = batch_topk_spatial_indices.T.contiguous()
             query_for_layer = batch_sparse_index(
-                stacked_feature_maps, batch_topk_spatial_indices_t, True
+                stacked_feature_maps, batch_topk_spatial_indices, True
             )[0]
             if position_encoding is not None:
                 pos_encoding_for_layer = batch_sparse_index(
-                    stacked_pos_encodings, batch_topk_spatial_indices_t, True
+                    stacked_pos_encodings, batch_topk_spatial_indices, True
                 )[0]
             else:
                 pos_encoding_for_layer = None
@@ -302,8 +302,8 @@ class EMTransformerEncoder(nn.Module):
             query_for_layer = layer(
                 query_for_layer,
                 token_batch_offsets,
-                batch_topk_scores,
-                batch_topk_spatial_indices,
+                batch_topk_out.values,
+                batch_topk_spatial_indices.T.contiguous(),
                 stacked_feature_maps,
                 level_spatial_shapes,
                 electron_score,  # score_tgt
@@ -311,7 +311,7 @@ class EMTransformerEncoder(nn.Module):
             )
 
             stacked_feature_maps = scatter_to_sparse_tensor(
-                stacked_feature_maps, batch_topk_spatial_indices_t, query_for_layer
+                stacked_feature_maps, batch_topk_spatial_indices, query_for_layer
             )
 
         # stacked_feature_maps = self.update_background_embedding(stacked_feature_maps)

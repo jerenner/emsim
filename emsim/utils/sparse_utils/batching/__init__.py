@@ -13,7 +13,7 @@ from .batch_utils import (
     batch_indices_to_offsets,
 )
 
-from .batch_ops import batch_topk
+from .batch_ops import batch_topk, BatchTopK
 
 __all__ = [
     "batch_dim_to_leading_index",
@@ -30,4 +30,5 @@ __all__ = [
     "batch_indices_to_offsets",
     # batch_ops
     "batch_topk",
+    "BatchTopK",
 ]

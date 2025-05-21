@@ -151,7 +151,8 @@ def batch_topk(
                    idx_b_local = idx_b - batch_offsets[b]
                    val_b       = torch.take_along_dim(subseq_b, idx_b_local, dim)
     """
-    seq_lens: Tensor = batch_offsets_to_seq_lengths(batch_offsets)
+    seq_lens = batch_offsets_to_seq_lengths(batch_offsets)
+    assert isinstance(seq_lens, Tensor)
     batch_size = seq_lens.numel()
 
     # Normalize k
@@ -172,7 +173,7 @@ def batch_topk(
     if batch_size == 0 or tensor.numel() == 0:
         topk_indices = torch.empty(0, device=tensor.device, dtype=torch.long)
         topk_offsets = torch.zeros(1, device=tensor.device, dtype=torch.long)
-        topk_values = tensor[0:0].flatten() if return_values else None
+        topk_values = tensor[0:0].flatten() if return_values else None  # keep gradients
         return BatchTopK(topk_indices, topk_offsets, topk_values)
 
     # Find product of dims besides seq and topk dims
@@ -200,6 +201,7 @@ def batch_topk(
         topk_offsets = seq_lengths_to_batch_offsets(
             torch.full_like(seq_lens, out_size_per_batch)
         )
+        assert isinstance(topk_offsets, Tensor)
 
         if k_int == 0:
             topk_indices = torch.empty(0, device=tensor.device, dtype=torch.long)
@@ -236,7 +238,8 @@ def batch_topk(
         dim_size = tensor.size(dim)
         batch_seq_ks = k.clamp_max(dim_size)
         batch_out_sizes = batch_seq_ks * seq_lens * prod_extra_dims
-    topk_offsets: Tensor = seq_lengths_to_batch_offsets(batch_out_sizes)
+    topk_offsets = seq_lengths_to_batch_offsets(batch_out_sizes)
+    assert isinstance(topk_offsets, Tensor)
 
     # Allocate result tensor(s)
     topk_indices = torch.empty(
@@ -259,8 +262,6 @@ def batch_topk(
     # per-batch topk
     for b, k_b in enumerate(batch_seq_ks):
         k_b = int(k_b)
-        # if k_b == 0:  # no topk to take
-        #     continue
         batch_start, batch_end = int(batch_offsets[b]), int(batch_offsets[b + 1])
         slice_start, slice_end = int(topk_offsets[b]), int(topk_offsets[b + 1])
 

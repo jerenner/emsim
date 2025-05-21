@@ -5,6 +5,7 @@ from torch import Tensor
 from emsim.utils.sparse_utils.batching.batch_utils import (
     split_batch_concatted_tensor,
     normalize_batch_offsets,
+    seq_lengths_to_batch_offsets,
     batch_offsets_to_seq_lengths,
     batch_offsets_to_indices,
     deconcat_add_batch_dim,
@@ -53,9 +54,35 @@ class TestNormalizeBatchOffsets:
 
 
 @pytest.mark.cpu_and_cuda
-class TestComputeSeqLengths:
+class TestSeqLengthsToBatchOffsets:
     def test_basic_functionality(self, device):
-        """Test basic functionality of compute_seq_lengths."""
+        """Test basic functionality of seq_lenghts_to_batch_offsets."""
+        seq_lengths = torch.tensor([2, 4, 6, 43, 3], device=device)
+        result = seq_lengths_to_batch_offsets(seq_lengths)
+        expected = torch.tensor([0, 2, 6, 12, 55, 58], device=device)
+        assert torch.equal(result, expected)
+
+    def test_empty_tensor(self, device):
+        """Test with empty tensor."""
+        seq_lengths = torch.tensor([], device=device)
+        result = seq_lengths_to_batch_offsets(seq_lengths)
+        expected = torch.tensor([0], device=device)
+        assert torch.equal(result, expected)
+
+    def test_list(self):
+        """Test with list input"""
+        seq_lengths = [2, 4, 6, 43, 3]
+        result = seq_lengths_to_batch_offsets(seq_lengths)
+        expected = [0, 2, 6, 12, 55, 58]
+        assert len(result) == len(expected)
+        assert isinstance(result, type(expected))
+        assert all(result[i] == expected[i] for i in range(len(result)))
+
+
+@pytest.mark.cpu_and_cuda
+class TestBatchOffsetsToSeqLengths:
+    def test_basic_functionality(self, device):
+        """Test basic functionality of batch_offsets_to_seq_lengths."""
         batch_offsets = torch.tensor([0, 3, 7, 10], device=device)
         result = batch_offsets_to_seq_lengths(batch_offsets)
         expected = torch.tensor([3, 4, 3], device=device)
@@ -67,6 +94,15 @@ class TestComputeSeqLengths:
         result = batch_offsets_to_seq_lengths(batch_offsets)
         expected = torch.tensor([5], device=device)
         assert torch.equal(result, expected)
+
+    def test_list(self):
+        """Test with list input."""
+        batch_offsets = [0, 3, 7, 10]
+        result = batch_offsets_to_seq_lengths(batch_offsets)
+        expected = [3, 4, 3]
+        assert len(result) == len(expected)
+        assert isinstance(result, type(expected))
+        assert all(result[i] == expected[i] for i in range(len(result)))
 
 
 @pytest.mark.cpu_and_cuda

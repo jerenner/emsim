@@ -1,4 +1,6 @@
-from typing import Optional
+from typing import Optional, Union
+from itertools import accumulate
+import operator
 
 import torch
 from torch import Tensor
@@ -50,20 +52,48 @@ def normalize_batch_offsets(batch_offsets: Tensor, total_length: int) -> Tensor:
 
 
 @torch.jit.script
-def batch_offsets_to_seq_lengths(batch_offsets: Tensor) -> Tensor:
+def batch_offsets_to_seq_lengths(
+    batch_offsets: Union[Tensor, list[int]],
+) -> Union[Tensor, list[int]]:
     """Computes sequence lengths from batch offsets."""
-    return batch_offsets[1:] - batch_offsets[:-1]
+    if isinstance(batch_offsets, Tensor):
+        return batch_offsets[1:] - batch_offsets[:-1]
+    else:
+        if torch.jit.is_scripting():  # type: ignore
+            n_seqs = len(batch_offsets) - 1
+            seq_lengths: list[int] = []
+            if n_seqs <= 0:
+                return seq_lengths
+            for i in range(n_seqs):
+                seq_lengths.append(batch_offsets[i + 1] - batch_offsets[i])
+            return seq_lengths
+        else:
+            return [
+                end - start for start, end in zip(batch_offsets[:-1], batch_offsets[1:])
+            ]
 
 
 @torch.jit.script
-def seq_lengths_to_batch_offsets(seq_lengths: Tensor) -> Tensor:
+def seq_lengths_to_batch_offsets(
+    seq_lengths: Union[Tensor, list[int]],
+) -> Union[Tensor, list[int]]:
     """Computes batch offsets from sequence lengths."""
-    batch_offsets = torch.zeros(
-        seq_lengths.size(0) + 1, dtype=seq_lengths.dtype, device=seq_lengths.device
-    )
-    batch_offsets[1:] = torch.cumsum(seq_lengths, dim=0)
-
-    return batch_offsets
+    if isinstance(seq_lengths, Tensor):
+        batch_offsets_tensor = torch.zeros(
+            seq_lengths.size(0) + 1, dtype=seq_lengths.dtype, device=seq_lengths.device
+        )
+        batch_offsets_tensor[1:] = torch.cumsum(seq_lengths, dim=0)
+        return batch_offsets_tensor
+    else:
+        if torch.jit.is_scripting():  # type: ignore
+            batch_offsets_list: list[int] = [0]
+            running_sum = 0
+            for length in seq_lengths:
+                running_sum += length
+                batch_offsets_list.append(running_sum)
+            return batch_offsets_list
+        else:
+            return [0, *accumulate(seq_lengths, operator.add)]
 
 
 @torch.jit.script
@@ -77,6 +107,7 @@ def batch_offsets_to_indices(
         batch_offsets = normalize_batch_offsets(batch_offsets, total_seq_length)
 
     seq_lengths = batch_offsets_to_seq_lengths(batch_offsets)
+    assert isinstance(seq_lengths, Tensor)
     values = torch.arange(batch_offsets.size(0) - 1, device=batch_offsets.device)
     out = torch.repeat_interleave(values, seq_lengths)
     return out
@@ -97,6 +128,7 @@ def batch_indices_to_offsets(batch_indices: Tensor) -> Tensor:
     counts = torch.bincount(batch_indices, minlength=batch_size)
 
     out = seq_lengths_to_batch_offsets(counts)
+    assert isinstance(out, Tensor)
 
     return out
 
@@ -127,6 +159,7 @@ def deconcat_add_batch_dim(
     batch_offsets = normalize_batch_offsets(batch_offsets, tensor.shape[0])
 
     seq_lens = batch_offsets_to_seq_lengths(batch_offsets)
+    assert isinstance(seq_lens, Tensor)
     batch_size = batch_offsets.shape[0] - 1
     max_len = int(torch.max(seq_lens))
 
@@ -217,6 +250,7 @@ def remove_batch_dim_and_concat(
     nonpad_mask = padding_mask.logical_not()
     seq_lens = nonpad_mask.sum(-1).to(torch.long)
     batch_offsets = seq_lengths_to_batch_offsets(seq_lens)
+    assert isinstance(batch_offsets, Tensor)
     total_len = int(batch_offsets[-1])
 
     out_shape = (total_len,) + feature_dims

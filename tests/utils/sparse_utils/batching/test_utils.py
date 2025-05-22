@@ -39,7 +39,7 @@ class TestNormalizeBatchOffsets:
 
     def test_needs_normalizing(self, device):
         """Test when normalization is needed."""
-        batch_offsets = torch.tensor([0, 5, 8], device=device)
+        batch_offsets = torch.tensor([5, 8], device=device)
         total_length = 10
         result = normalize_batch_offsets(batch_offsets, total_length)
         expected = torch.tensor([0, 5, 8, 10], device=device)
@@ -51,6 +51,16 @@ class TestNormalizeBatchOffsets:
         total_length = 10
         result = normalize_batch_offsets(batch_offsets, total_length)
         assert result.dtype == batch_offsets.dtype
+
+    def test_list(self):
+        """Test with list input"""
+        batch_offsets = [5, 8]
+        total_length = 10
+        result = normalize_batch_offsets(batch_offsets, total_length)
+        expected = [0, 5, 8, 10]
+        assert len(result) == len(expected)
+        assert isinstance(result, type(expected))
+        assert all(result[i] == expected[i] for i in range(len(expected)))
 
 
 @pytest.mark.cpu_and_cuda

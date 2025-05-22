@@ -35,20 +35,59 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor) -> list[
 
 
 @torch.jit.script
-def normalize_batch_offsets(batch_offsets: Tensor, total_length: int) -> Tensor:
-    """Ensures batch_offsets ends with the expected total length."""
-    total_length_tensor = torch.tensor(
-        [total_length], device=batch_offsets.device, dtype=batch_offsets.dtype
-    )
-    if batch_offsets[-1] != total_length_tensor[0]:
-        assert batch_offsets[-1] < total_length_tensor[0]
-        return torch.cat(
-            [
-                batch_offsets,
-                total_length_tensor,
-            ]
-        )
-    return batch_offsets
+def normalize_batch_offsets(
+    batch_offsets: Union[Tensor, list[int]], total_length: int
+) -> Union[Tensor, list[int]]:
+    """Ensures batch_offsets starts with 0 and ends with the expected total length."""
+
+    if isinstance(batch_offsets, Tensor):
+        if torch.is_floating_point(batch_offsets):
+            raise ValueError(
+                "Expected integer tensor for batch_offsets, but got dtype "
+                f"{batch_offsets.dtype}"
+            )
+
+        prepend_zero = batch_offsets[0] != 0
+        append_len = batch_offsets[-1] != total_length
+
+        if not prepend_zero and not append_len:  # Already normalized
+            return batch_offsets
+
+        if append_len and batch_offsets[-1] > total_length:
+            raise ValueError(
+                f"Max value of batch_offsets ({batch_offsets[-1]}) is greater than "
+                f"provided total_length ({total_length})"
+            )
+
+        new_offset_len = batch_offsets.size(0) + int(prepend_zero) + int(append_len)
+        out = batch_offsets.new_zeros(new_offset_len)
+
+        copy_start = 1 if prepend_zero else 0
+        copy_end = -1 if append_len else new_offset_len
+        out[copy_start:copy_end] = batch_offsets
+        if append_len:
+            out[-1] = total_length
+        return out
+
+    else:
+        prepend_zero = batch_offsets[0] != 0
+        append_len = batch_offsets[-1] != total_length
+
+        if not prepend_zero and not append_len:  # Already normalized
+            return batch_offsets
+
+        if append_len and batch_offsets[-1] > total_length:
+            raise ValueError(
+                f"Max value of batch_offsets ({batch_offsets[-1]}) is greater than "
+                f"provided total_length ({total_length})"
+            )
+
+        out = batch_offsets.copy()
+        if prepend_zero:
+            out.insert(0, 0)
+        if append_len:
+            out.append(total_length)
+        return out
 
 
 @torch.jit.script
@@ -60,6 +99,7 @@ def batch_offsets_to_seq_lengths(
         return batch_offsets[1:] - batch_offsets[:-1]
     else:
         if torch.jit.is_scripting():  # type: ignore
+            # Loop for Torchscript compilation
             n_seqs = len(batch_offsets) - 1
             seq_lengths: list[int] = []
             if n_seqs <= 0:
@@ -98,13 +138,21 @@ def seq_lengths_to_batch_offsets(
 
 @torch.jit.script
 def batch_offsets_to_indices(
-    batch_offsets: Tensor, total_seq_length: Optional[int] = None
+    batch_offsets: Union[Tensor, list[int]],
+    total_seq_length: Optional[int] = None,
+    device: Optional[Union[torch.device, str]] = None,
 ) -> Tensor:
-    """Converts batch offsets to batch indices,
+    """Converts batch offsets to tensor of batch indices,
     e.g. [0, 5, 9] -> [0, 0, 0, 0, 0, 1, 1, 1, 1]"""
-    # Normalize batch_offsets
+    if isinstance(device, str):
+        device = torch.device(device)
     if total_seq_length is not None:
+        # Normalize batch_offsets
         batch_offsets = normalize_batch_offsets(batch_offsets, total_seq_length)
+    if isinstance(batch_offsets, list):
+        batch_offsets = torch.tensor(batch_offsets, dtype=torch.long, device=device)
+    else:
+        batch_offsets = batch_offsets.to(device=device)
 
     seq_lengths = batch_offsets_to_seq_lengths(batch_offsets)
     assert isinstance(seq_lengths, Tensor)
@@ -156,7 +204,9 @@ def deconcat_add_batch_dim(
         raise ValueError(f"Expected batch_offsets to be 1D, got {batch_offsets.ndim}")
 
     # add the total length to the end of the batch offsets if needed
-    batch_offsets = normalize_batch_offsets(batch_offsets, tensor.shape[0])
+    batch_offsets_normed = normalize_batch_offsets(batch_offsets, tensor.shape[0])
+    assert isinstance(batch_offsets_normed, Tensor)
+    batch_offsets = batch_offsets_normed
 
     seq_lens = batch_offsets_to_seq_lengths(batch_offsets)
     assert isinstance(seq_lens, Tensor)

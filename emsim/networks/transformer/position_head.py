@@ -3,7 +3,7 @@ from typing import Union
 import torch
 from torch import nn, Tensor
 
-from emsim.utils.misc_utils import _get_layer
+from emsim.utils.misc_utils import get_layer
 
 
 class PositionOffsetHead(nn.Module):
@@ -13,7 +13,7 @@ class PositionOffsetHead(nn.Module):
         hidden_dim: int,
         n_layers: int,
         predict_box: bool = False,
-        activation_fn: Union[str, nn.Module] = "gelu",
+        activation_fn: Union[str, type[nn.Module]] = "gelu",
         dtype: torch.dtype = torch.float,
     ):
         super().__init__()
@@ -21,7 +21,7 @@ class PositionOffsetHead(nn.Module):
         self.predict_box = predict_box
         self.dtype = dtype
         if isinstance(activation_fn, str):
-            activation_fn = _get_layer(activation_fn)
+            activation_fn = get_layer(activation_fn)
         layers = [nn.Linear(in_dim, hidden_dim, dtype=dtype), activation_fn()]
         for _ in range(n_layers - 1):
             layers.extend(

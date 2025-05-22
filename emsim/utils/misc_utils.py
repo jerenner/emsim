@@ -65,7 +65,7 @@ def can_broadcast_shapes(*shapes) -> bool:
         return False
 
 
-def _get_layer(layer: Union[str, type]):
+def get_layer(layer: Union[str, type]) -> type[nn.Module]:
     if isinstance(layer, type):
         return layer
     if layer.lower() == "relu":

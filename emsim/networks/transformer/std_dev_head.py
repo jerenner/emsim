@@ -3,7 +3,7 @@ from typing import Union
 import torch
 from torch import nn
 
-from emsim.utils.misc_utils import _get_layer
+from emsim.utils.misc_utils import get_layer
 
 
 class StdDevHead(nn.Module):
@@ -12,14 +12,14 @@ class StdDevHead(nn.Module):
         in_dim: int,
         hidden_dim: int,
         n_layers: int,
-        activation_fn: Union[str, nn.Module] = "gelu",
+        activation_fn: Union[str, type[nn.Module]] = "gelu",
         scaling_factor: float = 0.001,
         eps: float = 1e-6,
     ):
         super().__init__()
         assert n_layers > 1, "Expected at least 1 hidden layer"
         if isinstance(activation_fn, str):
-            activation_fn = _get_layer(activation_fn)
+            activation_fn = get_layer(activation_fn)
         layers = [nn.Linear(in_dim, hidden_dim), activation_fn()]
         for _ in range(n_layers - 1):
             layers.extend(

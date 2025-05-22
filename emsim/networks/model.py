@@ -1,11 +1,9 @@
-from typing import Optional
+from typing import Optional, Union, cast
 import logging
 
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor, nn
 
-from ..utils.misc_utils import _get_layer
-from ..utils.sparse_utils.minkowskiengine import get_me_layer
 from .loss.criterion import EMCriterion
 from .backbone_me.unet import MinkowskiSparseResnetUnet
 from .transformer.model import EMTransformer
@@ -203,8 +201,10 @@ class EMModel(nn.Module):
 
     @classmethod
     def from_config(cls, cfg: DictConfig):
+        config: Union[DictConfig, EMModelConfig]
         if not isinstance(cfg, EMModelConfig):
-            config: EMModelConfig = OmegaConf.to_object(cfg)
+            config = OmegaConf.structured(cfg)
+            assert isinstance(config, EMModelConfig)
         else:
             config = cfg
 

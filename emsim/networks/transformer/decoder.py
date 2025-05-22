@@ -130,7 +130,7 @@ class TransformerDecoderLayer(nn.Module):
         attn_mask: Optional[Tensor] = None,
         query_pos_encoding: Optional[Tensor] = None,
     ):
-        max_spatial_shape, max_level_index = level_spatial_shapes.max(dim=0)
+        max_level_index = level_spatial_shapes.argmax(dim=0)
         max_level_index = torch.unique(max_level_index)
         assert len(max_level_index) == 1
         query_level_indices = max_level_index.expand(query_spatial_positions.shape[0])
@@ -295,7 +295,7 @@ class EMTransformerDecoder(nn.Module):
         query_reference_points: Tensor,
         query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
-        spatial_shapes: Tensor,
+        level_spatial_shapes: Tensor,
         attn_mask: Optional[Tensor] = None,
     ):
         layer_output_logits = []
@@ -310,13 +310,13 @@ class EMTransformerDecoder(nn.Module):
             else:
                 query_pos_encoding = None
             queries = layer(
-                queries,
-                query_pos_encoding,
-                query_reference_points.detach(),
-                query_batch_offsets,
-                stacked_feature_maps,
-                spatial_shapes,
-                attn_mask,
+                queries=queries,
+                query_batch_offsets=query_batch_offsets,
+                query_spatial_positions=query_reference_points.detach(),
+                stacked_feature_maps=stacked_feature_maps,
+                level_spatial_shapes=level_spatial_shapes,
+                attn_mask=attn_mask,
+                query_pos_encoding=query_pos_encoding,
             )
 
             queries_normed = self.norm(queries)

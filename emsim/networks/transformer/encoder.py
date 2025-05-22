@@ -253,7 +253,6 @@ class EMTransformerEncoder(nn.Module):
                 .clamp_max_(self.max_tokens_non_sa)
                 .clamp_max_(n_batch_tokens)
             )
-            token_batch_offsets = seq_lengths_to_batch_offsets(batch_k)
 
             batch_topk_out: BatchTopK = batch_topk(
                 torch.cat([score.detach() for score in token_salience_scores]),
@@ -261,7 +260,6 @@ class EMTransformerEncoder(nn.Module):
                 batch_k,
                 return_values=True,
             )
-            assert torch.equal(token_batch_offsets, batch_topk_out.offsets)
 
             # Fill in the spatial indices from the token seq indices
             batch_topk_spatial_indices = token_spatial_indices[0].new_empty(
@@ -301,7 +299,7 @@ class EMTransformerEncoder(nn.Module):
                 electron_score = None
             query_for_layer = layer(
                 query_for_layer,
-                token_batch_offsets,
+                batch_topk_out.offsets,
                 batch_topk_out.values,
                 batch_topk_spatial_indices.T.contiguous(),
                 stacked_feature_maps,

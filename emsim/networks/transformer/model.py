@@ -323,7 +323,7 @@ class EMTransformer(nn.Module):
             query_reference_points=reference_points,
             query_batch_offsets=query_batch_offsets,
             stacked_feature_maps=encoder_out_normalized,
-            spatial_shapes=score_dict["spatial_shapes"],
+            level_spatial_shapes=score_dict["spatial_shapes"],
             attn_mask=attn_mask,
         )
 

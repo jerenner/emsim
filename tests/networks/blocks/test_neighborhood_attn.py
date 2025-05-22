@@ -4,12 +4,10 @@ from typing import Any, Optional, Union
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
-from hypothesis.extra.numpy import arrays
-from numpy import array
 from torch import Tensor, nn
-import torch.nn.functional as F
 
 from emsim.networks.positional_encoding.rope import (
     RoPEEncodingND,
@@ -24,7 +22,6 @@ from emsim.utils.sparse_utils.indexing.script_funcs import unflatten_nd_indices
 from emsim.utils.sparse_utils.ops.subset_attn.subset_attn import (
     BatchSparseIndexSubsetAttention,
 )
-from emsim.utils.sparse_utils.validation import validate_nd
 
 from ..conftest import ModuleHook
 
@@ -312,6 +309,7 @@ def strategy_input_tensors(
             level_spatial_shapes.size(-2), size=(n_queries,), device=device
         )
     else:
+        # Every query is at maximum spatial shape (i.e. decoder object queries)
         query_level_indices = None
 
     # Create stacked feature maps sparse tensor
@@ -986,8 +984,7 @@ class TestEdgeCases:
 
         # This should raise an error due to incorrect query dimensions
         with pytest.raises(
-            (ValueError, torch.jit.Error),  # type: ignore
-            match="Expected.*2D"
+            (ValueError, torch.jit.Error), match="Expected.*2D"  # type: ignore
         ):
             base_module_instance(**invalid_data)
 
@@ -1198,10 +1195,23 @@ class TestProperties:
         # Backward pass
         loss.backward()
 
+        tensors_requiring_grads = inputs["tensor_config"]["tensors_requiring_grads"]
+        for name in tensors_requiring_grads:
+            tensor = input_data[name]
+            assert tensor is not None
+            assert tensor.grad is not None
+
         # Check gradient magnitudes for inputs
         for name, tensor in input_data.items():
-            assert tensor is not None
-            if hasattr(tensor, "grad") and tensor.grad is not None:
+            if (
+                not inputs["tensor_config"]["make_level_indices"]
+                and name == "query_level_indices"  # Only optional tensor
+            ):
+                assert tensor is None
+            else:
+                assert tensor is not None, f"{name} is None"
+
+            if tensor is not None and tensor.grad is not None:
                 # Check that gradients are finite
                 assert not torch.isnan(tensor.grad).any(), f"{name} has NaN gradients"
                 assert not torch.isinf(tensor.grad).any(), f"{name} has Inf gradients"

@@ -10,7 +10,7 @@ from emsim.utils.sparse_utils.conversion import minkowski_to_torch_sparse
 from emsim.utils.sparse_utils.indexing.indexing import (
     union_sparse_indices,
 )
-from emsim.utils.sparse_utils.shape_ops import sparse_squeeze_dense_dim
+from emsim.utils.sparse_utils.shape_ops import sparse_squeeze
 
 
 def pixel_coord_grid(height: int, width: int, stride: Tensor, device: torch.device):
@@ -67,17 +67,18 @@ class ElectronSalienceCriterion(nn.Module):
 
     @staticmethod
     def prep_inputs(
-        score_dict: dict[str, Union[Tensor, ME.SparseTensor]],
+        score_dict: dict[str, Union[Tensor, list[ME.SparseTensor]]],
         target_dict: dict[str, Tensor],
     ):
         predicted_foreground_masks = [
-            sparse_squeeze_dense_dim(
+            sparse_squeeze(
                 minkowski_to_torch_sparse(
                     mask,
                     full_scale_spatial_shape=target_dict["image_size_pixels_rc"].max(0)[
                         0
                     ],
-                )
+                ),
+                -1,
             )
             for mask in score_dict["score_feature_maps"]
         ]

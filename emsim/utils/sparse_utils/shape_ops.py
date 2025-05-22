@@ -4,42 +4,77 @@ from torch import Tensor
 from emsim.utils.sparse_utils.indexing.script_funcs import flatten_sparse_indices
 
 
-def sparse_squeeze_dense_dim(tensor: Tensor, dim: int) -> Tensor:
-    """Squeezes a specified dense dim out of a sparse tensor"""
-    assert tensor.is_sparse, "Tensor is not sparse"
-    dense_dim = tensor.dense_dim()
-    assert dense_dim > 0, "Tensor has no dense dim to squeeze"
+def sparse_squeeze(tensor: Tensor, dim: int) -> Tensor:
+    """Squeeze (remove) a dimension of size 1 from a COO sparse tensor.
 
-    dim = dim if dim >= 0 else dense_dim + dim  # handle negative indexing
-    assert (
-        0 <= dim < dense_dim
-    ), f"dim {dim} is out of range for dense dims [0, {dense_dim -1 }]"
+    The dimension to squeeze may be either:
+
+        - a sparse dimension (0, ..., tensor.sparse_dim() - 1)
+        - a dense dimension (tensor.sparse_dim(), ..., tensor.ndim - 1)
+
+    If the dimension is not of length 1, the tensor is returned unchanged, as with
+    the squeeze(dim) method of dense tensors.
+
+    Args:
+        tensor (Tensor): Sparse COO Tensor.
+        dim (int): Dimension to squeeze.
+
+    Returns:
+        Tensor: Input tensor with specified sparse dim squeezed out, if applicable.
+    """
+    if not tensor.is_sparse:
+        raise ValueError("Received non-sparse tensor.")
+
+    ndim = tensor.ndim
+    dim = dim if dim >= 0 else ndim + dim  # handle negative indexing
+    if not 0 <= dim < ndim:
+        raise IndexError(
+            f"dim {dim} is out of range for tensor with {ndim} dimensions."
+        )
 
     shape = list(tensor.shape)
-    if shape[tensor.sparse_dim() + dim] != 1:
+    if shape[dim] != 1:
         return tensor  # unsqueezable
 
-    tensor = tensor.coalesce()
-    new_shape = list(tensor.shape)
-    del new_shape[tensor.sparse_dim() + dim]
+    sparse_dims = tensor.sparse_dim()
+    indices = tensor._indices()
+    values = tensor._values()
+
+    if dim < sparse_dims:  # Squeeze sparse dim
+        new_indices = torch.cat((indices[:dim], indices[dim + 1 :]), 0)
+        new_values = values
+    else:  # Squeeze dense dim
+        new_indices = indices
+        new_values = values.squeeze(dim - sparse_dims + 1)
+
+    new_shape = shape[:dim] + shape[dim + 1 :]
 
     return torch.sparse_coo_tensor(
-        tensor.indices(),
-        tensor.values().squeeze(dim),  # squeeze the dim in values
+        new_indices,
+        new_values,
         tuple(new_shape),
         requires_grad=tensor.requires_grad,
         is_coalesced=tensor.is_coalesced(),
-    ).coalesce()
+    )
 
 
 def sparse_resize(tensor: Tensor, new_shape: list[int]) -> Tensor:
     """Copies the indices and values of `tensor` to a new sparse tensor
     of different shape and same number of dims"""
-    assert tensor.is_sparse
-    assert len(new_shape) == tensor.ndim
-    assert all(new >= old for new, old in zip(new_shape, tensor.shape))
+    if not tensor.is_sparse:
+        raise ValueError("Received non-sparse tensor.")
+    if not len(new_shape) == tensor.ndim:
+        raise ValueError(
+            f"New shape {new_shape} has different number of dims "
+            f"than existing shape {tensor.shape}"
+        )
+    if not all(new >= old for new, old in zip(new_shape, tensor.shape)):
+        raise ValueError(
+            "New shape must be at least as large as existing shape in every dim, but "
+            f"got new shape {new_shape} and existing shape {tensor.shape}"
+        )
     return torch.sparse_coo_tensor(
-        tensor.indices(), tensor.values(), new_shape, is_coalesced=tensor.is_coalesced()
+        tensor._indices(), tensor._values(), new_shape, is_coalesced=tensor.is_coalesced()
     ).coalesce()
 
 

@@ -297,9 +297,6 @@ def batch_topk(
         if dim == 0:
             topk_inds_subseq_view.add_(batch_start)
 
-    if topk_values is not None:
-        topk_values.requires_grad_(tensor.requires_grad)
-
     return BatchTopK(topk_indices, topk_offsets, topk_values)
 
 

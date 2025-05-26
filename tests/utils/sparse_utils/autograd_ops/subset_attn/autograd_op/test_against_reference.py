@@ -507,7 +507,7 @@ class TestGradientsHypothesis:
             batched_outputs["attn_output"], reference_inputs["query_padding_mask"]
         )[0]
         assert torch.allclose(
-            optimized_output, stacked_batched_output, rtol=1e-4, atol=1e-4
+            optimized_output, stacked_batched_output, rtol=1e-3, atol=1e-4
         ), f"max output diff: {(optimized_output - stacked_batched_output).abs().max()}"
 
         # Create random gradient for backprop

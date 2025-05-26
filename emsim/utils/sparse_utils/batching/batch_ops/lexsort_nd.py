@@ -118,16 +118,16 @@ def _break_float_ties(
             # `orig_rows` are original positions in `tensor_perm`
             orig_rows = batch_indices[tied_vectors]
 
-            org_block = vecs_3d[orig_rows, batch]  # (G, V)
+            orig_block = vecs_3d[orig_rows, batch]  # (G, V)
 
-            if (org_block - org_block[0]).abs().max() == 0.0:
+            if (orig_block - orig_block[0]).abs().max() == 0.0:
                 # all vectors are exactly identical – put in original row index order
                 batch_indices[tied_vectors] = orig_rows.sort()[0]
             else:
                 # robust lexicographic sort (from original order) of this small block
                 orig_abs_indices, orig_relative_order = orig_rows.sort()
                 new_order = _lexsort_nd_robust(
-                    org_block[orig_relative_order], descending
+                    orig_block[orig_relative_order], descending
                 )
                 batch_indices[tied_vectors] = orig_abs_indices[new_order]
 

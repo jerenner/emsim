@@ -201,7 +201,7 @@ def _flatten_metrics(metric_dict):
 
 
 def recursive_reset(
-    metric_or_moduledict: Union[nn.ModuleDict, Metric, MetricCollection],
+    metric_or_moduledict: Union[nn.ModuleDict, Metric, MetricCollection, nn.Module],
 ):
     if not hasattr(metric_or_moduledict, "reset"):
         for metric in metric_or_moduledict.values():

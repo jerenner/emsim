@@ -4,8 +4,8 @@ import sparse
 import torch
 from torch import Tensor
 
-from . import utils
-from .utils import ME, spconv
+from . import imports
+from .imports import ME, spconv
 
 def torch_sparse_to_pydata_sparse(tensor: Tensor) -> sparse.SparseArray:
     assert tensor.is_sparse
@@ -31,7 +31,7 @@ def pydata_sparse_to_torch_sparse(
     ).coalesce()
 
 
-@utils.requires_minkowskiengine
+@imports.requires_minkowskiengine
 @torch.compiler.disable
 def torch_sparse_to_minkowski(tensor: Tensor):
     assert isinstance(tensor, Tensor)
@@ -47,7 +47,7 @@ def torch_sparse_to_minkowski(tensor: Tensor):
     )
 
 
-@utils.requires_minkowskiengine
+@imports.requires_minkowskiengine
 def minkowski_to_torch_sparse(
     tensor: Union[Tensor, ME.SparseTensor],
     full_scale_spatial_shape: Optional[Union[Tensor, list[int]]] = None,
@@ -71,7 +71,7 @@ def minkowski_to_torch_sparse(
     return out
 
 
-@utils.requires_spconv
+@imports.requires_spconv
 def torch_sparse_to_spconv(tensor: torch.Tensor):
     """Converts a sparse torch.Tensor to an equivalent spconv SparseConvTensor
 
@@ -95,7 +95,7 @@ def torch_sparse_to_spconv(tensor: torch.Tensor):
     return spconv.SparseConvTensor(features_th, indices_th, spatial_shape, batch_size)
 
 
-@utils.requires_spconv
+@imports.requires_spconv
 def spconv_to_torch_sparse(tensor, squeeze=False):
     """Converts an spconv SparseConvTensor to a sparse torch.Tensor
 
@@ -137,7 +137,7 @@ def spconv_to_torch_sparse(tensor, squeeze=False):
     return out
 
 
-@utils.requires_minkowskiengine
+@imports.requires_minkowskiengine
 def __me_sparse(
     tensor: ME.SparseTensor,
     min_coords: Optional[Tensor] = None,

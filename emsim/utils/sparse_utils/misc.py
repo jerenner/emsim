@@ -1,11 +1,53 @@
+import math
 import re
+from typing import TYPE_CHECKING, overload
 
 import torch
 from torch import Tensor
 
-from . import utils
+from . import imports
 
-_pytorch_atleast_2_5 = utils.check_pytorch_version("2.5")
+if TYPE_CHECKING:
+    _overload = overload
+else:
+    _overload = torch.jit._overload
+
+_pytorch_atleast_2_5 = imports.check_pytorch_version("2.5")
+
+
+@_overload
+def prod(x: Tensor) -> Tensor: ...
+@_overload
+def prod(x: list[int]) -> int: ...  # noqa: F811
+@_overload
+def prod(x: list[float]) -> float: ...  # noqa: F811
+@_overload
+def prod(x: tuple[int, ...]) -> int: ...  # noqa: F811
+@_overload
+def prod(x: tuple[float, ...]) -> float: ...  # noqa: F811
+
+
+def prod(x):  # noqa: F811
+    """Computes the product of elements of a tensor or list.
+
+    Args:
+        x: (Tensor | list): Tensor or list to take the product over.
+
+    Returns:
+        Tensor | int | float: Resulting product.
+    """
+    if isinstance(x, Tensor):
+        return x.prod()
+
+    if torch.jit.is_scripting():  # type: ignore
+        if isinstance(x[0], float):
+            result = 1.0
+        else:
+            result = 1
+        for element in x:
+            result *= element
+        return result
+    return math.prod(x)
 
 
 @torch.jit.script

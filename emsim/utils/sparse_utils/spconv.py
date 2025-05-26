@@ -3,11 +3,11 @@ from typing import List
 
 import torch
 
-from . import utils
-from .utils import SparseConvTensor
+from . import imports
+from .imports import SparseConvTensor
 
 
-@utils.requires_spconv
+@imports.requires_spconv
 def spconv_sparse_mult(*tens) -> SparseConvTensor:
     """This is more or less a line-for-line copy of spconv's Fsp.sparse_add
     function, except it replaces the elementwise addition reduction with an

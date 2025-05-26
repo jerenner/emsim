@@ -2,8 +2,8 @@ from typing import Any, Union
 
 from torch import nn
 
-from . import utils
-from .utils import ME, MinkowskiNonlinearityBase
+from . import imports
+from .imports import ME, MinkowskiNonlinearityBase
 
 
 class MinkowskiLayerNorm(nn.Module):
@@ -47,7 +47,7 @@ class MinkowskiLayerNorm(nn.Module):
 class _DummyBaseclass:
     pass
 if MinkowskiNonlinearityBase is not None:  # successfully imported in utils
-    class MinkowskiGELU(MinkowskiNonlinearityBase):
+    class MinkowskiGELU(MinkowskiNonlinearityBase):  # type: ignore
         MODULE = nn.GELU
 else:
     class MinkowskiGELU(_DummyBaseclass):
@@ -55,7 +55,7 @@ else:
 # fmt: on
 
 
-@utils.requires_minkowskiengine
+@imports.requires_minkowskiengine
 def get_me_layer(layer: Union[str, nn.Module]):
     if isinstance(layer, nn.Module):
         return layer

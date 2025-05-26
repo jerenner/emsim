@@ -3,7 +3,7 @@ from typing import NamedTuple, Optional, Union
 import torch
 from torch import Tensor
 
-from .batch_utils import batch_offsets_to_seq_lengths, seq_lengths_to_batch_offsets
+from ..batch_utils import batch_offsets_to_seq_lengths, seq_lengths_to_batch_offsets
 
 
 class BatchTopK(NamedTuple):

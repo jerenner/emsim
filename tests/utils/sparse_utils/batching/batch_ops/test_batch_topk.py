@@ -20,11 +20,7 @@ from emsim.utils.sparse_utils.batching.batch_utils import (
 def random_tensor(
     seq_lens: Sequence[int], extra_dims: Sequence[int], seed: int, device: str
 ) -> tuple[Tensor, Tensor]:
-    """
-    Generate a concatenated tensor together with its batch offsets.
-
-    We reseed to make the result reproducible across CPU / CUDA.
-    """
+    """Generate a concatenated tensor together with its batch offsets."""
     gen = torch.Generator(device=device).manual_seed(seed)
     total = int(sum(seq_lens))
     tensor = torch.randn((total, *extra_dims), generator=gen, device=device)

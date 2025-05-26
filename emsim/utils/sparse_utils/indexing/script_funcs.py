@@ -33,7 +33,7 @@ def _make_linear_offsets(dim_sizes: Tensor) -> Tensor:
 
 @torch.jit.script
 def flatten_nd_indices(indices: Tensor, sizes: Tensor) -> tuple[Tensor, Tensor]:
-    """Flattens N-dimensional indices into 1-dimensional scalar indices
+    """Flattens N-dimensional indices into 1-dimensional scalar indices.
 
     Args:
         indices (Tensor): Integer coordinate tensor of shape [N, B], where N

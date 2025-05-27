@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, NamedTuple
 
 import torch
 from torch import Tensor
@@ -66,6 +66,10 @@ def _break_float_ties(
     Returns:
         Tensor: `idx_sorted`, but with ties broken so that the overall order is
             truly lexicographic.
+
+    Notes:
+        - I went around this with the wrong approach and this version needs too high
+        a tolerance to catch all the possible ties
     """
     sort_len = tensor.size(0)  # N
     vector_len = tensor.size(-1)  # V
@@ -78,10 +82,16 @@ def _break_float_ties(
     vecs_3d = tensor.reshape(sort_len, n_batches, vector_len)  # (N, M, V)
 
     # Step 1: detect which batches actually contain ties
-    eps = _EPSILON[tensor.dtype]  # epsilon based on original tensor dtype
     diffs = torch.diff(proj_sorted_2d, dim=0).abs()
-    rel_factor = torch.maximum(proj_sorted_2d[:-1].abs(), proj_sorted_2d[1:].abs())
-    pair_tol = eps * rel_factor  # (N-1, M)
+    # eps = _EPSILON[tensor.dtype]  # epsilon based on original tensor dtype
+    # rel_factor = torch.maximum(proj_sorted_2d[:-1].abs(), proj_sorted_2d[1:].abs())
+    # step = _MANTISSA_BITS[tensor.dtype] - 1
+    # w1 = torch.exp2(
+    #     torch.tensor(step * (vector_len - 2), device=tensor.device)
+    # ).clamp_min(0.0)
+    # pair_tol = torch.maximum(eps * rel_factor, w1)  # (N-1, M)
+    pair_tol = torch.zeros_like(diffs)  # minimal change
+
     has_ties = (diffs <= pair_tol).any(dim=0)  # (M,)
     batches_with_ties = has_ties.nonzero().squeeze(-1)  # 1-D tensor
 
@@ -196,40 +206,41 @@ def _lexsort_nd_float(
             for the input tensor. The sorted vectors are retrievable with
             `tensor.gather(0, sort_indices.unsqueeze(-1).expand_as(tensor))`
     """
-    vector_len = tensor.size(-1)
+    # vector_len = tensor.size(-1)
 
-    # upcast bfloat - too flaky
-    if tensor.dtype == torch.bfloat16:
-        tensor = tensor.float()
+    # # upcast bfloat - too flaky
+    # if tensor.dtype == torch.bfloat16:
+    #     tensor = tensor.float()
 
-    # Exponential step size for base-2 encoding. Could be lowered to squeeze more
-    # vector dims into smaller float dtypes at the cost of decreased initial sort
-    # precision
-    exp_step = _MANTISSA_BITS[tensor.dtype] - 1
+    # # Exponential step size for base-2 encoding. Could be lowered to squeeze more
+    # # vector dims into smaller float dtypes at the cost of decreased initial sort
+    # # precision
+    # exp_step = _MANTISSA_BITS[tensor.dtype] - 1
 
-    dtype = _safe_float_dtype(tensor.dtype, vector_len, step=exp_step)
-    if dtype is None:  # Vector too long to losslessly compress: use robust impl
-        return _lexsort_nd_robust(tensor, descending)
+    # dtype = _safe_float_dtype(tensor.dtype, vector_len, step=exp_step)
+    # if dtype is None:  # Vector too long to losslessly compress: use robust impl
+    #     return _lexsort_nd_robust(tensor, descending)
 
-    if dtype != tensor.dtype:
-        exp_step = _MANTISSA_BITS[dtype] - 1
+    # if dtype != tensor.dtype:
+    #     exp_step = _MANTISSA_BITS[dtype] - 1
 
-    # 1. Normalize
-    tensor_conv = tensor.to(dtype)
-    component_min, component_max = tensor_conv.aminmax(dim=0, keepdim=True)
-    component_range = component_max - component_min
-    eps = _EPSILON[dtype]
-    tensor_normed = (tensor_conv - component_min) / component_range.clamp_min(eps)
+    # # 1. Normalize
+    # tensor_conv = tensor.to(dtype)
+    # component_min, component_max = tensor_conv.aminmax(dim=0, keepdim=True)
+    # component_range = component_max - component_min
+    # eps = _EPSILON[dtype]
+    # tensor_normed = (tensor_conv - component_min) / component_range.clamp_min(eps)
 
-    # 2. weight vector (declining powers of 2)
-    start_exp = exp_step * (vector_len - 1)
-    weights = torch.exp2(
-        torch.arange(start_exp, -1, -exp_step, dtype=dtype, device=tensor.device)
-    )  # shape (vector_len,)
-    # weights = torch.logspace(start_exp, 0, vector_len, base=2, device=weights.device) # alternate method
+    # # 2. weight vector (declining powers of 2)
+    # start_exp = exp_step * (vector_len - 1)
+    # weights = torch.exp2(
+    #     torch.arange(start_exp, -1, -exp_step, dtype=dtype, device=tensor.device)
+    # )  # shape (vector_len,)
+    # # weights = torch.logspace(start_exp, 0, vector_len, base=2, device=weights.device) # alternate method
 
-    # 3. projection + sort
-    proj = torch.matmul(tensor_normed, weights)
+    # # 3. projection + sort
+    # proj = torch.matmul(tensor_normed, weights)
+    proj = tensor[..., 0]
     proj_sorted, idx_sorted = torch.sort(
         proj, dim=0, descending=descending, stable=stable
     )
@@ -255,7 +266,14 @@ def _reduce_bitwise_or(tensor: Tensor, dim: int, keepdim: bool = False) -> Tenso
     return out
 
 
-def _lexsort_nd_int(tensor: Tensor, descending: bool, stable: bool) -> Tensor:
+class LexsortIntOut(NamedTuple):
+    sort_indices: Tensor
+    sorted_inverse: Optional[Tensor] = None
+
+
+def _lexsort_nd_int(
+    tensor: Tensor, descending: bool, stable: bool, return_unique_inverse: bool = False
+) -> LexsortIntOut:
     """Lexicographically sorts integer tensors of vectors by packing each vector into a
     64-bit scalar key.
 
@@ -270,11 +288,15 @@ def _lexsort_nd_int(tensor: Tensor, descending: bool, stable: bool) -> Tensor:
         descending (bool): Whether the sort should be in descending order. Default: False
         stable (bool): Whether the sort should be stable (ordering of equal elements kept).
             Default: False
+        return_unique_inverse (bool): If True, this function will also return the
+            second output of unique_consecutive(return_inverse=True, dim=0) on the
+            sorted keys, i.e., a tensor of ascending long integers
 
     Returns:
         sort_indices (Tensor): Long tensor of shape `tensor.shape[:-1]` with sort indices
             for the input tensor. The sorted vectors are retrievable with
             `tensor.gather(0, sort_indices.unsqueeze(-1).expand_as(tensor))`
+        unique_inverse (Optional[Tensor]): Returned if return_unique_inverse is True.
     """
     vector_len = tensor.size(-1)
 
@@ -286,25 +308,20 @@ def _lexsort_nd_int(tensor: Tensor, descending: bool, stable: bool) -> Tensor:
     if (component_range < 0).any():  # Integer overflow
         # attempt sorting with float
         # (will itself fall back to robust if it can't sort)
-        return _lexsort_nd_float(tensor.double(), descending=descending, stable=stable)
-        # return _lexsort_nd_robust(tensor, descending)
+        return LexsortIntOut(
+            _lexsort_nd_float(tensor.double(), descending=descending, stable=stable)
+        )
 
     # 2. Absolute largest range of values for each vector component across batches
     max_range = component_range.view(-1, vector_len).max(dim=0)[0]  # (vector_len,)
 
     # bits needed per component
-
-    # max_range_int: list[int] = max_range.tolist()
-    # bits = [range_.bit_length() for range_ in max_range_int]
-    # total_bits = sum(bits)
-    # bits_tensor = torch.tensor(bits, device=tensor.device, dtype=torch.long)
-
     bits_tensor = (max_range + 1).log2().ceil().long()
     total_bits = bits_tensor.sum()
 
     if total_bits >= 63:
         # cannot fit in last 63 bits of long: fall back to robust multi-pass sort
-        return _lexsort_nd_robust(tensor, descending)
+        return LexsortIntOut(_lexsort_nd_robust(tensor, descending))
 
     # 3. shift map (most-significant component first)
     shifts = torch.zeros_like(bits_tensor)
@@ -329,8 +346,13 @@ def _lexsort_nd_int(tensor: Tensor, descending: bool, stable: bool) -> Tensor:
         descending = False  # ascending of flipped bits
 
     # 5. single sort on the key
-    _, sort_indices = key.sort(dim=0, descending=descending, stable=stable)
-    return sort_indices
+    sorted_key, sort_indices = key.sort(dim=0, descending=descending, stable=stable)
+    if return_unique_inverse:
+        new_group = torch.zeros_like(sorted_key, dtype=torch.bool)
+        new_group[1:] = sorted_key[1:] != sorted_key[:-1]
+        sorted_inverse = new_group.cumsum(0, dtype=torch.long)
+        return LexsortIntOut(sort_indices, sorted_inverse)
+    return LexsortIntOut(sort_indices)
 
 
 _INT_TYPES = (
@@ -460,7 +482,7 @@ def lexsort_nd(
     elif torch.is_floating_point(tensor_permuted):
         indices = _lexsort_nd_float(tensor_permuted, descending, stable)
     elif tensor_permuted.dtype in _INT_TYPES:
-        indices = _lexsort_nd_int(tensor_permuted, descending, stable)
+        indices = _lexsort_nd_int(tensor_permuted, descending, stable).sort_indices
     else:
         raise ValueError(f"Unsupported tensor dtype {tensor.dtype}")
 

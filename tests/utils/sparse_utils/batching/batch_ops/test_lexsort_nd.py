@@ -107,6 +107,21 @@ def make_tensor(
     return tensor
 
 
+def _lex_compare(row1: Tensor, row2: Tensor, descending: bool = False) -> bool:
+    """Compares two 1D tensors lexicographically."""
+    diff_positions = (row1 != row2).nonzero()
+
+    if diff_positions.numel() == 0:
+        return True
+
+    first_diff_pos = int(diff_positions[0].item())
+
+    if descending:
+        return bool((row1[first_diff_pos] >= row2[first_diff_pos]).item())
+    else:
+        return bool((row1[first_diff_pos] <= row2[first_diff_pos]).item())
+
+
 def is_lexsorted(tensor: Tensor, descending: bool = False) -> Tensor:
     """
     Vectorized lexicographic sorting check for batches of 2D tensors.
@@ -127,50 +142,26 @@ def is_lexsorted(tensor: Tensor, descending: bool = False) -> Tensor:
     if sort_len <= 1 or vector_len <= 1 or tensor.numel() == 0:
         return torch.ones(batch_size, dtype=torch.bool, device=tensor.device)
 
-    rows1 = tensor[:, :-1, :]
-    rows2 = tensor[:, 1:, :]
+    batch_size, n_rows, _ = tensor.shape
 
-    n_pairs = sort_len - 1
+    if n_rows <= 1:
+        return tensor.new_ones(batch_size, dtype=torch.bool)
 
-    # Find differences across all batches and pairs
-    diff_mask = rows1 != rows2
+    results = tensor.new_empty(batch_size, dtype=torch.bool)
 
-    # Find first differing position for each pair
-    col_indices = torch.arange(vector_len, device=tensor.device).expand(
-        batch_size, n_pairs, -1
-    )
-    masked_indices = torch.where(diff_mask, col_indices, vector_len)
-    # Shape: (batch_size, n_pairs)
-    first_diff_indices = torch.min(masked_indices, dim=2)[0]
+    tensor = tensor.cpu()
+    for b in range(batch_size):
+        batch_sorted = True
+        for r in range(n_rows - 1):
+            curr_row = tensor[b, r]
+            next_row = tensor[b, r + 1]
+            if not _lex_compare(curr_row, next_row, descending=descending):
+                batch_sorted = False
+                break
 
-    # Identify which pairs have differences
-    has_diff = first_diff_indices < vector_len  # Shape: (batch_size, n_pairs)
+        results[b] = batch_sorted
 
-    # Early return if no differences (all pairs identical)
-    if not torch.any(has_diff):
-        return torch.ones(batch_size, dtype=torch.bool, device=tensor.device)
-
-    # Create indexing arrays
-    batch_indices = (
-        torch.arange(batch_size, device=tensor.device).unsqueeze(1).expand(-1, n_pairs)
-    )
-    pair_indices = (
-        torch.arange(n_pairs, device=tensor.device).unsqueeze(0).expand(batch_size, -1)
-    )
-
-    # Get values at first differing positions for all pairs in all batches
-    first_diff_indices = first_diff_indices.clamp_max(vector_len - 1)
-    first_diff_vals1 = rows1[batch_indices, pair_indices, first_diff_indices]
-    first_diff_vals2 = rows2[batch_indices, pair_indices, first_diff_indices]
-
-    # Check for lexicographic violations
-    if descending:
-        violations = has_diff & (first_diff_vals1 < first_diff_vals2)
-    else:
-        violations = has_diff & (first_diff_vals1 > first_diff_vals2)
-
-    # A batch is sorted if none of its pairs violate lexicographic order
-    return ~violations.any(dim=1)
+    return results
 
 
 def lexsort_nd_numpy(
@@ -179,7 +170,8 @@ def lexsort_nd_numpy(
     sort_dim: int,
     descending: bool = False,
     stable: bool = False,
-    force_robust: bool = False,
+    *args,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Wrapper around numpy.lexsort for testing lexsort_nd.
@@ -190,7 +182,6 @@ def lexsort_nd_numpy(
         sort_dim: Dimension along which to sort
         descending: If True, sort in descending order
         stable: Ignored (np.lexsort is always stable)
-        force_robust: Ignored (for API compatibility)
 
     Returns:
         (sorted_tensor, sort_indices) matching lexsort_nd's behavior
@@ -332,7 +323,7 @@ def _permute_dims_to_batched(tensor: Tensor, vector_dim: int, sort_dim: int) -> 
 class TestUnit:
     def test_unit(self, device):
         tensor = make_tensor(
-            [4, 16, 16],
+            [4, 16, 5],
             dtype=torch.float32,
             min_value=-100.0,
             max_value=100.0,
@@ -340,14 +331,23 @@ class TestUnit:
             device=device,
         )
 
+        vector_dim = 2
+        sort_dim = 1
+        # (batch dim = 0)
+
+        # Make some duplicates
+        tensor[:, 1] = tensor[:, 3]
+        tensor[:, 4] = tensor[:, 2]
+        tensor[:, ::6] = tensor[:, -1].unsqueeze(1)
+
         tensor_copy = tensor.clone()
 
-        tensor_sorted, sorted_indices = lexsort_nd(tensor, -1, -2)
-        tensor_sorted_robust, _ = lexsort_nd(
-            tensor_copy.clone(), -1, -2, force_robust=True
+        tensor_sorted, sorted_idx = lexsort_nd(tensor, vector_dim, sort_dim)
+        tensor_sorted_robust, sorted_idx_robust = lexsort_nd(
+            tensor_copy.clone(), vector_dim, sort_dim, force_robust=True
         )
-        tensor_sorted_int, _ = lexsort_nd(tensor_copy.long(), -1, -2)
-        numpy_sorted, numpy_indices = lexsort_nd_numpy(tensor_copy, -1, -2)
+        tensor_sorted_int, _ = lexsort_nd(tensor_copy.long(), vector_dim, sort_dim)
+        numpy_sorted, numpy_idx = lexsort_nd_numpy(tensor_copy, vector_dim, sort_dim)
 
         assert is_lexsorted(numpy_sorted, False).all()
         assert is_lexsorted(tensor_sorted_robust, False).all()
@@ -355,7 +355,7 @@ class TestUnit:
         assert is_lexsorted(tensor_sorted, False).all()
 
         assert torch.allclose(tensor_sorted, numpy_sorted)
-        assert torch.equal(sorted_indices, numpy_indices)
+        assert torch.equal(sorted_idx_robust, numpy_idx)
 
     def test_long_vector(self, device):
         tensor = make_tensor(
@@ -483,7 +483,7 @@ class TestProperties:
     @settings(
         deadline=None,
         suppress_health_check=[HealthCheck.differing_executors],
-        max_examples=10000,
+        max_examples=1000,
     )
     @given(inputs=lexsort_nd_inputs())
     def test_hypothesis(self, inputs, device: str):

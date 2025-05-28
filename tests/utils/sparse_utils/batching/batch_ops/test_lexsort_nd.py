@@ -17,9 +17,23 @@ from emsim.utils.sparse_utils.batching.batch_ops.lexsort_nd import (
     _permute_dims,
 )
 
+_DTYPES = (
+    torch.uint8,
+    torch.int8,
+    torch.int16,
+    torch.int32,
+    torch.int64,
+    torch.float16,
+    torch.bfloat16,
+    torch.float32,
+    torch.float64,
+)
+
 
 @st.composite
-def lexsort_nd_inputs(draw) -> dict[str, Any]:
+def lexsort_nd_inputs(
+    draw, dtypes: tuple[torch.dtype, ...] = _DTYPES
+) -> dict[str, Any]:
     n_dims = draw(st.integers(2, 4))
     shape = draw(st.lists(st.integers(0, 5), min_size=n_dims, max_size=n_dims))
 
@@ -42,21 +56,7 @@ def lexsort_nd_inputs(draw) -> dict[str, Any]:
     stable = draw(st.booleans())
     force_robust = draw(st.booleans())
 
-    dtype = draw(
-        st.sampled_from(
-            [
-                torch.uint8,
-                torch.int8,
-                torch.int16,
-                torch.int32,
-                torch.int64,
-                torch.float16,
-                torch.bfloat16,
-                torch.float32,
-                torch.float64,
-            ]
-        )
-    )
+    dtype = draw(st.sampled_from(dtypes))
     if dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
         finfo = torch.finfo(dtype)
         min_value = draw(st.floats(finfo.min, finfo.max, exclude_max=True))
@@ -479,6 +479,39 @@ class TestUnit:
 
 
 @pytest.mark.cpu_and_cuda
+class TestAdvanced:
+    def test_return_int_unique_inverse(self, device: str):
+        tensor = make_tensor(
+            [16, 4, 5],
+            dtype=torch.int64,
+            min_value=-100,
+            max_value=100,
+            seed=0,
+            device=device,
+        )
+
+        # add duplicates
+        tensor[1] = tensor[3]
+        tensor[2] = tensor[5]
+        tensor[::6] = tensor[-1]
+
+        descending = False
+
+        sort_indices, sorted_inverse, has_duplicates = _lexsort_nd_int(
+            tensor, descending, False, return_unique_inverse=True
+        )
+        assert sorted_inverse is not None
+
+        sorted_tensor = tensor.gather(0, sort_indices.unsqueeze(-1).expand_as(tensor))
+
+        for b in range(tensor.size(1)):
+            sorted_b = sorted_tensor[:, b]
+            assert not descending  # calling unique to get the gt doesn't work otherwise
+            _, inverse_b = sorted_b.unique(dim=0, return_inverse=True)
+            assert torch.equal(inverse_b, sorted_inverse[:, b])
+
+
+@pytest.mark.cpu_and_cuda
 class TestProperties:
     @settings(
         deadline=None,
@@ -517,3 +550,63 @@ class TestProperties:
         assert torch.allclose(tensor_sorted, numpy_sorted.to(tensor_sorted))
         if inputs["inputs"]["stable"]:
             assert torch.equal(sorted_indices, numpy_indices)
+
+    @settings(
+        deadline=None,
+        suppress_health_check=[HealthCheck.differing_executors],
+        max_examples=1000,
+    )
+    @given(
+        inputs=lexsort_nd_inputs(
+            dtypes=(torch.int64, torch.uint8, torch.int8, torch.int16, torch.int32)
+        )
+    )
+    def test_return_inverse_hypothesis(self, inputs, device: str):
+        assume(math.prod(inputs["tensor_config"]["shape"]) > 0)
+        assume(
+            inputs["tensor_config"]["max_value"] - inputs["tensor_config"]["min_value"]
+            > 1
+        )  # don't make it too easy
+        vector_dim = inputs["inputs"]["vector_dim"]
+        sort_dim = inputs["inputs"]["sort_dim"]
+        descending = inputs["inputs"]["descending"]
+        stable = inputs["inputs"]["stable"]
+
+        tensor = make_tensor(**inputs["tensor_config"], device=device)
+
+        sort_dim = sort_dim + tensor.ndim if sort_dim < 0 else sort_dim
+        vector_dim = vector_dim + tensor.ndim if vector_dim < 0 else vector_dim
+
+        sort_len = tensor.shape[sort_dim]
+        vector_len = tensor.shape[vector_dim]
+
+        tensor, _ = _permute_dims(tensor, vector_dim, sort_dim)
+
+        sort_indices, sorted_inverse, has_duplicates = _lexsort_nd_int(
+            tensor, descending=descending, stable=stable, return_unique_inverse=True
+        )
+        assert sorted_inverse is not None
+        assert has_duplicates is not None
+
+        sorted_tensor = tensor.gather(0, sort_indices.unsqueeze(-1).expand_as(tensor))
+
+        sorted_tensor = sorted_tensor.view(sort_len, -1, vector_len).transpose(0, 1)
+        sorted_tensor = sorted_tensor.contiguous()
+        sorted_inverse = sorted_inverse.view(sort_len, -1).transpose(0, 1).contiguous()
+        has_duplicates = has_duplicates.view(-1)
+
+        for b in range(sorted_tensor.size(0)):
+            sorted_b = sorted_tensor[b]  # [sort_len, vector_len]
+            inverse_b = sorted_inverse[b]  # [sort_len]
+            unique_ids, counts = inverse_b.unique(return_counts=True)
+            if (counts > 1).any():
+                assert has_duplicates[b]
+            else:
+                assert not has_duplicates[b]
+            for unique, count in zip(unique_ids, counts):
+                idx = inverse_b == unique
+                assert idx.sum() == count
+                if count > 1:
+                    # check all marked as duplicates are duplicates
+                    duplicates = sorted_b[idx]
+                    assert (duplicates[0] == duplicates).all()

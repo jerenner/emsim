@@ -6,10 +6,15 @@ from torch import Tensor
 from emsim.utils.sparse_utils.misc import prod
 
 
-def _lexsort_nd_robust(tensor: Tensor, descending: bool) -> Tensor:
+def _lexsort_nd_robust(tensor: Tensor, descending: bool) -> tuple[Tensor, Tensor]:
     """Iterative (true) lexicographic sort. Complexity: O(V * N log N)
 
     Input tensor shape: [sort_len, ..., vector_len], with ... as batch dims
+
+    Returns:
+        tuple[Tensor, Tensor]:
+            - Sorted tensor
+            - Sort indices
     """
     vector_len = tensor.size(-1)
     sort_len = tensor.size(0)
@@ -30,7 +35,7 @@ def _lexsort_nd_robust(tensor: Tensor, descending: bool) -> Tensor:
 
         perm = perm.gather(0, sort_indices)
 
-    return perm
+    return tensor, perm
 
 
 _MANTISSA_BITS = {  #
@@ -136,8 +141,8 @@ def _break_float_ties(
             else:
                 # robust lexicographic sort (from original order) of this small block
                 orig_abs_indices, orig_relative_order = orig_rows.sort()
-                new_order = _lexsort_nd_robust(
-                    orig_block[orig_relative_order], descending
+                _, new_order = _lexsort_nd_robust(
+                    orig_block[orig_relative_order], descending=descending
                 )
                 batch_indices[tied_vectors] = orig_abs_indices[new_order]
 
@@ -269,6 +274,28 @@ def _reduce_bitwise_or(tensor: Tensor, dim: int, keepdim: bool = False) -> Tenso
 class LexsortIntOut(NamedTuple):
     sort_indices: Tensor
     sorted_inverse: Optional[Tensor] = None
+    has_duplicates: Optional[Tensor] = None
+
+
+def _compute_sorted_inverse(sorted_tensor: Tensor) -> tuple[Tensor, Tensor]:
+    """Computes the output of sorted_tensor.unique(dim=-1, return_inverse=True) for an
+    already-sorted tensor.
+
+    Args:
+        sorted_tensor (Tensor): Sorted tensor of shape [sort_dim, ..., vector_dim]
+
+    Returns:
+        sorted_inverse (Tensor): Long tensor of shape [sort_dim, ...] with nondecreasing
+            integers along the first dim specifying which of the unique vectors are in
+            each index of sorted_tensor
+        has_duplicates (Tensor): Boolean tensor of shape [...] that is True if that
+            batch of sorted vectors has any duplicate vectors
+        """
+    new_group = sorted_tensor.new_zeros(sorted_tensor.shape[:-1], dtype=torch.bool)
+    new_group[1:] = (sorted_tensor[1:] != sorted_tensor[:-1]).any(-1)
+    sorted_inverse = new_group.cumsum(0, dtype=torch.long)
+    has_duplicates = new_group[1:].all(0).logical_not()
+    return sorted_inverse, has_duplicates
 
 
 def _lexsort_nd_int(
@@ -308,32 +335,42 @@ def _lexsort_nd_int(
     if (component_range < 0).any():  # Integer overflow
         # attempt sorting with float
         # (will itself fall back to robust if it can't sort)
-        return LexsortIntOut(
-            _lexsort_nd_float(tensor.double(), descending=descending, stable=stable)
+        sort_indices = _lexsort_nd_float(
+            tensor.double(), descending=descending, stable=stable
         )
+        if return_unique_inverse:
+            sorted_tensor = tensor.gather(
+                0, sort_indices.unsqueeze(-1).expand_as(tensor)
+            )
+            sorted_inverse, has_duplicates = _compute_sorted_inverse(sorted_tensor)
+            return LexsortIntOut(sort_indices, sorted_inverse, has_duplicates)
+
+        return LexsortIntOut(sort_indices)
 
     # 2. Absolute largest range of values for each vector component across batches
-    max_range = component_range.view(-1, vector_len).max(dim=0)[0]  # (vector_len,)
+    max_range = component_range.view(-1, vector_len).amax(dim=0)  # (vector_len,)
 
     # bits needed per component
-    bits_tensor = (max_range + 1).log2().ceil().long()
-    total_bits = bits_tensor.sum()
+    bits_tensor = (max_range + 1).log2().ceil().long()  # (vector_len,)
+    cum_bits = bits_tensor.cumsum(0)
 
-    if total_bits >= 63:
-        # cannot fit in last 63 bits of long: fall back to robust multi-pass sort
-        return LexsortIntOut(_lexsort_nd_robust(tensor, descending))
+    # 3. Greedily assign components to subkeys
+    MAX_KEY_BITS = 63
+    subkey_id = cum_bits // MAX_KEY_BITS  # (vector_len,)
+    n_keys = int(subkey_id[-1].item()) + 1
+    subkey_arange = torch.arange(n_keys, device=subkey_id.device)
+    subkey_mask = subkey_arange.unsqueeze(1) == subkey_id.unsqueeze(0)  # (K, V)
 
-    # 3. shift map (most-significant component first)
-    shifts = torch.zeros_like(bits_tensor)
-    shifts[:-1] = bits_tensor[1:].flip(0).cumsum(0).flip(0)
-    # add leading broadcast dims
-    shifts = shifts.view([1] * (tensor.ndim - 1) + [vector_len])
+    # 3. Compute shifts per component
+    bits_per_key = bits_tensor.unsqueeze(0) * subkey_mask  # (K, V)
+    bits_key_rev_cumsum = bits_per_key.flip(1).cumsum(1).flip(1)
+    shift_tensor = bits_key_rev_cumsum - bits_per_key  # (K, V)
 
     # 4. build 64-bit key
-    global_min = component_min.view(-1, vector_len).amin(0).view_as(shifts)
-    normalized = tensor.long() - global_min.long()
-    key = normalized << shifts
-    key = key.sum(-1)
+    global_min = component_min.view(-1, vector_len).amin(0)
+    normalized = tensor.long() - global_min.long()  # (N, ..., V)
+    key = normalized.unsqueeze(-2) << shift_tensor  # # (N, ..., K, V)
+    key = key.masked_fill_(~subkey_mask, 0.0).sum(-1)  # (..., K)
 
     # Handle descending for unsigned integers
     if descending and tensor.dtype in (
@@ -345,13 +382,19 @@ def _lexsort_nd_int(
         key = key.bitwise_not()
         descending = False  # ascending of flipped bits
 
-    # 5. single sort on the key
-    sorted_key, sort_indices = key.sort(dim=0, descending=descending, stable=stable)
+    # 5. sort on the keys
+    if n_keys == 1:
+        # Accomplish with a single sort
+        sorted_key, sort_indices = key.sort(dim=0, descending=descending, stable=stable)
+        sort_indices = sort_indices.squeeze(-1)
+    else:
+        sorted_key, sort_indices = _lexsort_nd_robust(
+            key,
+            descending=descending,
+        )
     if return_unique_inverse:
-        new_group = torch.zeros_like(sorted_key, dtype=torch.bool)
-        new_group[1:] = sorted_key[1:] != sorted_key[:-1]
-        sorted_inverse = new_group.cumsum(0, dtype=torch.long)
-        return LexsortIntOut(sort_indices, sorted_inverse)
+        sorted_inverse, has_duplicates = _compute_sorted_inverse(sorted_key)
+        return LexsortIntOut(sort_indices, sorted_inverse, has_duplicates)
     return LexsortIntOut(sort_indices)
 
 
@@ -478,19 +521,24 @@ def lexsort_nd(
     tensor_permuted = tensor_permuted.contiguous()
 
     if force_robust:
-        indices = _lexsort_nd_robust(tensor_permuted, descending)
+        sorted_tensor_permuted, indices = _lexsort_nd_robust(
+            tensor_permuted, descending=descending
+        )
     elif torch.is_floating_point(tensor_permuted):
         indices = _lexsort_nd_float(tensor_permuted, descending, stable)
+        sorted_tensor_permuted = None
     elif tensor_permuted.dtype in _INT_TYPES:
         indices = _lexsort_nd_int(tensor_permuted, descending, stable).sort_indices
+        sorted_tensor_permuted = None
     else:
         raise ValueError(f"Unsupported tensor dtype {tensor.dtype}")
 
     # Gather from the original tensor using the sort indices
     indices_unsq = indices.unsqueeze(-1)  # add singleton dim at permuted vector dim
-    sorted_tensor_permuted = torch.gather(
-        tensor_permuted, dim=0, index=indices_unsq.expand_as(tensor_permuted)
-    )
+    if sorted_tensor_permuted is None:
+        sorted_tensor_permuted = torch.gather(
+            tensor_permuted, dim=0, index=indices_unsq.expand_as(tensor_permuted)
+        )
 
     # Permute back to original dimension order
     inverse_perm = [0] * tensor.ndim

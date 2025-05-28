@@ -185,26 +185,24 @@ def batch_topk(
     same_len = torch.all(seq_lens == seq_lens[0])
     same_k = torch.all(k == k[0])
 
-    if same_len and same_k:  # sequences same length, batch for efficiency
+    if same_len:  # sequences same length, batch for efficiency
         # Clamp k to seq length
         seq_len_int = int(seq_lens[0].item())
         if dim == 0:
-            k_int = int(k[0].clamp_max(seq_len_int).item())
+            k_max_int = int(torch.min(k.amax(), seq_lens[0]).item())
         else:
-            k_int = int(k[0].clamp_max(tensor.shape[dim]).item())
+            k_max_int = int(k.amax().clamp_max(tensor.shape[dim]).item())
 
         # Compute per-batch result size
         if dim == 0:
-            out_size_per_batch = k_int * prod_extra_dims
+            out_sizes = k * prod_extra_dims
         else:
-            out_size_per_batch = k_int * seq_len_int * prod_extra_dims
-        topk_offsets = seq_lengths_to_batch_offsets(
-            torch.full_like(seq_lens, out_size_per_batch)
-        )
+            out_sizes = k * seq_len_int * prod_extra_dims
+        topk_offsets = seq_lengths_to_batch_offsets(out_sizes)
         assert isinstance(topk_offsets, Tensor)
 
-        if k_int == 0:
-            topk_indices = torch.empty(0, device=tensor.device, dtype=torch.long)
+        if k_max_int == 0:
+            topk_indices = tensor.new_empty(0, dtype=torch.long)
             topk_values = tensor[0:0].flatten() if return_values else None
             return BatchTopK(topk_indices, topk_offsets, topk_values)
 
@@ -212,23 +210,42 @@ def batch_topk(
         batch_shape = (batch_size, seq_len_int) + tensor.shape[1:]
         topk_dim = dim + 1  # account for new leading batch dim
 
-        topk_values_, topk_indices = tensor.reshape(batch_shape).topk(
-            k_int, topk_dim, largest=largest, sorted=sorted
+        values_all, indices_all = tensor.reshape(batch_shape).topk(
+            k_max_int, topk_dim, largest=largest, sorted=sorted
         )
 
-        # If topk is along sequence length, need to add offsets to topk_indices
+        # If topk is along sequence length, need to add offsets to indices
+        # to globalize them
         if dim == 0:
-            unsqueeze_shape = (batch_size,) + (1,) * (topk_indices.ndim - 1)
-            topk_indices = topk_indices + batch_offsets[:-1].view(unsqueeze_shape)
+            unsqueeze_shape = (batch_size,) + (1,) * (indices_all.ndim - 1)
+            indices_all = indices_all + batch_offsets[:-1].view(unsqueeze_shape)
 
-        topk_indices = topk_indices.flatten()
-        if return_values:
-            topk_values = topk_values_.flatten()
-        else:
-            topk_values = None
+        if same_k:
+            topk_indices = indices_all.flatten()
+            topk_values = values_all.flatten() if return_values else None
+            return BatchTopK(topk_indices, topk_offsets, topk_values)
+
+        # not all same k: slice into the topk output for each batch
+        total_len = int(topk_offsets[-1])
+        topk_indices = tensor.new_empty(total_len, dtype=torch.long)
+        topk_values = tensor.new_empty(total_len) if return_values else None
+
+        for b in range(batch_size):
+            k_b = int(k[b])
+            if k_b == 0:
+                continue
+
+            # slice into the already-computed result
+            start, end = int(topk_offsets[b]), int(topk_offsets[b + 1])
+            topk_indices[start:end] = indices_all[b].narrow(dim, 0, k_b).flatten()
+            if return_values:
+                assert topk_values is not None
+                topk_values[start:end] = values_all[b].narrow(dim, 0, k_b).flatten()
 
         return BatchTopK(topk_indices, topk_offsets, topk_values)
 
+    ##########
+    # Slow path
     # -- Sequences different length, run topk for each --
 
     if dim == 0:

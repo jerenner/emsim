@@ -24,7 +24,7 @@ def random_tensor(
     gen = torch.Generator(device=device).manual_seed(seed)
     total = int(sum(seq_lens))
     tensor = torch.randn((total, *extra_dims), generator=gen, device=device)
-    batch_offsets = seq_lengths_to_batch_offsets(
+    batch_offsets: Tensor = seq_lengths_to_batch_offsets(
         torch.tensor(seq_lens, dtype=torch.long, device=device)
     )
     return tensor, batch_offsets
@@ -41,7 +41,7 @@ def topk_reference(
     """
     Pure-Python reference that applies torch.topk separately on every subsequence.
     Returned indices are mapped back to the global (concatenated-tensor) index space
-    exactly like `batch_topk` does.
+    as in `batch_topk`.
     """
     all_idx: list[Tensor] = []
     all_val: list[Tensor] = []
@@ -74,7 +74,7 @@ def topk_reference(
     else:  # empty batch
         idx_cat = torch.empty(0, dtype=torch.long, device=tensor.device)
         val_cat = tensor[0:0].flatten()
-    offsets_out = seq_lengths_to_batch_offsets(
+    offsets_out: Tensor = seq_lengths_to_batch_offsets(
         torch.tensor(lengths, dtype=torch.long, device=tensor.device)
     )
     return idx_cat, offsets_out, val_cat
@@ -135,7 +135,6 @@ class TestBatchTopK:
     @pytest.mark.parametrize(
         "seq_lens,k,dim,largest,sorted_",
         [
-            # previously hard-coded examples
             ([4, 4, 4], 2, 0, True, True),  # uniform, scalar k
             ([2, 3, 4], 2, 0, True, True),  # variable, scalar k
             ([2, 3, 4], [1, 2, 3], 0, True, True),  # per-sequence k

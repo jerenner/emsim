@@ -361,16 +361,16 @@ def _lexsort_nd_int(
     subkey_arange = torch.arange(n_keys, device=subkey_id.device)
     subkey_mask = subkey_arange.unsqueeze(1) == subkey_id.unsqueeze(0)  # (K, V)
 
-    # 3. Compute shifts per component
+    # 4. Compute shifts per component
     bits_per_key = bits_tensor.unsqueeze(0) * subkey_mask  # (K, V)
     bits_key_rev_cumsum = bits_per_key.flip(1).cumsum(1).flip(1)
     shift_tensor = bits_key_rev_cumsum - bits_per_key  # (K, V)
 
-    # 4. build 64-bit key
-    global_min = component_min.view(-1, vector_len).amin(0)
+    # 5. build 64-bit keys
+    global_min = component_min.view(-1, vector_len).amin(0)  # (V)
     normalized = tensor.long() - global_min.long()  # (N, ..., V)
-    key = normalized.unsqueeze(-2) << shift_tensor  # # (N, ..., K, V)
-    key = key.masked_fill_(~subkey_mask, 0.0).sum(-1)  # (..., K)
+    keys = normalized.unsqueeze(-2) << shift_tensor  # # (N, ..., K, V)
+    keys = keys.masked_fill_(~subkey_mask, 0.0).sum(-1)  # (N, ..., K)
 
     # Handle descending for unsigned integers
     if descending and tensor.dtype in (
@@ -379,21 +379,21 @@ def _lexsort_nd_int(
         torch.uint32,
         torch.uint64,
     ):  # Future guard: as of now uints above 8 don't support sort
-        key = key.bitwise_not()
+        keys = keys.bitwise_not()
         descending = False  # ascending of flipped bits
 
-    # 5. sort on the keys
+    # 6. sort on the keys
     if n_keys == 1:
         # Accomplish with a single sort
-        sorted_key, sort_indices = key.sort(dim=0, descending=descending, stable=stable)
+        sorted_keys, sort_indices = keys.sort(dim=0, descending=descending, stable=stable)
         sort_indices = sort_indices.squeeze(-1)
     else:
-        sorted_key, sort_indices = _lexsort_nd_robust(
-            key,
+        sorted_keys, sort_indices = _lexsort_nd_robust(
+            keys,
             descending=descending,
         )
     if return_unique_inverse:
-        sorted_inverse, has_duplicates = _compute_sorted_inverse(sorted_key)
+        sorted_inverse, has_duplicates = _compute_sorted_inverse(sorted_keys)
         return LexsortIntOut(sort_indices, sorted_inverse, has_duplicates)
     return LexsortIntOut(sort_indices)
 
@@ -438,8 +438,7 @@ def lexsort_nd(
     "robust" (true) multi-pass lexicographic sort if the input vectors cannot be
     losslessly compressed to 1D. If `force_robust` is True, the robust sort is always
     used.
-    Both integer and floating-point tensors are supported, with different 1D-ization
-    schemes used for each.
+    Both integer and floating-point tensors are supported.
 
     Args:
         tensor (Tensor): Tensor to be sorted.
@@ -460,8 +459,6 @@ def lexsort_nd(
         - The relationship between the sorted tensor and the sort indices is:
             sort_indices_exp = sort_indices.unsqueeze(vector_dim).expand_as(tensor)
             sorted_tensor = tensor.gather(sort_dim, sort_indices_exp).
-        - If the input tensor's dtype is bfloat16, the tensor is always upcasted to
-            float32 before projection sort to avoid precision issues.
     """
     # Normalize dims
     ndim = tensor.ndim
@@ -520,6 +517,7 @@ def lexsort_nd(
     tensor_permuted, perm = _permute_dims(tensor, vector_dim, sort_dim)
     tensor_permuted = tensor_permuted.contiguous()
 
+    # Pick appropriate sorting subroutine
     if force_robust:
         sorted_tensor_permuted, indices = _lexsort_nd_robust(
             tensor_permuted, descending=descending
@@ -535,12 +533,12 @@ def lexsort_nd(
 
     # Gather from the original tensor using the sort indices
     indices_unsq = indices.unsqueeze(-1)  # add singleton dim at permuted vector dim
-    if sorted_tensor_permuted is None:
+    if sorted_tensor_permuted is None:  # get sorted tensor if not returned already
         sorted_tensor_permuted = torch.gather(
             tensor_permuted, dim=0, index=indices_unsq.expand_as(tensor_permuted)
         )
 
-    # Permute back to original dimension order
+    # Permute tensor and indices back to original dimension order
     inverse_perm = [0] * tensor.ndim
     for i, p in enumerate(perm):
         inverse_perm[p] = i

@@ -1,3 +1,4 @@
+# pyright: reportAttributeAccessIssue=false
 from typing import Optional, Union
 
 import torch
@@ -34,8 +35,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         is_specified_mask: Tensor,
         key_weight: Tensor,
         value_weight: Tensor,
-        key_bias: Tensor,
-        value_bias: Tensor,
+        key_bias: Optional[Tensor],
+        value_bias: Optional[Tensor],
         n_heads: int,
         key_positions: Optional[Tensor],
         rope_freqs: Optional[Tensor],
@@ -43,9 +44,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         is_for_backward: bool,  # return additional values if True
         need_backward_key_branch: Optional[bool] = False,
     ) -> Union[
-        tuple[Tensor, Tensor, Tensor, Tensor],  # is_for_backward False
+        tuple[Tensor, Tensor, Tensor, Optional[Tensor]],  # is_for_backward False
         tuple[
-            Tensor, Tensor, Tensor, Tensor, Tensor, Optional[Tensor]
+            Tensor, Tensor, Tensor, Optional[Tensor], Tensor, Optional[Tensor]
         ],  # is_for_backward True
     ]:
         """Forward pass computations that get repeated in the backward pass"""
@@ -60,9 +61,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         if not is_for_backward:
             del selected
 
-        [queries, keys, values] = [
-            split_heads(x, n_heads) for x in [query_tensor, keys, values]
-        ]
+        queries: Tensor = split_heads(query_tensor, n_heads)
+        keys: Tensor = split_heads(keys, n_heads)
+        values: Tensor = split_heads(values, n_heads)
 
         #### Forward step 4: RoPE encoding calculation
 
@@ -114,7 +115,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         key_rope_encoding: Optional[Tensor] = None,
         key_positions: Optional[Tensor] = None,
         rope_freqs: Optional[Tensor] = None,
-        scale_factor: float = None,  # scaling for attn, default 1/sqrt(d)
+        scale_factor: Optional[float] = None,  # scaling for attn, default 1/sqrt(d)
         dropout_p: float = 0.0,
         training: bool = True,
     ) -> Tensor:
@@ -300,37 +301,40 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             sparse_tensor_values,
             key_weight,
             value_weight,
-            key_bias,
-            value_bias,
+            key_bias,  # pyright: ignore[reportArgumentType]
+            value_bias,  # pyright: ignore[reportArgumentType]
             (
                 key_rope_encoding
                 if not (key_positions is not None and rope_freqs is not None)
                 else None
-            ),
-            key_positions,
-            rope_freqs,
+            ),  # pyright: ignore[reportArgumentType]
+            key_positions,  # pyright: ignore[reportArgumentType]
+            rope_freqs,  # pyright: ignore[reportArgumentType]
         )
         ctx.index_tensor = linear_index_tensor
         ctx.is_specified_mask = is_specified_mask
 
         #### Steps 3-6 get repeated by backward so step into a shared helper function
 
-        queries, keys, values, key_rope_encoding = (
-            GatherAndSubsetAttentionFunction._forward_shared(
-                query_tensor,
-                sparse_tensor_values,
-                linear_index_tensor,
-                is_specified_mask,
-                key_weight,
-                value_weight,
-                key_bias,
-                value_bias,
-                n_heads,
-                key_positions,
-                rope_freqs,
-                key_rope_encoding,
-                is_for_backward=False,
-            )
+        (
+            queries,
+            keys,
+            values,
+            key_rope_encoding,  # pyright: ignore[reportAssignmentType]
+        ) = GatherAndSubsetAttentionFunction._forward_shared(
+            query_tensor,
+            sparse_tensor_values,
+            linear_index_tensor,
+            is_specified_mask,
+            key_weight,
+            value_weight,
+            key_bias,
+            value_bias,
+            n_heads,
+            key_positions,
+            rope_freqs,
+            key_rope_encoding,
+            is_for_backward=False,
         )
 
         #### Step 7: Attention scores calculation
@@ -644,23 +648,28 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         #### Step 3: repeat the first few operations of the forward pass
 
-        queries, keys, values, key_rope_encoding, selected, keys_unrotated_copy = (
-            GatherAndSubsetAttentionFunction._forward_shared(
-                query_tensor,
-                sparse_tensor_values,
-                index_tensor,
-                is_specified_mask,
-                key_weight,
-                value_weight,
-                key_bias,
-                value_bias,
-                n_heads,
-                key_positions,
-                rope_freqs,
-                key_rope_encoding,
-                is_for_backward=True,
-                need_backward_key_branch=needed_intermediates["key_branch"],
-            )
+        (
+            queries,
+            keys,
+            values,
+            key_rope_encoding,
+            selected,
+            keys_unrotated_copy,  # pyright: ignore[reportAssignmentType]
+        ) = GatherAndSubsetAttentionFunction._forward_shared(
+            query_tensor,
+            sparse_tensor_values,
+            index_tensor,
+            is_specified_mask,
+            key_weight,
+            value_weight,
+            key_bias,
+            value_bias,
+            n_heads,
+            key_positions,
+            rope_freqs,
+            key_rope_encoding,
+            is_for_backward=True,
+            need_backward_key_branch=needed_intermediates["key_branch"],
         )
 
         grad_output = permute_for_attention(split_heads(grad_output, n_heads))
@@ -1031,7 +1040,7 @@ def _compute_grad_sparse_values(
     grad_selected = grad_selected.view(n_queries, n_keys_per_query, embed_dim)
 
     # Zero out grads for masked selecteds
-    grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1), 0)
+    grad_selected.masked_fill_(~is_specified_mask.unsqueeze(-1), 0.0)
 
     # Scatter grads back into the sparse values
     grad_sparse_values = torch.zeros_like(sparse_tensor_values)

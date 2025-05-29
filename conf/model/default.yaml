@@ -5,5 +5,5 @@ defaults:
   - denoising: default
   - _self_
 
-include_aux_outputs: false
+include_aux_outputs: true
 predict_box: false

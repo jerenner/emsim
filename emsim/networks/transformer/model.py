@@ -96,7 +96,24 @@ class EMTransformer(nn.Module):
             config.d_model, config.d_model, 2, config.predict_box
         )
         self.predict_box = config.predict_box
-        self.segmentation_head = PatchedSegmentationMapPredictor(config.d_model)
+        if config.decoder.layers_share_heads:
+            self.segmentation_head = PatchedSegmentationMapPredictor(
+                d_model=config.decoder.segmentation_head.hidden_dim,
+                n_heads=config.n_heads,
+                dim_feedforward=config.dim_feedforward,
+                n_transformer_layers=config.decoder.segmentation_head.n_layers,
+                dropout=config.dropout,
+                attn_proj_bias=config.attn_proj_bias,
+                activation_fn=config.decoder.segmentation_head.activation_fn,
+                norm_first=config.norm_first,
+                rope_share_heads=config.decoder.segmentation_head.rope.share_heads,
+                rope_spatial_base_theta=config.decoder.segmentation_head.rope.spatial_base_theta,
+                rope_level_base_theta=config.decoder.segmentation_head.rope.level_base_theta,
+                rope_freq_group_pattern=config.decoder.segmentation_head.rope.freq_group_pattern,
+                query_patch_diameter=config.decoder.segmentation_head.query_patch_diameter,
+            )
+        else:
+            self.segmentation_head = None
         self.std_head = StdDevHead(
             config.d_model,
             config.decoder.std_dev_head.hidden_dim,
@@ -166,7 +183,8 @@ class EMTransformer(nn.Module):
             layer.reset_parameters()
         self.object_query_embedding.reset_parameters()
         self.decoder.reset_parameters()
-        self.segmentation_head.reset_parameters()
+        if self.segmentation_head is not None:
+            self.segmentation_head.reset_parameters()
 
     def forward(
         self,
@@ -360,8 +378,8 @@ class EMTransformer(nn.Module):
             topk_scores,
             topk_indices,
             topk_spatial_indices,
-            backbone_features,  # backbone out
-            backbone_features_pos_encoded,  # salience filtering in
+            backbone_features,  # backbone output
+            backbone_features_pos_encoded,  # salience filtering input
         )
 
     def get_position_encoding(

@@ -36,7 +36,7 @@ class TransformerDecoderLayer(nn.Module):
         use_rope: bool = True,
         rope_config: Optional[RoPEConfig] = None,
         dropout: float = 0.1,
-        activation_fn: Union[str, nn.Module] = "gelu",
+        activation_fn: Union[str, type[nn.Module]] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
         predict_box: bool = False,
@@ -49,6 +49,8 @@ class TransformerDecoderLayer(nn.Module):
         self.use_neighborhood_attn = use_neighborhood_attn
         self.use_full_cross_attn = use_full_cross_attn
         self.use_rope = use_rope
+        self.dropout = dropout
+        self.attn_proj_bias = attn_proj_bias
         self.predict_box = predict_box
 
         if use_rope:
@@ -278,9 +280,25 @@ class EMTransformerDecoder(nn.Module):
                     for _ in range(config.n_layers)
                 ]
             )
+            layer = self.layers[0]
+            assert isinstance(layer, TransformerDecoderLayer)
             self.per_layer_segmentation_heads = nn.ModuleList(
                 [
-                    PatchedSegmentationMapPredictor(self.d_model)
+                    PatchedSegmentationMapPredictor(
+                        d_model=layer.d_model,
+                        n_heads=layer.n_heads,
+                        dim_feedforward=layer.dim_feedforward,
+                        n_transformer_layers=config.segmentation_head.n_layers,
+                        dropout=layer.dropout,
+                        attn_proj_bias=layer.attn_proj_bias,
+                        activation_fn=config.segmentation_head.activation_fn,
+                        norm_first=layer.ffn.norm_first,
+                        rope_share_heads=config.segmentation_head.rope.share_heads,
+                        rope_spatial_base_theta=config.segmentation_head.rope.spatial_base_theta,
+                        rope_level_base_theta=config.segmentation_head.rope.level_base_theta,
+                        rope_freq_group_pattern=config.segmentation_head.rope.freq_group_pattern,
+                        query_patch_diameter=config.segmentation_head.query_patch_diameter,
+                    )
                     for _ in range(config.n_layers)
                 ]
             )
@@ -333,10 +351,11 @@ class EMTransformerDecoder(nn.Module):
             new_reference_points = query_reference_points + query_delta_pos
 
             query_segmentation = segmentation_head(
-                stacked_feature_maps,
                 queries_normed,
                 query_batch_offsets,
                 new_reference_points,
+                stacked_feature_maps,
+                level_spatial_shapes,
             )
 
             layer_output_logits.append(query_logits)

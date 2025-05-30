@@ -62,6 +62,18 @@ class StdDevHeadConfig:
 
 
 @dataclass
+class SegmentationHeadConfig:
+    """Configuration for the segmentation head."""
+
+    hidden_dim: int = "${model.transformer.d_model}"  # type: ignore
+    n_layers: int = 2
+    activation_fn: str = "gelu"
+    query_patch_diameter: int = 7
+
+    rope: RoPEConfig = "${model.transformer.rope}"  # type: ignore
+
+
+@dataclass
 class TransformerDecoderConfig:
     """Configuration for the transformer decoder."""
 
@@ -81,6 +93,7 @@ class TransformerDecoderConfig:
     classification_head: ClassificationHeadConfig = field(default_factory=ClassificationHeadConfig)  # type: ignore
     position_head: PositionHeadConfig = field(default_factory=PositionHeadConfig)  # type: ignore
     std_dev_head: StdDevHeadConfig = field(default_factory=StdDevHeadConfig)  # type: ignore
+    segmentation_head: SegmentationHeadConfig = field(default_factory=SegmentationHeadConfig)  # type: ignore
 
 
 @dataclass

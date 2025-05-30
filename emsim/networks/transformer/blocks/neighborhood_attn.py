@@ -266,6 +266,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             == out_of_bounds_nhood_mask
         )
 
+        # out projection and residual
         x = self.out_proj(x)
         x = self.out_proj_drop(x)
 
@@ -306,7 +307,7 @@ def get_multilevel_neighborhoods(
             Default: [3, 5, 7, 9].
 
     Returns:
-        Tuple[Tensor, Tensor]: A tuple containing:
+        Tuple[Tensor, Tensor, Tensor]: A tuple containing:
             - multilevel_neighborhood_indices: Tensor of shape
                 [n_queries, sum(neighborhood_sizes^position_dim), position_dim]
                 containing the spatial indices of all neighborhood points for each

@@ -5,7 +5,7 @@ dropout: 0.1
 dim_feedforward: 1024
 activation_fn: "gelu"
 attn_proj_bias: false
-norm_first: false
+norm_first: true
 
 # to compute number of feature levels
 backbone_decoder_layers: ${model.backbone.decoder.layers}
@@ -66,6 +66,14 @@ decoder:
     activation_fn: "gelu"
     scaling_factor: 0.001
     eps: 1e-6
+
+  segmentation_head:
+    hidden_dim: ${model.transformer.d_model}
+    n_layers: 2
+    activation_fn: "gelu"
+    query_patch_diameter: 7
+    
+    rope: ${model.transformer.rope}
 
 rope:
   spatial_dimension: ${spatial_dimension}

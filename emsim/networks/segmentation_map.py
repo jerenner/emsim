@@ -1,9 +1,18 @@
+from typing import Union
+
 import torch
 from torch import Tensor, nn
 
+from emsim.networks.positional_encoding.rope import RoPEEncodingND, FreqGroupPattern
+from emsim.networks.transformer.blocks.neighborhood_attn import (
+    SparseNeighborhoodAttentionBlock,
+    get_multilevel_neighborhoods,
+)
+from emsim.networks.transformer.blocks import FFNBlock
 from emsim.utils.sparse_utils.batching import (
     batch_offsets_from_sparse_tensor_indices,
     split_batch_concatted_tensor,
+    batch_offsets_to_indices,
 )
 from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index, sparse_select
 
@@ -75,92 +84,198 @@ class SegmentationMapPredictor(nn.Module):
         ).coalesce()
 
 
-class PatchedSegmentationMapPredictor(SegmentationMapPredictor):
+class SegmentationMapLayer(nn.Module):
     def __init__(
-        self, d_model: int, mask_head_hidden_layers: int = 3, query_patch_diameter=7
+        self,
+        d_model: int,
+        n_heads: int,
+        dim_feedforward: int,
+        dropout: float,
+        attn_proj_bias: bool,
+        activation_fn: Union[str, type[nn.Module]],
+        norm_first: bool,
+        rope_share_heads: bool,
+        rope_spatial_base_theta: float,
+        rope_level_base_theta: float,
+        rope_freq_group_pattern: Union[str, FreqGroupPattern],
     ):
-        super().__init__(d_model, mask_head_hidden_layers)
-        self.query_patch_diameter = query_patch_diameter
+        super().__init__()
+        self.attn = SparseNeighborhoodAttentionBlock(
+            d_model,
+            n_heads,
+            n_levels=4,
+            dropout=dropout,
+            bias=attn_proj_bias,
+            norm_first=norm_first,
+            rope_spatial_base_theta=rope_spatial_base_theta,
+            rope_level_base_theta=rope_level_base_theta,
+            rope_share_heads=rope_share_heads,
+            rope_freq_group_pattern=rope_freq_group_pattern,
+        )
+        self.ffn = FFNBlock(
+            d_model, dim_feedforward, dropout, activation_fn, norm_first
+        )
 
     def forward(
         self,
-        stacked_feature_map: Tensor,
         queries: Tensor,
         query_batch_offsets: Tensor,
         query_positions: Tensor,
+        stacked_feature_map: Tensor,
+        level_spatial_shapes: Tensor,
     ) -> Tensor:
-        queries = self.mask_embed(queries)
-        # unbind over the level dimension
-        fullscale_feature_map = sparse_select(stacked_feature_map, 3, 3)
+        max_level_index = level_spatial_shapes.argmax(dim=0)
+        max_level_index = torch.unique(max_level_index)
+        assert len(max_level_index) == 1
+        query_level_indices = max_level_index.expand(query_positions.shape[0])
+        queries = self.attn(
+            queries,
+            query_positions,
+            query_batch_offsets,
+            stacked_feature_map,
+            level_spatial_shapes,
+            query_level_indices,
+        )
+        queries = self.ffn(queries)
+        return queries
+
+    def reset_parameters(self):
+        self.attn.reset_parameters()
+        self.ffn.reset_parameters()
+
+
+class PatchedSegmentationMapPredictor(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dim_feedforward: int,
+        n_transformer_layers: int = 2,
+        dropout: float = 0.1,
+        attn_proj_bias: bool = False,
+        activation_fn: Union[str, type[nn.Module]] = "gelu",
+        norm_first: bool = True,
+        rope_share_heads: bool = False,
+        rope_spatial_base_theta: float = 10.0,
+        rope_level_base_theta: float = 10.0,
+        rope_freq_group_pattern: Union[
+            str, FreqGroupPattern
+        ] = FreqGroupPattern.PARTITION,
+        query_patch_diameter: int = 7,
+    ):
+        super().__init__()
+        layers = []
+        for _ in range(n_transformer_layers):
+            layers.append(
+                SegmentationMapLayer(
+                    d_model,
+                    n_heads,
+                    dim_feedforward,
+                    dropout,
+                    attn_proj_bias,
+                    activation_fn,
+                    norm_first,
+                    rope_share_heads,
+                    rope_spatial_base_theta,
+                    rope_level_base_theta,
+                    rope_freq_group_pattern,
+                )
+            )
+        self.layers = nn.ModuleList(layers)
+        self.query_patch_diameter = query_patch_diameter
+        freq_group_pattern = torch.tensor([[True, True]])  # 1 freq group, no level dim
+        self.pos_encoding = RoPEEncodingND(
+            2,
+            d_model,
+            n_heads,
+            rope_share_heads,
+            freq_group_pattern=freq_group_pattern,
+            rope_base_theta=rope_spatial_base_theta,
+        )
+
+    def forward(
+        self,
+        queries: Tensor,
+        query_batch_offsets: Tensor,
+        query_positions: Tensor,
+        stacked_feature_map: Tensor,
+        level_spatial_shapes: Tensor,
+    ) -> Tensor:
+        # Run the queries through the transformer layers
+        for layer in self.layers:
+            queries = layer(
+                queries,
+                query_batch_offsets,
+                query_positions,
+                stacked_feature_map,
+                level_spatial_shapes,
+            )
+
+        max_level_index = level_spatial_shapes.argmax(dim=0)
+        max_level_index = torch.unique(max_level_index)
+        assert len(max_level_index) == 1
+        max_level_index = int(max_level_index.item())
+
+        # get the full-scale feature map level
+        fullscale_feature_map = sparse_select(stacked_feature_map, 3, max_level_index)
+        assert isinstance(fullscale_feature_map, Tensor)
         assert fullscale_feature_map.ndim == 4  # (batch, height, width, feature)
 
-        split_queries = split_batch_concatted_tensor(queries, query_batch_offsets)
-        split_positions = split_batch_concatted_tensor(
-            query_positions, query_batch_offsets
+        # Get the patch indices
+        if level_spatial_shapes.ndim == 3:
+            max_level_shape = level_spatial_shapes[0, max_level_index].view(1, 2)
+        else:
+            assert level_spatial_shapes.ndim == 2
+            max_level_shape = level_spatial_shapes[max_level_index].view(1, 2)
+        patch_indices, patch_oob, _ = get_multilevel_neighborhoods(
+            query_positions, max_level_shape, [self.query_patch_diameter]
         )
 
-        patch_map_indices = []
-        patch_map_values = []
-        for i, (im_queries, im_positions) in enumerate(
-            zip(split_queries, split_positions)
-        ):
-            H = fullscale_feature_map.shape[1]
-            W = fullscale_feature_map.shape[2]
-            HW = im_positions.new_tensor([H, W], dtype=torch.int)
-            im_query_indices = (im_positions.flip(-1) * HW).int()
-            axis = (
-                torch.arange(
-                    self.query_patch_diameter,
-                    device=im_query_indices.device,
-                    dtype=im_query_indices.dtype,
-                )
-                - self.query_patch_diameter // 2
-            )
-            index_grid = torch.stack(torch.meshgrid(axis, axis, indexing="ij"), -1)
-            patch_indices = im_query_indices.unsqueeze(1).unsqueeze(1) + index_grid
-            patch_indices = patch_indices.clamp_min(0).clamp_max(
-                HW.expand_as(patch_indices) - 1
-            )
-            patch_indices = torch.cat(
-                [
-                    patch_indices.new_tensor(i).expand(*patch_indices.shape[:-1], 1),
-                    patch_indices,
-                    torch.arange(
-                        patch_indices.shape[0],
-                        dtype=patch_indices.dtype,
-                        device=patch_indices.device,
-                    )
-                    .view(-1, 1, 1, 1)
-                    .expand(*patch_indices.shape[:-1], 1),
-                ],
-                -1,
-            )
-            patch_values = (
-                im_queries.unsqueeze(1)
-                .unsqueeze(1)
-                .expand(*patch_indices.shape[:-1], -1)
-            )
-            patch_map_indices.append(patch_indices)
-            patch_map_values.append(patch_values)
-
-        patch_map_indices = torch.cat(patch_map_indices)
-        patch_map_values = torch.cat(patch_map_values)
-
-        feature_map_values = batch_sparse_index(
-            fullscale_feature_map, patch_map_indices[..., :-1]
-        )[0]
-
-        patch_map_logits = torch.einsum(
-            "qhwf,qhwf->qhw", patch_map_values, feature_map_values
+        # Indices: [n_total_query x n_patch_pixels x (i, j)]
+        # -> [n_total_query x n_patch_pixels x (batch, i, j, query)]
+        indices = patch_indices.new_empty(
+            patch_indices.shape[:-1] + (patch_indices.shape[-1] + 2,)
         )
+        indices[..., 0] = batch_offsets_to_indices(query_batch_offsets).unsqueeze(-1)
+        for i in range(query_batch_offsets.size(0) - 1):
+            batch_start, batch_end = int(query_batch_offsets[i]), int(
+                query_batch_offsets[i + 1]
+            )
+            indices[batch_start:batch_end, :, -1] = torch.arange(
+                batch_end - batch_start, device=indices.device
+            ).unsqueeze(-1)
 
-        nonzero_logits = patch_map_logits.nonzero(as_tuple=True)
+        # Extract the patches
+        patch_embeddings, patch_is_specified_mask = batch_sparse_index(
+            fullscale_feature_map, indices[..., :-1]  # index (batch, i, j)
+        )
+        assert isinstance(patch_embeddings, Tensor)
+        assert torch.all(
+            (patch_oob & (~patch_is_specified_mask)) == patch_oob
+        )  # sanity check
+
+        # dot product each query vector with its patch's embeddings
+        # [n_total_query x embed_dim] @ [n_total_query x patch_pixels x embed_dim] -> [n_total_query x patch_pixels]
+        patch_segmentation_logits = torch.bmm(
+            queries.unsqueeze(1), patch_embeddings.transpose(-1, -2)
+        ).squeeze(1)
+
+        # now put the segmentation logits into a sparse tensor
+        nonzero_mask = patch_segmentation_logits != 0.0
+        nonzero_indices = indices[nonzero_mask].T
+
         patch_segmap = torch.sparse_coo_tensor(
-            patch_map_indices[nonzero_logits].T,
-            patch_map_logits[nonzero_logits],
-            (*fullscale_feature_map.shape[:-1], max(len(q) for q in split_queries)),
+            nonzero_indices,
+            patch_segmentation_logits[nonzero_mask],
+            size=fullscale_feature_map.shape[:-1]
+            + (int(nonzero_indices[-1].amax().item()),),
         ).coalesce()
+
         return patch_segmap
+
+    def reset_parameters(self):
+        for layer in self.layers:
+            layer.reset_parameters()
 
 
 def sparse_binary_segmentation_map(segmentation_map: Tensor):

@@ -50,7 +50,7 @@ class TransformerEncoderLayer(nn.Module):
         use_rope: bool = True,
         rope_config: Optional[RoPEConfig] = None,
         dropout: float = 0.1,
-        activation_fn: Union[str, nn.Module] = "gelu",
+        activation_fn: Union[str, type[nn.Module]] = "gelu",
         norm_first: bool = True,
         attn_proj_bias: bool = False,
         max_tokens_sa: int = 1000,

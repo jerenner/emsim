@@ -1,6 +1,6 @@
 import os
 from math import ceil, floor
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union, Sequence, cast
 import logging
 
 import numpy as np
@@ -70,12 +70,12 @@ _logger = logging.getLogger()
 
 def make_test_train_datasets(
     electron_hdf_file: str,
-    events_per_image_range: tuple[int],
+    events_per_image_range: Sequence[int],
     pixel_patch_size: int = 5,
     hybrid_sparse_tensors: bool = True,
     train_percentage: float = 0.95,
-    processor: Callable = None,
-    transform: Callable = None,
+    processor: Optional[Callable] = None,
+    transform: Optional[Callable] = None,
     noise_std: float = 1.0,
     shuffle: bool = True,
     shared_shuffle_seed: Optional[int] = None,
@@ -126,7 +126,8 @@ def make_test_train_datasets(
 
 def worker_init_fn(worker_id: int):
     worker_info = torch.utils.data.get_worker_info()
-    dataset: GeantElectronDataset = worker_info.dataset
+    assert worker_info is not None
+    dataset: GeantElectronDataset = cast(GeantElectronDataset, worker_info.dataset)
     dataset._set_noise_source_seed(worker_info.seed)
 
 
@@ -138,8 +139,8 @@ class GeantElectronDataset(IterableDataset):
         events_per_image_range: tuple[int, int],
         pixel_patch_size: int = 5,
         hybrid_sparse_tensors: bool = True,
-        processor: Callable = None,
-        transform: Callable = None,
+        processor: Optional[Callable] = None,
+        transform: Optional[Callable] = None,
         noise_std: float = 1.0,
         shuffle: bool = True,
         shared_shuffle_seed: Optional[int] = None,
@@ -450,7 +451,7 @@ def multiscale_electron_count_maps(
 def multiscale_peak_normalized_maps(
     stacked_sparse_arrays: sparse.SparseArray,
     downscaling_levels: list[int] = [1, 2, 4, 8, 16, 32, 64],
-) -> list[sparse.SparseArray]:
+) -> dict[str, sparse.SparseArray]:
     height, width, n_elecs = stacked_sparse_arrays.shape
     out = {}
     for ds in downscaling_levels:
@@ -475,7 +476,7 @@ def get_pixel_patches(
     image: np.ndarray,
     electrons: list[GeantElectron],
     patch_size: int,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray]:
     patches = []
     patch_coordinates = []
 

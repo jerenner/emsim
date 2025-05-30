@@ -107,7 +107,9 @@ class EnergyLossPixel(Pixel):
 
 @dataclass
 class PixelSet:
-    _pixels: List[Pixel] = field(default_factory=list)
+    _pixels: List[Pixel] | list[IonizationElectronPixel] | list[EnergyLossPixel] = (
+        field(default_factory=list)
+    )
 
     def __getitem__(self, item):
         return self._pixels[item]

@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Any, List, Union, Optional
+from typing import Any, List, Union, Optional, Sequence
 
 import sparse
 import torch
@@ -7,7 +7,7 @@ from torch import Tensor, nn
 
 
 def random_chunks(
-    x: List[Any],
+    x: Sequence[Any] | np.ndarray,
     min_size: int,
     max_size: int,
     rng: Optional[np.random.Generator] = None,

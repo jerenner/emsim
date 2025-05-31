@@ -8,6 +8,7 @@ from emsim.utils.sparse_utils.batching.batch_utils import (
     seq_lengths_to_batch_offsets,
     batch_offsets_to_seq_lengths,
     batch_offsets_to_indices,
+    seq_lengths_to_indices,
     deconcat_add_batch_dim,
     remove_batch_dim_and_concat,
     batch_dim_to_leading_index,
@@ -113,6 +114,37 @@ class TestBatchOffsetsToSeqLengths:
         assert len(result) == len(expected)
         assert isinstance(result, type(expected))
         assert all(result[i] == expected[i] for i in range(len(result)))
+
+
+@pytest.mark.cpu_and_cuda
+class TestSeqLengthsToIndices:
+    def test_basic_functionality(self, device):
+        """Test basic functionality of seq_lengths_to_indices."""
+        seq_lengths = torch.tensor([5, 4], device=device)
+        result = seq_lengths_to_indices(seq_lengths)
+        expected = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1], device=device)
+        assert torch.equal(result, expected)
+
+    def test_single_batch(self, device):
+        """Test with a single batch"""
+        seq_lengths = torch.tensor([3], device=device)
+        result = seq_lengths_to_indices(seq_lengths)
+        expected = torch.tensor([0, 0, 0], device=device)
+        assert torch.equal(result, expected)
+
+    def test_empty(self, device):
+        """Test with an empty tensor"""
+        seq_lengths = torch.empty([0], device=device, dtype=torch.long)
+        result = seq_lengths_to_indices(seq_lengths)
+        expected = torch.empty([0], device=device, dtype=torch.long)
+        assert torch.equal(result, expected)
+
+    def test_scalar(self, device):
+        """Test with a scalar value."""
+        seq_lengths = torch.tensor(4, device=device)
+        result = seq_lengths_to_indices(seq_lengths)
+        expected = torch.tensor([0, 0, 0, 0], device=device)
+        assert torch.equal(result, expected)
 
 
 @pytest.mark.cpu_and_cuda

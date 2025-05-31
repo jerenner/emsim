@@ -137,6 +137,26 @@ def seq_lengths_to_batch_offsets(
 
 
 @torch.jit.script
+def seq_lengths_to_indices(seq_lengths: Tensor) -> Tensor:
+    """Converts sequence lengths to batch indices,
+    e.g. [5, 4] -> [0, 0, 0, 0, 0, 1, 1, 1, 1]"""
+    assert not torch.is_floating_point(seq_lengths)
+    if seq_lengths.ndim == 0:
+        seq_lengths = seq_lengths.view(1)
+    assert seq_lengths.ndim == 1
+
+    n_seqs = seq_lengths.size(0)
+
+    if n_seqs == 0:  # empty case
+        return torch.empty([0], device=seq_lengths.device, dtype=seq_lengths.dtype)
+
+    values = torch.arange(n_seqs, device=seq_lengths.device)
+    out = torch.repeat_interleave(values, seq_lengths)
+
+    return out
+
+
+@torch.jit.script
 def batch_offsets_to_indices(
     batch_offsets: Union[Tensor, list[int]],
     total_seq_length: Optional[int] = None,
@@ -156,8 +176,7 @@ def batch_offsets_to_indices(
 
     seq_lengths = batch_offsets_to_seq_lengths(batch_offsets)
     assert isinstance(seq_lengths, Tensor)
-    values = torch.arange(batch_offsets.size(0) - 1, device=batch_offsets.device)
-    out = torch.repeat_interleave(values, seq_lengths)
+    out = seq_lengths_to_indices(seq_lengths)
     return out
 
 

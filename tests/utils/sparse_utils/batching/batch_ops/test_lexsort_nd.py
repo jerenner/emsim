@@ -32,7 +32,7 @@ _DTYPES = (
 
 @st.composite
 def lexsort_nd_inputs(
-    draw, dtypes: tuple[torch.dtype, ...] = _DTYPES
+    draw: st.DrawFn, dtypes: Sequence[torch.dtype] = _DTYPES
 ) -> dict[str, Any]:
     n_dims = draw(st.integers(2, 4))
     shape = draw(st.lists(st.integers(0, 5), min_size=n_dims, max_size=n_dims))

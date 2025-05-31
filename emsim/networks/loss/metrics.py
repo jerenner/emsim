@@ -13,7 +13,6 @@ from torchmetrics.classification import (
 )
 
 from emsim.config.criterion import CriterionConfig
-from emsim.utils.batching_utils import unstack_batch, unstack_model_output
 
 from .utils import (
     Mode,
@@ -21,6 +20,8 @@ from .utils import (
     prep_detection_inputs,
     recursive_reset,
     resolve_mode,
+    unstack_batch,
+    unstack_model_output,
 )
 
 

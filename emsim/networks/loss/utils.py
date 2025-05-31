@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Union
 
 import torch
@@ -7,6 +8,25 @@ from torchmetrics.classification import BinaryAveragePrecision
 
 from emsim.utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
 from emsim.utils.sparse_utils.shape_ops import sparse_resize
+
+
+class Mode(Enum):
+    TRAIN = "train"
+    EVAL = "eval"
+    DENOISING = "denoising"
+
+
+def resolve_mode(mode: Union[Mode, str]) -> Mode:
+    if isinstance(mode, Mode):
+        return mode
+    try:
+        return Mode(mode)
+    except ValueError:
+        try:
+            return Mode[mode.upper()]
+        except KeyError:
+            valid_modes = [m.value for m in Mode]
+            raise ValueError(f"Invalid mode '{mode}'. Valid mode: {valid_modes}")
 
 
 def sort_detections_by_score(
@@ -141,7 +161,7 @@ class PixelAP(BinaryAveragePrecision):
 
 
 @torch.jit.script
-def _sort_tensor(
+def sort_tensor(
     batch_concatted_tensor: Tensor, batch_offsets: Tensor, matched_indices: list[Tensor]
 ) -> Tensor:
     stacked_matched = torch.cat(
@@ -162,7 +182,7 @@ def _restack_sparse_segmaps(segmaps: list[Tensor], max_elecs: int):
 
 
 @torch.jit.script
-def _sort_predicted_true_maps(
+def sort_predicted_true_maps(
     predicted_segmentation_logits: Tensor,
     true_segmentation_map: Tensor,
     matched_indices: list[Tensor],
@@ -196,6 +216,7 @@ def _flatten_metrics(metric_dict):
         if isinstance(v, (nn.ModuleDict, MetricCollection)):
             out.update(_flatten_metrics(v))
         else:
+            assert isinstance(v, Metric)
             out[k] = v.compute()
     return out
 

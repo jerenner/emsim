@@ -14,19 +14,23 @@ matcher:
   cost_coef_box_l1: 1.0
   cost_coef_box_giou: 1.0
 
-loss_coef_class: 10.0
-loss_coef_mask_bce: 3.0
-loss_coef_mask_dice: 5.0
-loss_coef_incidence_nll: 0.1
-loss_coef_incidence_likelihood: 10.0
-loss_coef_incidence_huber: 100.0
-loss_coef_salience: 1.0
-loss_coef_box_l1: 1.0
-loss_coef_box_giou: 1.0
+loss_weights:
+  classification: 10.0
+  mask_bce: 3.0
+  mask_dice: 5.0
+  distance_nll: 0.1
+  distance_likelihood: 10.0
+  distance_huber: 100.0
+  salience: 1.0
+  box_l1: 1.0
+  box_giou: 1.0
 
 no_electron_weight: 1.0
 
 detach_likelihood_mean: false
+huber_delta: 1.0
+
+predict_box: ${model.predict_box}
 
 use_denoising_loss: ${model.denoising.use_denoising}
 denoising_loss_weight: ${model.denoising.denoising_loss_weight}

@@ -6,6 +6,7 @@ from scipy.optimize import linear_sum_assignment
 from torch import Tensor, nn
 from torchvision.ops.boxes import generalized_box_iou
 
+from emsim.config.criterion import MatcherConfig
 from emsim.utils.sparse_utils.shape_ops import (
     sparse_flatten_hw,
 )
@@ -14,26 +15,16 @@ _logger = logging.getLogger(__name__)
 
 
 class HungarianMatcher(nn.Module):
-    def __init__(
-        self,
-        cost_coef_class: float = 1.0,
-        cost_coef_mask: float = 1.0,
-        cost_coef_dice: float = 1.0,
-        cost_coef_dist: float = 1.0,
-        cost_coef_nll: float = 1.0,
-        cost_coef_likelihood: float = 1.0,
-        cost_coef_box_l1: float = 1.0,
-        cost_coef_box_giou: float = 1.0,
-    ):
+    def __init__(self, config: MatcherConfig):
         super().__init__()
-        self.cost_coef_class = cost_coef_class
-        self.cost_coef_mask = cost_coef_mask
-        self.cost_coef_dice = cost_coef_dice
-        self.cost_coef_dist = cost_coef_dist
-        self.cost_coef_nll = cost_coef_nll
-        self.cost_coef_likelihood = cost_coef_likelihood
-        self.cost_coef_box_l1 = cost_coef_box_l1
-        self.cost_coef_box_giou = cost_coef_box_giou
+        self.cost_coef_class = config.cost_coef_class
+        self.cost_coef_mask = config.cost_coef_mask
+        self.cost_coef_dice = config.cost_coef_dice
+        self.cost_coef_dist = config.cost_coef_dist
+        self.cost_coef_nll = config.cost_coef_nll
+        self.cost_coef_likelihood = config.cost_coef_likelihood
+        self.cost_coef_box_l1 = config.cost_coef_box_l1
+        self.cost_coef_box_giou = config.cost_coef_box_giou
 
     @torch.no_grad()
     def forward(
@@ -149,7 +140,7 @@ def get_class_cost(is_electron_logit: Tensor, batch_offsets: Tensor) -> list[Ten
         is_electron_logit, torch.ones_like(is_electron_logit), reduction="none"
     )
     batch_losses = torch.tensor_split(loss, batch_offsets[1:].cpu(), 0)
-    return batch_losses
+    return list(batch_losses)
 
 
 @torch.jit.script
@@ -250,7 +241,7 @@ def get_dice_cost(
     return out
 
 
-@torch.jit.ignore
+@torch.jit.ignore  # pyright: ignore[reportArgumentType]
 def batch_nll_distance_loss(
     predicted_positions: Tensor,
     predicted_std_dev_cholesky: Tensor,
@@ -260,7 +251,7 @@ def batch_nll_distance_loss(
     distn = torch.distributions.MultivariateNormal(
         predicted_positions.unsqueeze(-2) * image_size_xy,
         scale_tril=predicted_std_dev_cholesky.unsqueeze(-3),
-    )  # distribution not supported by script
+    )  # distribution not supported by torchscript
     nll = -distn.log_prob(true_positions * image_size_xy)
     return nll
 
@@ -296,7 +287,7 @@ def get_nll_distance_cost(
     ]
 
 
-@torch.jit.ignore
+@torch.jit.ignore  # pyright: ignore[reportArgumentType]
 def batch_likelihood_distance_loss(
     predicted_positions: Tensor,
     predicted_std_dev_cholesky: Tensor,
@@ -306,7 +297,7 @@ def batch_likelihood_distance_loss(
     distn = torch.distributions.MultivariateNormal(
         predicted_positions.unsqueeze(-2) * image_size_xy,
         scale_tril=predicted_std_dev_cholesky.unsqueeze(-3),
-    )  # distribution not supported by script
+    )  # distribution not supported by torchscript
     likelihood = distn.log_prob(true_positions * image_size_xy).exp()
     return 1 - likelihood
 

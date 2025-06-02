@@ -64,8 +64,8 @@ class MetricManager(nn.Module):
         losses = {}
         loss_names = [
             "classification",
-            "bce",
-            "dice",
+            "mask_bce",
+            "mask_dice",
             "distance_nll",
             "distance_likelihood",
             "distance_huber",
@@ -152,7 +152,7 @@ class MetricManager(nn.Module):
         target_dict: dict[str, Any],
     ):
         metrics = self.get_metrics(mode)["detection"]
-        assert isinstance(metrics, MetricCollection)
+        assert isinstance(metrics, nn.ModuleDict)
         start = time.time()
         predicted_dict_list = unstack_model_output(
             {k: v for k, v in predicted_dict.items() if isinstance(v, Tensor)}

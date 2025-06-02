@@ -20,7 +20,7 @@ class LossComponent(nn.Module):
         super().__init__()
         self.weight = weight
 
-    def weight_loss(self, loss_value: Tensor) -> Tensor:
+    def apply_weight(self, loss_value: Tensor) -> Tensor:
         return self.weight * loss_value
 
     def weighted_loss(self, *args, **kwargs) -> Tensor:
@@ -49,7 +49,7 @@ class ClassificationLoss(LossComponent):
         query_batch_offsets = predicted_dict["query_batch_offsets"]
 
         # Make label and weight tensors
-        labels = torch.zeros_like(pred_logits, dtype=torch.int)
+        labels = torch.zeros_like(pred_logits, dtype=torch.long)
         # assign label 1 to matched queries
         for batch, indices in enumerate(matched_indices):
             labels[indices + query_batch_offsets[batch]] = 1
@@ -182,6 +182,7 @@ class LossCalculator(nn.Module):
     _pattern = re.compile(r"loss_(\w+)")
 
     def __init__(self, config: CriterionConfig):
+        super().__init__()
         self.losses = nn.ModuleDict(
             {
                 "classification": ClassificationLoss(
@@ -263,6 +264,7 @@ class LossCalculator(nn.Module):
         )
         for loss_name in ["distance_nll", "distance_likelihood", "distance_huber"]:
             loss_dict[f"loss_{loss_name}"] = self.losses[loss_name](**position_data)
+        extras_dict["position_data"] = position_data
 
         # Box losses if applicable
         if "pred_boxes" in predicted_dict:
@@ -290,7 +292,7 @@ class LossCalculator(nn.Module):
             assert loss_match is not None
             loss_module = self.losses[loss_match.group(1)]
             assert isinstance(loss_module, LossComponent)
-            weighted_loss = loss_module.weighted_loss(loss)
+            weighted_loss = loss_module.apply_weight(loss)
             out_dict[loss_name] = weighted_loss
 
         return out_dict

@@ -46,6 +46,7 @@ def match_single_detection(
 ) -> Tensor:
     if len(gt_xys) == 0:
         return torch.tensor(-1, device=gt_xys.device)
+    gt_xys = gt_xys.to(predicted_xy)
     distances = torch.cdist(predicted_xy.view(1, 2), gt_xys)
     min_dist, match_index = distances.min(-1)
     if min_dist <= distance_threshold:
@@ -268,6 +269,6 @@ def unstack_model_output(output: dict[str, Tensor]) -> list[dict[str, Tensor]]:
     }
     split["pred_segmentation_logits"] = output["pred_segmentation_logits"].unbind()
     out: list[dict[str, Tensor]] = []
-    for i in range(len(output["query_batch_offsets"])):
+    for i in range(len(output["query_batch_offsets"]) - 1):
         out.append({k: v[i] for k, v in split.items()})
     return out

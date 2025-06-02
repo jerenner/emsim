@@ -21,9 +21,20 @@ def sparse_squeeze(tensor: Tensor, dim: int) -> Tensor:
 
     Returns:
         Tensor: Input tensor with specified sparse dim squeezed out, if applicable.
+
+    Notes:
+        - If the input tensor requires gradients, it must be coalesce()d before being
+            passed to this function. Tensors that do not require gradients may be
+            passed in un-coalesced form.
     """
     if not tensor.is_sparse:
         raise ValueError("Received non-sparse tensor.")
+
+    if tensor.requires_grad and not tensor.is_coalesced():
+        raise ValueError(
+            "Tensors that require gradients must be coalesced before being passed "
+            "to sparse_squeeze."
+        )
 
     ndim = tensor.ndim
     dim = dim if dim >= 0 else ndim + dim  # handle negative indexing
@@ -37,8 +48,12 @@ def sparse_squeeze(tensor: Tensor, dim: int) -> Tensor:
         return tensor  # unsqueezable
 
     sparse_dims = tensor.sparse_dim()
-    indices = tensor._indices()
-    values = tensor._values()
+    if tensor.requires_grad:
+        indices = tensor.indices()
+        values = tensor.values()
+    else:
+        indices = tensor._indices()
+        values = tensor._values()
 
     if dim < sparse_dims:  # Squeeze sparse dim
         new_indices = torch.cat((indices[:dim], indices[dim + 1 :]), 0)
@@ -73,8 +88,9 @@ def sparse_resize(tensor: Tensor, new_shape: list[int]) -> Tensor:
             "New shape must be at least as large as existing shape in every dim, but "
             f"got new shape {new_shape} and existing shape {tensor.shape}"
         )
+    tensor = tensor.coalesce()
     return torch.sparse_coo_tensor(
-        tensor._indices(), tensor._values(), new_shape, is_coalesced=tensor.is_coalesced()
+        tensor.indices(), tensor.values(), new_shape, is_coalesced=tensor.is_coalesced()
     ).coalesce()
 
 

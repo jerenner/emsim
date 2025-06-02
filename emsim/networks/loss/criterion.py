@@ -76,18 +76,12 @@ class EMCriterion(nn.Module):
                 predicted_dict["denoising_output"], target_dict, self.aux_loss_handler
             )
             loss_dict.update(dn_loss_dict)
-            self.metric_manager.update_detection_metrics(
-                Mode.DENOISING, dn_loss_dict, target_dict
-            )
 
         # Compute total loss
         loss_dict["loss"] = self._compute_total_loss(loss_dict)
 
         # Update metrics
         self.metric_manager.update_from_dict(Mode.TRAIN, loss_dict)
-        self.metric_manager.update_detection_metrics(
-            Mode.TRAIN, predicted_dict, target_dict
-        )
         self.metric_manager.update_classification_metrics(
             Mode.TRAIN, predicted_dict, extras_dict
         )
@@ -95,7 +89,26 @@ class EMCriterion(nn.Module):
             Mode.TRAIN, extras_dict["position_data"]
         )
 
+        # detection metrics are slow, so only calculate intermittently
+        # (default: right before logging)
+        if (
+            self.step_counter % self.config.detection_metric_interval == 0
+            and self.step_counter > 0
+        ):
+            self._update_detection_metrics(predicted_dict, target_dict)
+
+        self.step_counter += 1
+
         return loss_dict, {"matched_indices": matched_indices}
+
+    def _update_detection_metrics(self, predicted_dict, target_dict):
+        self.metric_manager.update_detection_metrics(
+            Mode.TRAIN, predicted_dict, target_dict
+        )
+        if self.denoising_handler is not None and "denoising_output" in predicted_dict:
+            self.metric_manager.update_detection_metrics(
+                Mode.DENOISING, predicted_dict["denoising_output"], target_dict
+            )
 
     def _compute_total_loss(self, loss_dict: dict[str, Tensor]) -> Tensor:
         loss_dict = self.loss_calculator.apply_loss_weights(loss_dict)

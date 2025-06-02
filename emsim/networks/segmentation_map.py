@@ -185,15 +185,6 @@ class PatchedSegmentationMapPredictor(nn.Module):
             )
         self.layers = nn.ModuleList(layers)
         self.query_patch_diameter = query_patch_diameter
-        freq_group_pattern = torch.tensor([[True, True]])  # 1 freq group, no level dim
-        self.pos_encoding = RoPEEncodingND(
-            2,
-            d_model,
-            n_heads,
-            rope_share_heads,
-            freq_group_pattern=freq_group_pattern,
-            rope_base_theta=rope_spatial_base_theta,
-        )
 
     def forward(
         self,

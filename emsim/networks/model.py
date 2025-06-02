@@ -1,4 +1,4 @@
-from typing import Optional, Union, cast
+from typing import Optional, Union, Any
 import logging
 
 from omegaconf import DictConfig, OmegaConf
@@ -149,7 +149,7 @@ class EMModel(nn.Module):
         output.update(matched_indices)
         return loss_dict, output
 
-    def prep_denoising_dict(self, denoising_out: dict[str, Tensor]):
+    def prep_denoising_dict(self, denoising_out: dict[str, Any]):
         dn_batch_mask_dict = denoising_out["dn_batch_mask_dict"]
         flattened_batch_offsets = (
             dn_batch_mask_dict["electron_batch_offsets"]

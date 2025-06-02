@@ -112,16 +112,17 @@ class EMTransformer(nn.Module):
                 rope_freq_group_pattern=config.decoder.segmentation_head.rope.freq_group_pattern,
                 query_patch_diameter=config.decoder.segmentation_head.query_patch_diameter,
             )
+            self.std_head = StdDevHead(
+                config.d_model,
+                config.decoder.std_dev_head.hidden_dim,
+                config.decoder.std_dev_head.n_layers,
+                activation_fn=config.decoder.std_dev_head.activation_fn,
+                scaling_factor=config.decoder.std_dev_head.scaling_factor,
+                eps=config.decoder.std_dev_head.eps,
+            )
         else:
             self.segmentation_head = None
-        self.std_head = StdDevHead(
-            config.d_model,
-            config.decoder.std_dev_head.hidden_dim,
-            config.decoder.std_dev_head.n_layers,
-            activation_fn=config.decoder.std_dev_head.activation_fn,
-            scaling_factor=config.decoder.std_dev_head.scaling_factor,
-            eps=config.decoder.std_dev_head.eps,
-        )
+            self.std_head = None
 
         self.salience_unpoolers = nn.ModuleList(
             [

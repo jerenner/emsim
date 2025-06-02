@@ -1,5 +1,5 @@
 import os
-from typing import Union
+from typing import Union, cast
 import hydra
 import yaml
 from hydra.utils import get_original_cwd, to_absolute_path
@@ -25,6 +25,7 @@ from emsim.networks import (
     EMModel,
     EMCriterion,
 )
+from emsim.networks.loss.utils import Mode
 from emsim.geant.dataset import (
     make_test_train_datasets,
     electron_collate_fn,
@@ -32,108 +33,125 @@ from emsim.geant.dataset import (
 )
 from emsim.geant.io import convert_electron_pixel_file_to_hdf5
 from emsim.preprocessing import NSigmaSparsifyTransform
-
+from emsim.config.app import AppConfig
+from emsim.config.registry import register_configs
 
 _logger = logging.getLogger(__name__)
 
 torch._dynamo.config.capture_scalar_outputs = True
-torch.set_float32_matmul_precision("high")
+# torch.set_float32_matmul_precision("high")
 
 
-@hydra.main(version_base=None, config_path="./configs", config_name="config")
+# register hydra configurations
+register_configs()
+
+
+@hydra.main(version_base=None, config_path="./conf", config_name="config")
 def main(cfg: DictConfig):
-    _logger.setLevel(cfg.log_level)
+    if not isinstance(cfg, AppConfig):
+        config: AppConfig = cast(AppConfig, OmegaConf.to_object(cfg))
+        assert isinstance(config, AppConfig)
+    else:
+        config = cfg
+    _logger.setLevel(config.training.log_level)
     _logger.info("Starting...")
     output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
-    if cfg.log_tensorboard:
+    if config.training.log_tensorboard:
         tb_logger = TensorBoardLogger(
             output_dir,
             name=(
-                cfg.tensorboard_name
-                if cfg.tensorboard_name is not None
+                config.training.tensorboard_name
+                if config.training.tensorboard_name is not None
                 else "lightning_logs"
             ),
         )
         tb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
-    if cfg.cpu_only:
+    if config.device == "cpu":
         fabric = Fabric(accelerator="cpu")
-    else:
+    elif config.device == "cuda":
         fabric = Fabric(
-            strategy=DDPStrategy(find_unused_parameters=cfg.ddp.find_unused_parameters),
+            strategy=DDPStrategy(
+                find_unused_parameters=config.ddp.find_unused_parameters
+            ),
             accelerator="gpu",
-            num_nodes=cfg.ddp.nodes,
-            devices=cfg.ddp.devices,
+            num_nodes=config.ddp.nodes,
+            devices=config.ddp.devices,
             loggers=(
                 [
                     tb_logger,
                     # CSVLogger(output_dir + "/csv_logs"),
                 ]
-                if cfg.log_tensorboard
+                if config.training.log_tensorboard
                 else None
             ),
         )
+    else:
+        raise ValueError(f"Unrecognized device {config.device}")
     if fabric.is_global_zero:
         _logger.info("Setting up...")
         _logger.info(print(yaml.dump(OmegaConf.to_container(cfg, resolve=True))))
         with open(os.path.join(output_dir, "config.yaml"), "w") as f:
             OmegaConf.save(cfg, f, True)
-    fabric.seed_everything(cfg.seed + fabric.global_rank)
+    fabric.seed_everything(config.seed + fabric.global_rank)
     fabric.launch()
-    model = EMModel.from_config(cfg)
-    if cfg.unet.convert_sync_batch_norm and fabric.world_size > 1:
+    model = EMModel.from_config(config.model)
+    if config.model.backbone.convert_sync_batch_norm and fabric.world_size > 1:
         model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
-    if cfg.compile:
+    if config.training.compile:
         if fabric.is_global_zero:
             _logger.info("torch.compile-ing model...")
         model = torch.compile(model, dynamic=True)
 
     electron_hdf_file = os.path.join(
-        cfg.dataset.directory, os.path.splitext(cfg.dataset.pixels_file)[0] + ".hdf5"
+        config.dataset.directory,
+        os.path.splitext(config.dataset.pixels_file)[0] + ".hdf5",
     )
     if not os.path.exists(electron_hdf_file):
         if fabric.is_global_zero:
-            pixels_file = os.path.join(cfg.dataset.directory, cfg.dataset.pixels_file)
+            pixels_file = os.path.join(
+                config.dataset.directory, config.dataset.pixels_file
+            )
             _logger.info(f"Converting {pixels_file} to {electron_hdf_file}...")
             convert_electron_pixel_file_to_hdf5(pixels_file, electron_hdf_file)
             _logger.info("Done converting.")
     fabric.barrier()
     train_dataset, eval_dataset = make_test_train_datasets(
         electron_hdf_file=electron_hdf_file,
-        events_per_image_range=cfg.dataset.events_per_image_range,
-        pixel_patch_size=cfg.dataset.pixel_patch_size,
+        events_per_image_range=config.dataset.events_per_image_range,
+        pixel_patch_size=config.dataset.pixel_patch_size,
         hybrid_sparse_tensors=False,
-        train_percentage=cfg.dataset.train_percentage,
-        noise_std=cfg.dataset.noise_std,
+        train_percentage=config.dataset.train_percentage,
+        noise_std=config.dataset.noise_std,
         transform=NSigmaSparsifyTransform(
-            cfg.dataset.n_sigma_sparsify,
-            cfg.dataset.pixel_patch_size,
-            max_pixels_to_keep=cfg.dataset.max_pixels_to_keep,
+            config.dataset.n_sigma_sparsify,
+            config.dataset.pixel_patch_size,
+            max_pixels_to_keep=config.dataset.max_pixels_to_keep,
         ),
-        shared_shuffle_seed=cfg.seed,
-        new_grid_size=cfg.dataset.new_grid_size,
+        shared_shuffle_seed=config.seed,
+        new_grid_size=config.dataset.new_grid_size,
     )
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
-        cfg.batch_size,
+        config.training.batch_size,
         collate_fn=electron_collate_fn,
         pin_memory=True,
-        num_workers=cfg.dataset.num_workers,
+        num_workers=config.dataset.num_workers,
         worker_init_fn=worker_init_fn,
     )
     eval_dataloader = torch.utils.data.DataLoader(
         eval_dataset,
-        cfg.batch_size,
+        config.training.batch_size,
         collate_fn=electron_collate_fn,
         pin_memory=True,
-        num_workers=cfg.dataset.num_workers,
+        num_workers=config.dataset.num_workers,
         worker_init_fn=worker_init_fn,
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.lr)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        int(cfg.num_steps * cfg.warmup_percentage),
-        cfg.num_steps,
+        int(config.training.num_steps * config.training.warmup_percentage),
+        config.training.num_steps,
     )
 
     ## prepare fabric
@@ -142,13 +160,13 @@ def main(cfg: DictConfig):
         train_dataloader, eval_dataloader
     )
 
-    if cfg.resume_file is not None:
-        start_iter = load(cfg.resume_file, model, optimizer, fabric)
+    if config.training.resume_file is not None:
+        start_iter = load(config.training.resume_file, model, optimizer, fabric)
     else:
         start_iter = 0
 
     train(
-        cfg,
+        config,
         fabric,
         model,
         optimizer,
@@ -161,7 +179,7 @@ def main(cfg: DictConfig):
 
 
 def train(
-    cfg: DictConfig,
+    config: AppConfig,
     fabric: Fabric,
     model,
     optimizer,
@@ -171,10 +189,10 @@ def train(
     save_dir,
     start_iter: int = 0,
 ):
-    if cfg.ddp.detect_anomaly:
+    if config.ddp.detect_anomaly:
         torch.autograd.set_detect_anomaly(True)
     ## main training loop
-    iter_timer = RunningMean(cfg.print_interval).to(fabric.device)
+    iter_timer = RunningMean(config.training.print_interval).to(fabric.device)
     model.train()
     iter_loader = iter(train_dataloader)
     if fabric.is_global_zero:
@@ -182,7 +200,7 @@ def train(
     epoch = 0
     criterion: EMCriterion = model.criterion
     training_start_time = time.time()
-    for i in range(start_iter, cfg.num_steps):
+    for i in range(start_iter, config.training.num_steps):
         t0 = time.time()
         try:
             batch = next(iter_loader)
@@ -198,8 +216,8 @@ def train(
         if not torch.isfinite(total_loss):
             raise ValueError(f"Got invalid loss: {total_loss} on step {i}")
         fabric.backward(total_loss)
-        fabric.clip_gradients(model, optimizer, cfg.max_grad_norm)
-        if cfg.ddp.find_unused_parameters:
+        fabric.clip_gradients(model, optimizer, config.training.max_grad_norm)
+        if config.ddp.find_unused_parameters:
             __debug_find_unused_parameters(model)
         optimizer.step()
         lr_scheduler.step()
@@ -207,12 +225,15 @@ def train(
 
         with torch.no_grad():
             log_dict = fabric.all_reduce(loss_dict, reduce_op="mean")
+        assert isinstance(log_dict, dict)
         log_dict["lr"] = lr_scheduler.get_last_lr()[0]
 
-        if i > 0 and i % cfg.print_interval == 0:
-            criterion.update_detection_metrics(criterion.train_metrics["detection"], model_output, batch)
-            metric_log_dict = criterion.get_train_logs()
-            log_str = criterion.make_log_str(metric_log_dict)
+        if i % config.training.print_interval == 0 and i > 0:
+            criterion.metric_manager.update_detection_metrics(
+                Mode.TRAIN, model_output, batch
+            )
+            metric_log_dict = criterion.metric_manager.get_logs("train")
+            log_str = criterion.metric_manager.make_log_str(metric_log_dict)
             elapsed_time = time.time() - training_start_time
             elapsed_time_str = _elapsed_time_str(elapsed_time)
             iter_time = iter_timer.compute()
@@ -224,17 +245,17 @@ def train(
             metric_log_dict["iter_time"] = iter_time
             log_dict.update(metric_log_dict)
 
-        log_dict = criterion.format_log_keys(log_dict)
+        log_dict = criterion.metric_manager.format_log_keys(log_dict)
         fabric.log_dict(log_dict, step=i)
 
-        if i > 0 and i % cfg.eval_steps == 0:
+        if i > 0 and i % config.training.eval_steps == 0:
             save(save_dir, f"step_{i}", model, optimizer, fabric, i)
             eval(epoch, i, t0, model, eval_dataloader, fabric)
             model.train()
 
         iter_timer.update(time.time() - t0)
         # MinkowskiEngine says to clear the cache periodically
-        if i > 0 and i % cfg.clear_cache_interval == 0:
+        if i > 0 and i % config.training.clear_cache_interval == 0:
             torch.cuda.empty_cache()
 
     save(save_dir, "final", model, optimizer, fabric, i)
@@ -259,8 +280,8 @@ def eval(
         output = model(batch)
         criterion.eval_batch(output, batch)
     metric_log_dict = criterion.get_eval_logs()
-    metric_log_dict = criterion.format_log_keys(metric_log_dict)
-    log_str = criterion.make_log_str(metric_log_dict)
+    metric_log_dict = criterion.metric_manager.format_log_keys(metric_log_dict)
+    log_str = criterion.metric_manager.make_log_str(metric_log_dict)
     elapsed_time = time.time() - start_time
     elapsed_time_str = _elapsed_time_str(elapsed_time)
     eval_time_str = _elapsed_time_str(time.time() - start_eval)

@@ -96,33 +96,8 @@ class EMTransformer(nn.Module):
             config.d_model, config.d_model, 2, config.predict_box
         )
         self.predict_box = config.predict_box
-        if config.decoder.layers_share_heads:
-            self.segmentation_head = PatchedSegmentationMapPredictor(
-                d_model=config.decoder.segmentation_head.hidden_dim,
-                n_heads=config.n_heads,
-                dim_feedforward=config.dim_feedforward,
-                n_transformer_layers=config.decoder.segmentation_head.n_layers,
-                dropout=config.dropout,
-                attn_proj_bias=config.attn_proj_bias,
-                activation_fn=config.decoder.segmentation_head.activation_fn,
-                norm_first=config.norm_first,
-                rope_share_heads=config.decoder.segmentation_head.rope.share_heads,
-                rope_spatial_base_theta=config.decoder.segmentation_head.rope.spatial_base_theta,
-                rope_level_base_theta=config.decoder.segmentation_head.rope.level_base_theta,
-                rope_freq_group_pattern=config.decoder.segmentation_head.rope.freq_group_pattern,
-                query_patch_diameter=config.decoder.segmentation_head.query_patch_diameter,
-            )
-            self.std_head = StdDevHead(
-                config.d_model,
-                config.decoder.std_dev_head.hidden_dim,
-                config.decoder.std_dev_head.n_layers,
-                activation_fn=config.decoder.std_dev_head.activation_fn,
-                scaling_factor=config.decoder.std_dev_head.scaling_factor,
-                eps=config.decoder.std_dev_head.eps,
-            )
-        else:
-            self.segmentation_head = None
-            self.std_head = None
+        self.segmentation_head = None
+        self.std_head = None
 
         self.salience_unpoolers = nn.ModuleList(
             [
@@ -165,8 +140,6 @@ class EMTransformer(nn.Module):
             config=config.decoder,
             class_head=self.classification_head,
             position_offset_head=self.query_pos_offset_head,
-            std_head=self.std_head,
-            segmentation_head=self.segmentation_head,
         )
         self.mask_main_queries_from_denoising = config.mask_main_queries_from_denoising
 

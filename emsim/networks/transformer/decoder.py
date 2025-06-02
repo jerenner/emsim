@@ -203,8 +203,6 @@ class EMTransformerDecoder(nn.Module):
         config: TransformerDecoderConfig,
         class_head: Optional[nn.Module] = None,
         position_offset_head: Optional[nn.Module] = None,
-        std_head: Optional[nn.Module] = None,
-        segmentation_head: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.layers = nn.ModuleList(
@@ -229,20 +227,16 @@ class EMTransformerDecoder(nn.Module):
             if (
                 class_head is None
                 or position_offset_head is None
-                or std_head is None
-                or segmentation_head is None
             ):
                 raise ValueError(
-                    "Expected `class_head`, `position_offset_head`, "
-                    "`std_head`, and `segmentation_head` to be specified when "
-                    "layers_share_heads is True; got "
-                    f"{class_head}, {position_offset_head}, {std_head}, "
-                    f"and {segmentation_head}"
+                    "Expected `class_head` and `position_offset_head` "
+                    "to be specified when layers_share_heads is True; got "
+                    f"{class_head} and {position_offset_head}"
                 )
             self.class_head = class_head
             self.position_offset_head = position_offset_head
-            self.std_head = std_head
-            self.segmentation_head = segmentation_head
+            self.std_head = self._make_std_head(config)
+            self.segmentation_head = self._make_segmentation_head(config)
             self.per_layer_class_heads = None
             self.per_layer_position_heads = None
             self.per_layer_std_heads = None
@@ -268,44 +262,45 @@ class EMTransformerDecoder(nn.Module):
                 ]
             )
             self.per_layer_std_heads = nn.ModuleList(
-                [
-                    StdDevHead(
-                        self.d_model,
-                        config.std_dev_head.hidden_dim,
-                        config.std_dev_head.n_layers,
-                        activation_fn=config.std_dev_head.activation_fn,
-                        scaling_factor=config.std_dev_head.scaling_factor,
-                        eps=config.std_dev_head.eps,
-                    )
-                    for _ in range(config.n_layers)
-                ]
+                [self._make_std_head(config) for _ in range(config.n_layers)]
             )
-            layer = self.layers[0]
-            assert isinstance(layer, TransformerDecoderLayer)
+
             self.per_layer_segmentation_heads = nn.ModuleList(
-                [
-                    PatchedSegmentationMapPredictor(
-                        d_model=layer.d_model,
-                        n_heads=layer.n_heads,
-                        dim_feedforward=layer.dim_feedforward,
-                        n_transformer_layers=config.segmentation_head.n_layers,
-                        dropout=layer.dropout,
-                        attn_proj_bias=layer.attn_proj_bias,
-                        activation_fn=config.segmentation_head.activation_fn,
-                        norm_first=layer.ffn.norm_first,
-                        rope_share_heads=config.segmentation_head.rope.share_heads,
-                        rope_spatial_base_theta=config.segmentation_head.rope.spatial_base_theta,
-                        rope_level_base_theta=config.segmentation_head.rope.level_base_theta,
-                        rope_freq_group_pattern=config.segmentation_head.rope.freq_group_pattern,
-                        query_patch_diameter=config.segmentation_head.query_patch_diameter,
-                    )
-                    for _ in range(config.n_layers)
-                ]
+                [self._make_segmentation_head(config) for _ in range(config.n_layers)]
             )
 
         self.norm = nn.LayerNorm(self.d_model)
 
         self.reset_parameters()
+
+    def _make_std_head(self, config: TransformerDecoderConfig) -> nn.Module:
+        return StdDevHead(
+            self.d_model,
+            config.std_dev_head.hidden_dim,
+            config.std_dev_head.n_layers,
+            activation_fn=config.std_dev_head.activation_fn,
+            scaling_factor=config.std_dev_head.scaling_factor,
+            eps=config.std_dev_head.eps,
+        )
+
+    def _make_segmentation_head(self, config: TransformerDecoderConfig) -> nn.Module:
+        layer = self.layers[0]
+        assert isinstance(layer, TransformerDecoderLayer)
+        return PatchedSegmentationMapPredictor(
+            d_model=layer.d_model,
+            n_heads=layer.n_heads,
+            dim_feedforward=layer.dim_feedforward,
+            n_transformer_layers=config.segmentation_head.n_layers,
+            dropout=layer.dropout,
+            attn_proj_bias=layer.attn_proj_bias,
+            activation_fn=config.segmentation_head.activation_fn,
+            norm_first=layer.ffn.norm_first,
+            rope_share_heads=config.segmentation_head.rope.share_heads,
+            rope_spatial_base_theta=config.segmentation_head.rope.spatial_base_theta,
+            rope_level_base_theta=config.segmentation_head.rope.level_base_theta,
+            rope_freq_group_pattern=config.segmentation_head.rope.freq_group_pattern,
+            query_patch_diameter=config.segmentation_head.query_patch_diameter,
+        )
 
     def forward(
         self,

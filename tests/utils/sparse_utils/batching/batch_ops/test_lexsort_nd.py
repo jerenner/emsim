@@ -124,20 +124,21 @@ def _lex_compare(row1: Tensor, row2: Tensor, descending: bool = False) -> bool:
 
 def is_lexsorted(tensor: Tensor, descending: bool = False) -> Tensor:
     """
-    Vectorized lexicographic sorting check for batches of 2D tensors.
+    Lexicographic sorting check for batches of 2D tensors.
 
     Args:
         tensor: 3D tensor of shape (batch_size, sort_dim, vector_dim)
         descending: Whether to check for descending lexsort
 
     Returns:
-        torch.Tensor: Boolean tensor of shape (batch_size,) indicating sorted status
+        Tensor: Boolean tensor of shape (batch_size,) indicating sorted status
     """
     if tensor.ndim == 2:
         tensor = tensor.unsqueeze(0)
     if tensor.ndim != 3:
         raise ValueError("Expected 2D or 3D tensor")
     batch_size, sort_len, vector_len = tensor.shape
+    device = tensor.device
 
     if sort_len <= 1 or vector_len <= 1 or tensor.numel() == 0:
         return torch.ones(batch_size, dtype=torch.bool, device=tensor.device)
@@ -147,9 +148,9 @@ def is_lexsorted(tensor: Tensor, descending: bool = False) -> Tensor:
     if n_rows <= 1:
         return tensor.new_ones(batch_size, dtype=torch.bool)
 
+    tensor = tensor.cpu()
     results = tensor.new_empty(batch_size, dtype=torch.bool)
 
-    tensor = tensor.cpu()
     for b in range(batch_size):
         batch_sorted = True
         for r in range(n_rows - 1):
@@ -161,7 +162,7 @@ def is_lexsorted(tensor: Tensor, descending: bool = False) -> Tensor:
 
         results[b] = batch_sorted
 
-    return results
+    return results.to(device)
 
 
 def lexsort_nd_numpy(
@@ -519,7 +520,7 @@ class TestProperties:
         max_examples=1000,
     )
     @given(inputs=lexsort_nd_inputs())
-    def test_hypothesis(self, inputs, device: str):
+    def test_hypothesis(self, inputs: dict[str, Any], device: str):
 
         is_bfloat = inputs["tensor_config"]["dtype"] == torch.bfloat16
         # cpu doesn't support bfloat
@@ -561,12 +562,12 @@ class TestProperties:
             dtypes=(torch.int64, torch.uint8, torch.int8, torch.int16, torch.int32)
         )
     )
-    def test_return_inverse_hypothesis(self, inputs, device: str):
+    def test_return_inverse_hypothesis(self, inputs: dict[str, Any], device: str):
         assume(math.prod(inputs["tensor_config"]["shape"]) > 0)
         assume(
             inputs["tensor_config"]["max_value"] - inputs["tensor_config"]["min_value"]
             > 1
-        )  # don't make it too easy
+        )  # don't make everything equal
         vector_dim = inputs["inputs"]["vector_dim"]
         sort_dim = inputs["inputs"]["sort_dim"]
         descending = inputs["inputs"]["descending"]

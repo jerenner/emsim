@@ -13,6 +13,8 @@ from emsim.utils.sparse_utils.batching import (
     batch_offsets_from_sparse_tensor_indices,
     split_batch_concatted_tensor,
     batch_offsets_to_indices,
+    batch_offsets_to_seq_lengths,
+    seq_lengths_to_indices,
 )
 from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index, sparse_select
 
@@ -213,7 +215,7 @@ class PatchedSegmentationMapPredictor(nn.Module):
 
         max_level_index = level_spatial_shapes.argmax(dim=0)
         max_level_index = torch.unique(max_level_index)
-        assert len(max_level_index) == 1
+        assert len(max_level_index) == 1  # same level for all batches
         max_level_index = int(max_level_index.item())
 
         # get the full-scale feature map level
@@ -236,7 +238,8 @@ class PatchedSegmentationMapPredictor(nn.Module):
         indices = patch_indices.new_empty(
             patch_indices.shape[:-1] + (patch_indices.shape[-1] + 2,)
         )
-        indices[..., 0] = batch_offsets_to_indices(query_batch_offsets).unsqueeze(-1)
+        query_seq_lengths: Tensor = batch_offsets_to_seq_lengths(query_batch_offsets)
+        indices[..., 0] = seq_lengths_to_indices(query_seq_lengths).unsqueeze(-1)
         for i in range(query_batch_offsets.size(0) - 1):
             batch_start, batch_end = int(query_batch_offsets[i]), int(
                 query_batch_offsets[i + 1]
@@ -264,11 +267,12 @@ class PatchedSegmentationMapPredictor(nn.Module):
         nonzero_mask = patch_segmentation_logits != 0.0
         nonzero_indices = indices[nonzero_mask].T
 
+        max_query_index = int(query_seq_lengths.amax().item())
+
         patch_segmap = torch.sparse_coo_tensor(
             nonzero_indices,
             patch_segmentation_logits[nonzero_mask],
-            size=fullscale_feature_map.shape[:-1]
-            + (int(nonzero_indices[-1].amax().item()),),
+            size=fullscale_feature_map.shape[:-1] + (max_query_index,),
         ).coalesce()
 
         return patch_segmap

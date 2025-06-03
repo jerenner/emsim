@@ -150,15 +150,24 @@ class TestSparseSelect:
 
         # Test with non-sparse tensor
         dense_tensor = sparse_tensor.to_dense()
-        with pytest.raises((ValueError, torch.jit.Error), match="not sparse"):
+        with pytest.raises(
+            (ValueError, torch.jit.Error),  # pyright: ignore[reportArgumentType]
+            match="not sparse",
+        ):
             sparse_select(dense_tensor, 0, 0)
 
         # Test with invalid axis
-        with pytest.raises((ValueError, torch.jit.Error), match="out of bounds"):
+        with pytest.raises(
+            (ValueError, torch.jit.Error),  # pyright: ignore[reportArgumentType]
+            match="out of bounds",
+        ):
             sparse_select(sparse_tensor, 3, 0)
 
         # Test with invalid index
-        with pytest.raises((ValueError, torch.jit.Error), match="out of bounds"):
+        with pytest.raises(
+            (ValueError, torch.jit.Error),  # pyright: ignore[reportArgumentType]
+            match="out of bounds",
+        ):
             sparse_select(sparse_tensor, 0, 5)
 
     def test_gradient_flow(self, simple_sparse_tensor: Tensor, device: str) -> None:
@@ -174,6 +183,7 @@ class TestSparseSelect:
 
         # Check gradients - only the entry at (1,1) should have gradient 1.0
         expected_grad = torch.tensor([0.0, 0.0, 1.0, 0.0], device=device)
+        assert v.grad is not None
         assert torch.allclose(v.grad, expected_grad)
 
     def test_native_sparse_indexing_does_not_support_gradients(
@@ -217,6 +227,7 @@ class TestSparseSelect:
 
         # Check our function supports gradients correctly
         expected_grad = torch.tensor([0.0, 1.0, 0.0], device=device)
+        assert v_new.grad is not None
         assert torch.allclose(v_new.grad, expected_grad)
 
     def test_sparse_select_with_mlp(
@@ -341,7 +352,6 @@ class TestBatchSparseIndex:
         # Get selected values and specified mask
         values, mask = batch_sparse_index(sparse_tensor, index_tensor)
 
-        # Expected mask: [True, False, True, False]
         # Expected values: wherever mask is True, should have the right value from sparse_tensor
         expected_mask = torch.tensor([True, False, True, False], device=device)
         assert torch.all(mask == expected_mask)
@@ -353,6 +363,21 @@ class TestBatchSparseIndex:
         # For unspecified positions, should have zeros
         assert values[1] == 0.0
         assert values[3] == 0.0
+
+    def test_out_of_bounds_indices(
+        self, simple_sparse_tensor: Tensor, device: str
+    ) -> None:
+        """Test batch_sparse_index with indices outside the tensor dimensions"""
+        sparse_tensor = simple_sparse_tensor
+
+        index_tensor = torch.tensor([[0, 0], [0, 3], [-1, 0]], device=device)
+
+        values, mask = batch_sparse_index(sparse_tensor, index_tensor)
+
+        # Expected mask: [True, False, False]
+        expected_mask = torch.tensor([True, False, False], device=device)
+        assert torch.equal(mask, expected_mask)
+        assert values[0] == 1.0
 
     def test_check_all_specified(
         self, simple_sparse_tensor: Tensor, device: str
@@ -371,7 +396,7 @@ class TestBatchSparseIndex:
         # Including unspecified indices should raise error
         index_tensor = torch.tensor([[0, 0], [0, 2]], device=device)
         with pytest.raises(
-            (ValueError, torch.jit.Error),
+            (ValueError, torch.jit.Error),  # pyright: ignore[reportArgumentType]
             match="not all gathered values were specified",
         ):
             batch_sparse_index(sparse_tensor, index_tensor, check_all_specified=True)
@@ -548,6 +573,7 @@ class TestBatchSparseIndex:
 
         # Check gradients - entries corresponding to (0,0) and (1,1) should have gradient 1.0
         expected_grad = torch.tensor([1.0, 0.0, 1.0, 0.0], device=device)
+        assert v.grad is not None
         assert torch.allclose(v.grad, expected_grad)
 
     def test_batched_multi_dense_gradient_flow(self, device: str) -> None:
@@ -768,6 +794,8 @@ class TestBatchSparseIndex:
         loss_sparse.backward()
 
         # Check the sparse and dense tensors have same gradients
+        assert dense_tensor.grad is not None
+        assert v.grad is not None
         dense_grads = dense_tensor.grad[index_tensor.unbind(-1)]
         assert torch.equal(v.grad[0], dense_grads[0])
         assert torch.equal(v.grad[1], dense_grads[1])
@@ -915,14 +943,16 @@ class TestUnionSparseIndices:
 
         # Test with one dense tensor
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="Expected two sparse tensors"
+            (ValueError, torch.jit.Error),  # pyright: ignore[reportArgumentType]
+            match="Expected two sparse tensors",
         ):
             union_sparse_indices(sparse, dense)
 
         # Test with tensors of different shapes
         sparse2 = torch.sparse_coo_tensor(i, v, (2, 3)).coalesce()
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="Expected tensors to have same shapes"
+            (ValueError, torch.jit.Error),  # pyright: ignore[reportArgumentType]
+            match="Expected tensors to have same shapes",
         ):
             union_sparse_indices(sparse, sparse2)
 
@@ -933,7 +963,8 @@ class TestUnionSparseIndices:
         sparse3 = torch.sparse_coo_tensor(i3, v3, (2, 2)).coalesce()
 
         with pytest.raises(
-            (ValueError, torch.jit.Error), match="equal numbers of sparse dims"
+            (ValueError, torch.jit.Error),  # pyright: ignore[reportArgumentType]
+            match="equal numbers of sparse dims",
         ):
             union_sparse_indices(sparse, sparse3)
 
@@ -956,5 +987,7 @@ class TestUnionSparseIndices:
         loss.backward()
 
         # Check that gradients flowed back correctly
+        assert v1.grad is not None
+        assert v2.grad is not None
         assert torch.allclose(v1.grad, torch.tensor([1.0, 1.0], device=device))
         assert torch.allclose(v2.grad, torch.tensor([1.0, 1.0], device=device))

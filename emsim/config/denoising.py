@@ -1,3 +1,4 @@
+# pyright: reportAssignmentType=false
 from dataclasses import dataclass
 
 

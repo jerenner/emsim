@@ -1,0 +1,8 @@
+seed: 1234
+device: "cuda"
+
+ddp:
+  nodes: 1
+  devices: 1
+  find_unused_parameters: ${debug}
+  detect_anomaly: ${debug}

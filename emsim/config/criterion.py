@@ -1,3 +1,4 @@
+# pyright: reportAssignmentType=false
 from dataclasses import dataclass, field
 
 
@@ -30,7 +31,7 @@ class AuxLossConfig:
     use_aux_loss: bool = True
     use_final_matches: bool = False
     aux_loss_weight: float = 1.0
-    transformer_decoder_layers: int = "${model.transformer.decoder.n_layers}"  # type: ignore
+    transformer_decoder_layers: int = "${model.transformer.decoder.n_layers}"
     n_aux_losses: int = field(init=False)
 
     def __post_init__(self):
@@ -65,20 +66,20 @@ class CriterionConfig:
 
     no_electron_weight: float = 1.0
 
-    predict_box: bool = "${model.predict_box}"  # type: ignore
+    predict_box: bool = "${model.predict_box}"
 
     detach_likelihood_mean: bool = False
 
     detection_metric_distance_thresholds: list[float] = field(
         default_factory=lambda: [0.5, 1.0, 5.0]
     )
-    detection_metric_interval: int = "${training.print_interval}"  # type: ignore
+    detection_metric_interval: int = "${training.print_interval}"
 
     # inherited denoising params
-    use_denoising_loss: bool = "${model.denoising.use_denoising}"  # type: ignore
-    denoising_loss_weight: float = "${model.denoising.denoising_loss_weight}"  # type: ignore
+    use_denoising_loss: bool = "${model.denoising.use_denoising}"
+    denoising_loss_weight: float = "${model.denoising.denoising_loss_weight}"
 
     # Nested configurations
     salience: SalienceConfig = field(default_factory=SalienceConfig)
     matcher: MatcherConfig = field(default_factory=MatcherConfig)
-    aux_loss: AuxLossConfig = field(default_factory=AuxLossConfig)
+    aux_loss: AuxLossConfig = field(default_factory=lambda: AuxLossConfig())

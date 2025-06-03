@@ -5,10 +5,10 @@ aux_loss:
   transformer_decoder_layers: ${model.transformer.decoder.n_layers}
 
 matcher:
-  cost_coef_class: 1.0
+  cost_coef_class: 10.0
   cost_coef_mask: 3.0
   cost_coef_dice: 5.0
-  cost_coef_dist: 1.0
+  cost_coef_dist: 10.0
   cost_coef_nll: 0.0
   cost_coef_likelihood: 0.0
   cost_coef_box_l1: 1.0
@@ -20,7 +20,7 @@ loss_weights:
   mask_dice: 5.0
   distance_nll: 0.1
   distance_likelihood: 10.0
-  distance_huber: 100.0
+  distance_huber: 1.0
   salience: 1.0
   box_l1: 1.0
   box_giou: 1.0

@@ -1,3 +1,4 @@
+# pyright: reportAssignmentType=false
 from dataclasses import dataclass, field
 
 @dataclass
@@ -53,8 +54,8 @@ class BackboneConfig:
     stem_kernel_size: int = 7
     bias: bool = True
 
-    encoder: BackboneEncoderConfig = field(default_factory=BackboneEncoderConfig)
-    decoder: BackboneDecoderConfig = field(default_factory=BackboneDecoderConfig)
+    encoder: BackboneEncoderConfig = field(default_factory=lambda: BackboneEncoderConfig())
+    decoder: BackboneDecoderConfig = field(default_factory=lambda: BackboneDecoderConfig())
 
     act_layer: str = "relu"
     norm_layer: str = "batchnorm1d"

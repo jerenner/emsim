@@ -200,7 +200,7 @@ class EMModel(nn.Module):
         self.transformer.reset_parameters()
 
     @classmethod
-    def from_config(cls, cfg: DictConfig):
+    def from_config(cls, cfg: Union[DictConfig, EMModelConfig]):
         config: Union[DictConfig, EMModelConfig]
         if not isinstance(cfg, EMModelConfig):
             config = OmegaConf.structured(cfg)

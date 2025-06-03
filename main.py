@@ -15,8 +15,9 @@ import MinkowskiEngine as ME
 
 import lightning as L
 from lightning.fabric import Fabric
-from lightning.fabric.strategies import DDPStrategy
-from lightning.fabric.loggers import TensorBoardLogger, CSVLogger
+from lightning.fabric.strategies.ddp import DDPStrategy
+from lightning.fabric.loggers.tensorboard import TensorBoardLogger
+from lightning.fabric.loggers.csv_logs import CSVLogger
 from torchmetrics.aggregation import RunningMean
 
 from transformers import get_cosine_schedule_with_warmup
@@ -33,8 +34,8 @@ from emsim.geant.dataset import (
 )
 from emsim.geant.io import convert_electron_pixel_file_to_hdf5
 from emsim.preprocessing import NSigmaSparsifyTransform
-from emsim.config.app import AppConfig
-from emsim.config.registry import register_configs
+from emsim.config.system import SystemConfig
+from emsim.config.registry import register_configs, Config
 
 _logger = logging.getLogger(__name__)
 
@@ -48,9 +49,9 @@ register_configs()
 
 @hydra.main(version_base=None, config_path="./conf", config_name="config")
 def main(cfg: DictConfig):
-    if not isinstance(cfg, AppConfig):
-        config: AppConfig = cast(AppConfig, OmegaConf.to_object(cfg))
-        assert isinstance(config, AppConfig)
+    if not isinstance(cfg, Config):
+        config: Config = cast(Config, OmegaConf.to_object(cfg))
+        assert isinstance(config, Config)
     else:
         config = cfg
     _logger.setLevel(config.training.log_level)
@@ -66,16 +67,16 @@ def main(cfg: DictConfig):
             ),
         )
         tb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
-    if config.device == "cpu":
+    if config.system.device == "cpu":
         fabric = Fabric(accelerator="cpu")
-    elif config.device == "cuda":
+    elif config.system.device == "cuda":
         fabric = Fabric(
             strategy=DDPStrategy(
-                find_unused_parameters=config.ddp.find_unused_parameters
+                find_unused_parameters=config.system.ddp.find_unused_parameters
             ),
             accelerator="gpu",
-            num_nodes=config.ddp.nodes,
-            devices=config.ddp.devices,
+            num_nodes=config.system.ddp.nodes,
+            devices=config.system.ddp.devices,
             loggers=(
                 [
                     tb_logger,
@@ -86,13 +87,13 @@ def main(cfg: DictConfig):
             ),
         )
     else:
-        raise ValueError(f"Unrecognized device {config.device}")
+        raise ValueError(f"Unrecognized device {config.system.device}")
     if fabric.is_global_zero:
         _logger.info("Setting up...")
         _logger.info(print(yaml.dump(OmegaConf.to_container(cfg, resolve=True))))
         with open(os.path.join(output_dir, "config.yaml"), "w") as f:
             OmegaConf.save(cfg, f, True)
-    fabric.seed_everything(config.seed + fabric.global_rank)
+    fabric.seed_everything(config.system.seed + fabric.global_rank)
     fabric.launch()
     model = EMModel.from_config(config.model)
     if config.model.backbone.convert_sync_batch_norm and fabric.world_size > 1:
@@ -127,9 +128,11 @@ def main(cfg: DictConfig):
             config.dataset.pixel_patch_size,
             max_pixels_to_keep=config.dataset.max_pixels_to_keep,
         ),
-        shared_shuffle_seed=config.seed,
+        shared_shuffle_seed=config.system.seed,
         new_grid_size=config.dataset.new_grid_size,
     )
+    assert train_dataset is not None
+    assert eval_dataset is not None
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         config.training.batch_size,
@@ -155,6 +158,7 @@ def main(cfg: DictConfig):
     )
 
     ## prepare fabric
+    assert isinstance(model, nn.Module)
     model, optimizer = fabric.setup(model, optimizer)
     train_dataloader, eval_dataloader = fabric.setup_dataloaders(
         train_dataloader, eval_dataloader
@@ -179,7 +183,7 @@ def main(cfg: DictConfig):
 
 
 def train(
-    config: AppConfig,
+    config: Config,
     fabric: Fabric,
     model,
     optimizer,
@@ -189,7 +193,7 @@ def train(
     save_dir,
     start_iter: int = 0,
 ):
-    if config.ddp.detect_anomaly:
+    if config.system.ddp.detect_anomaly:
         torch.autograd.set_detect_anomaly(True)
     ## main training loop
     iter_timer = RunningMean(config.training.print_interval).to(fabric.device)
@@ -217,7 +221,7 @@ def train(
             raise ValueError(f"Got invalid loss: {total_loss} on step {i}")
         fabric.backward(total_loss)
         fabric.clip_gradients(model, optimizer, config.training.max_grad_norm)
-        if config.ddp.find_unused_parameters:
+        if config.system.ddp.find_unused_parameters:
             __debug_find_unused_parameters(model)
         optimizer.step()
         lr_scheduler.step()

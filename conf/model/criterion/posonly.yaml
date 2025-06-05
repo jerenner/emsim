@@ -1,0 +1,20 @@
+matcher:
+  cost_coef_class: 1.0
+  cost_coef_mask: 0.0
+  cost_coef_dice: 0.0
+  cost_coef_dist: 1.0
+  cost_coef_nll: 0.0
+  cost_coef_likelihood: 0.0
+  cost_coef_box_l1: 1.0
+  cost_coef_box_giou: 1.0
+
+loss_weights:
+  classification: 1.0
+  mask_bce: 0.0
+  mask_dice: 0.0
+  distance_nll: 0.0
+  distance_likelihood:  0.0
+  distance_huber: 1.0
+  salience: 1.0
+  box_l1: 0.0
+  box_giou: 0.0

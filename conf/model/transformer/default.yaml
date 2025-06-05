@@ -14,7 +14,7 @@ backbone_decoder_layers: ${model.backbone.decoder.layers}
 n_deformable_points: 4
 
 # Per-level neighborhood sizes for NeighborhoodAttention
-neighborhood_sizes: [3, 5, 7 ,9]
+neighborhood_sizes: [3, 5, 7, 9]
 
 # Salience filtering parameters
 level_filter_ratio: [0.25, 0.5, 1.0, 1.0]
@@ -61,6 +61,7 @@ decoder:
     activation_fn: "gelu"
 
   std_dev_head:
+    in_dim: ${model.transformer.d_model}  # Inherited value
     hidden_dim: ${model.transformer.d_model}
     n_layers: 2
     activation_fn: "gelu"
@@ -68,7 +69,14 @@ decoder:
     eps: 1e-6
 
   segmentation_head:
-    hidden_dim: ${model.transformer.d_model}
+    # Inherited values
+    d_model: ${model.transformer.d_model}
+    n_heads: ${model.transformer.n_heads}
+    dim_feedforward: ${model.transformer.dim_feedforward}
+    dropout: ${model.transformer.dropout}
+    attn_proj_bias: ${model.transformer.attn_proj_bias}
+    norm_first: ${model.transformer.norm_first}
+
     n_layers: 2
     activation_fn: "gelu"
     query_patch_diameter: 7

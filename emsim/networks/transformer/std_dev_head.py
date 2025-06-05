@@ -1,10 +1,11 @@
 from typing import Union
+from typing_extensions import Self
 
 import torch
 from torch import nn
 
 from emsim.utils.misc_utils import get_layer
-
+from emsim.config.transformer import StdDevHeadConfig
 
 class StdDevHead(nn.Module):
     def __init__(
@@ -46,3 +47,14 @@ class StdDevHead(nn.Module):
         for layer in self.layers:
             if hasattr(layer, "reset_parameters"):
                 layer.reset_parameters()
+
+    @classmethod
+    def from_config(cls, config: StdDevHeadConfig) -> Self:
+        return cls(
+            in_dim=config.in_dim,
+            hidden_dim=config.hidden_dim,
+            n_layers=config.n_layers,
+            activation_fn=config.activation_fn,
+            scaling_factor=config.scaling_factor,
+            eps=config.eps
+        )

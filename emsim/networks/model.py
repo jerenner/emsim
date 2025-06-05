@@ -61,13 +61,9 @@ class EMModel(nn.Module):
             segmentation_logits,
             query_batch_offsets,
             denoising_out,
-            nms_encoder_logits,
-            nms_encoder_positions,
-            nms_topk_position_offsets,
-            nms_proposal_normalized_xy,
+            nms_encoder_output,
             score_dict,
             encoder_out,
-            encoder_out_logits,
             topk_scores,
             topk_indices,
             topk_bijl_indices,
@@ -92,17 +88,11 @@ class EMModel(nn.Module):
         }
 
         # output["output_queries"] = output_queries[-1]
-        output["nms_enc_outputs"] = {
-            "pred_logits": nms_encoder_logits,
-            "pred_positions": nms_encoder_positions,
-            "pred_position_offsets": nms_topk_position_offsets,
-            "token_normalized_xy": nms_proposal_normalized_xy,
-        }
+        output["nms_enc_outputs"] = nms_encoder_output
         output["score_dict"] = score_dict
         output["backbone_features"] = backbone_features
         output["backbone_features_pos_encoded"] = backbone_features_pos_encoded
-        output["encoder_out"] = encoder_out
-        output["encoder_out_logits"] = encoder_out_logits
+        output["encoder_out"] = nms_encoder_output
         output["topk"] = {
             "topk_scores": topk_scores,
             "topk_indices": topk_indices,

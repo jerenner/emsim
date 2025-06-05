@@ -1,9 +1,11 @@
 from typing import Union
+from typing_extensions import Self
 
 import torch
 from torch import Tensor, nn
 
-from emsim.networks.positional_encoding.rope import RoPEEncodingND, FreqGroupPattern
+from emsim.config.transformer import SegmentationHeadConfig
+from emsim.networks.positional_encoding.rope import FreqGroupPattern
 from emsim.networks.transformer.blocks.neighborhood_attn import (
     SparseNeighborhoodAttentionBlock,
     get_multilevel_neighborhoods,
@@ -209,10 +211,19 @@ class PatchedSegmentationMapPredictor(nn.Module):
         assert len(max_level_index) == 1  # same level for all batches
         max_level_index = int(max_level_index.item())
 
+        assert torch.equal(
+            level_spatial_shapes.new_tensor(stacked_feature_map.shape[1:3]),
+            level_spatial_shapes[max_level_index],
+        ), print(f"{stacked_feature_map.shape=}")
+
         # get the full-scale feature map level
         fullscale_feature_map = sparse_select(stacked_feature_map, 3, max_level_index)
         assert isinstance(fullscale_feature_map, Tensor)
         assert fullscale_feature_map.ndim == 4  # (batch, height, width, feature)
+        assert torch.equal(
+            level_spatial_shapes.new_tensor(fullscale_feature_map.shape[1:3]),
+            level_spatial_shapes[max_level_index]
+        ), print(f"{fullscale_feature_map.shape=}")
 
         # Get the patch indices
         if level_spatial_shapes.ndim == 3:
@@ -223,6 +234,11 @@ class PatchedSegmentationMapPredictor(nn.Module):
         patch_indices, patch_oob, _ = get_multilevel_neighborhoods(
             query_positions, max_level_shape, [self.query_patch_diameter]
         )
+        oob_check = torch.any(
+            (patch_indices < 0) | (patch_indices >= level_spatial_shapes[max_level_index]), -1
+        )
+        if not torch.equal(oob_check, patch_oob):
+            raise ValueError("oob_check and patch_oob not equal")
 
         # Indices: [n_total_query x n_patch_pixels x (i, j)]
         # -> [n_total_query x n_patch_pixels x (batch, i, j, query)]
@@ -231,6 +247,7 @@ class PatchedSegmentationMapPredictor(nn.Module):
         )
         query_seq_lengths: Tensor = batch_offsets_to_seq_lengths(query_batch_offsets)
         indices[..., 0] = seq_lengths_to_indices(query_seq_lengths).unsqueeze(-1)
+        indices[..., 1:-1] = patch_indices
         for i in range(query_batch_offsets.size(0) - 1):
             batch_start, batch_end = int(query_batch_offsets[i]), int(
                 query_batch_offsets[i + 1]
@@ -244,9 +261,14 @@ class PatchedSegmentationMapPredictor(nn.Module):
             fullscale_feature_map, indices[..., :-1]  # index (batch, i, j)
         )
         assert isinstance(patch_embeddings, Tensor)
-        assert torch.all(
+        if not torch.all(
             (patch_oob & (~patch_is_specified_mask)) == patch_oob
-        )  # sanity check
+        ):  # sanity check
+            specified_oob_mask = patch_oob & patch_is_specified_mask
+            raise ValueError(
+                f"oob indices: {patch_indices[patch_oob]}\n"
+                f"Specified oob indices: {patch_indices[specified_oob_mask]}"
+            )
 
         # dot product each query vector with its patch's embeddings
         # [n_total_query x embed_dim] @ [n_total_query x patch_pixels x embed_dim] -> [n_total_query x patch_pixels]
@@ -271,6 +293,24 @@ class PatchedSegmentationMapPredictor(nn.Module):
     def reset_parameters(self):
         for layer in self.layers:
             layer.reset_parameters()
+
+    @classmethod
+    def from_config(cls, config: SegmentationHeadConfig) -> Self:
+        return cls(
+            d_model=config.d_model,
+            n_heads=config.n_heads,
+            dim_feedforward=config.dim_feedforward,
+            n_transformer_layers=config.n_layers,
+            dropout=config.dropout,
+            attn_proj_bias=config.attn_proj_bias,
+            activation_fn=config.activation_fn,
+            norm_first=config.norm_first,
+            rope_share_heads=config.rope.share_heads,
+            rope_spatial_base_theta=config.rope.spatial_base_theta,
+            rope_level_base_theta=config.rope.level_base_theta,
+            rope_freq_group_pattern=config.rope.freq_group_pattern,
+            query_patch_diameter=config.query_patch_diameter,
+        )
 
 
 def sparse_binary_segmentation_map(segmentation_map: Tensor):

@@ -48,6 +48,8 @@ class MetricManager(nn.Module):
         metrics.update(self._build_loss_metrics())
         metrics["loss_salience"] = MeanMetric()
 
+        metrics.update(self._build_encoder_out_metrics())
+
         if self.config.aux_loss.use_aux_loss:
             metrics.update(self._build_aux_metrics())
 
@@ -116,6 +118,11 @@ class MetricManager(nn.Module):
             metrics_i = self._build_loss_metrics()
             for k, v in metrics_i.items():
                 metrics[f"aux_losses/{i}/{k}"] = v
+        return metrics
+
+    def _build_encoder_out_metrics(self) -> dict[str, MeanMetric]:
+        metrics = self._build_loss_metrics()
+        metrics = {f"encoder_out/{k}": v for k, v in metrics.items()}
         return metrics
 
     def _build_denoising_metrics(self) -> nn.ModuleDict:

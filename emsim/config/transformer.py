@@ -55,6 +55,9 @@ class PositionHeadConfig:
 class StdDevHeadConfig:
     """Configuration for the standard deviation head."""
 
+    # Inherited value
+    in_dim: int = "${model.transformer.d_model}"
+
     hidden_dim: int = "${model.transformer.d_model}"
     n_layers: int = 2
     activation_fn: str = "gelu"
@@ -66,7 +69,14 @@ class StdDevHeadConfig:
 class SegmentationHeadConfig:
     """Configuration for the segmentation head."""
 
-    hidden_dim: int = "${model.transformer.d_model}"
+    # Inherited main transformer config values
+    d_model: int = "${model.transformer.d_model}"
+    n_heads: int = "${model.transformer.n_heads}"
+    dim_feedforward: int = "${model.transformer.dim_feedforward}"
+    dropout: float = "${model.transformer.dropout}"
+    attn_proj_bias: bool = "${model.transformer.attn_proj_bias}"
+    norm_first: bool = "${model.transformer.norm_first}"
+
     n_layers: int = 2
     activation_fn: str = "gelu"
     query_patch_diameter: int = 7

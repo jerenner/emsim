@@ -224,10 +224,7 @@ class EMTransformerDecoder(nn.Module):
 
         self.layers_share_heads = config.layers_share_heads
         if self.layers_share_heads:
-            if (
-                class_head is None
-                or position_offset_head is None
-            ):
+            if class_head is None or position_offset_head is None:
                 raise ValueError(
                     "Expected `class_head` and `position_offset_head` "
                     "to be specified when layers_share_heads is True; got "
@@ -269,38 +266,17 @@ class EMTransformerDecoder(nn.Module):
                 [self._make_segmentation_head(config) for _ in range(config.n_layers)]
             )
 
-        self.norm = nn.LayerNorm(self.d_model)
+        self.norms = nn.ModuleList(
+            [nn.LayerNorm(self.d_model) for _ in range(self.n_layers)]
+        )
 
         self.reset_parameters()
 
     def _make_std_head(self, config: TransformerDecoderConfig) -> nn.Module:
-        return StdDevHead(
-            self.d_model,
-            config.std_dev_head.hidden_dim,
-            config.std_dev_head.n_layers,
-            activation_fn=config.std_dev_head.activation_fn,
-            scaling_factor=config.std_dev_head.scaling_factor,
-            eps=config.std_dev_head.eps,
-        )
+        return StdDevHead.from_config(config.std_dev_head)
 
     def _make_segmentation_head(self, config: TransformerDecoderConfig) -> nn.Module:
-        layer = self.layers[0]
-        assert isinstance(layer, TransformerDecoderLayer)
-        return PatchedSegmentationMapPredictor(
-            d_model=layer.d_model,
-            n_heads=layer.n_heads,
-            dim_feedforward=layer.dim_feedforward,
-            n_transformer_layers=config.segmentation_head.n_layers,
-            dropout=layer.dropout,
-            attn_proj_bias=layer.attn_proj_bias,
-            activation_fn=config.segmentation_head.activation_fn,
-            norm_first=layer.ffn.norm_first,
-            rope_share_heads=config.segmentation_head.rope.share_heads,
-            rope_spatial_base_theta=config.segmentation_head.rope.spatial_base_theta,
-            rope_level_base_theta=config.segmentation_head.rope.level_base_theta,
-            rope_freq_group_pattern=config.segmentation_head.rope.freq_group_pattern,
-            query_patch_diameter=config.segmentation_head.query_patch_diameter,
-        )
+        return PatchedSegmentationMapPredictor.from_config(config.segmentation_head)
 
     def forward(
         self,
@@ -332,7 +308,7 @@ class EMTransformerDecoder(nn.Module):
                 query_pos_encoding=query_pos_encoding,
             )
 
-            queries_normed = self.norm(queries)
+            queries_normed = self.norms[i](queries)
 
             class_head = self._get_class_head(i)
             delta_pos_head = self._get_position_head(i)

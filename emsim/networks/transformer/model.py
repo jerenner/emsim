@@ -39,6 +39,7 @@ from .std_dev_head import StdDevHead
 class EMTransformer(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
+        self.config = config
         self.two_stage_num_proposals = config.query_embeddings
         self.salience_mask_predictor = MESparseMaskPredictor(
             config.d_model, config.d_model
@@ -60,15 +61,28 @@ class EMTransformer(nn.Module):
             )
         else:
             self.pos_embedding = FourierEncoding(3, config.d_model, dtype=torch.double)
+        # Salience filtering param
+        self.alpha = nn.Parameter(torch.empty(3), requires_grad=True)
+
+        # Number of backbone feature levels
         self.n_levels = config.n_feature_levels
+
+        # Encoder output processors
+        # Also used by decoder when layers_share_heads is True
+        self.encoder_output_norm = nn.LayerNorm(config.d_model)
         self.classification_head = ClassificationHead(
             config.d_model,
             config.decoder.classification_head.hidden_dim,
             config.decoder.classification_head.n_layers,
             config.decoder.classification_head.activation_fn,
         )
-
-        self.alpha = nn.Parameter(torch.Tensor(3), requires_grad=True)
+        self.query_pos_offset_head = PositionOffsetHead(
+            config.d_model, config.d_model, 2, config.predict_box
+        )
+        self.std_dev_head = StdDevHead.from_config(config.decoder.std_dev_head)
+        self.segmentation_head = PatchedSegmentationMapPredictor.from_config(
+            config.decoder.segmentation_head
+        )
 
         self.encoder = EMTransformerEncoder(
             TransformerEncoderLayer(
@@ -91,13 +105,7 @@ class EMTransformer(nn.Module):
             config=config.encoder,
             score_predictor=self.classification_head,
         )
-        self.encoder_output_norm = nn.LayerNorm(config.d_model)
-        self.query_pos_offset_head = PositionOffsetHead(
-            config.d_model, config.d_model, 2, config.predict_box
-        )
         self.predict_box = config.predict_box
-        self.segmentation_head = None
-        self.std_head = None
 
         self.salience_unpoolers = nn.ModuleList(
             [
@@ -153,6 +161,7 @@ class EMTransformer(nn.Module):
         self.encoder.reset_parameters()
         self.encoder_output_norm.reset_parameters()
         self.query_pos_offset_head.reset_parameters()
+        self.std_dev_head.reset_parameters()
         for layer in self.salience_unpoolers:
             layer.reset_parameters()
         self.object_query_embedding.reset_parameters()
@@ -215,7 +224,7 @@ class EMTransformer(nn.Module):
         ).coalesce()
         encoder_out_logits: Tensor = self.classification_head(
             encoder_out_normalized.values()
-        ).squeeze(-1)
+        )
 
         # do topk of each sequence
         num_topk = self.two_stage_num_proposals * 4
@@ -225,39 +234,24 @@ class EMTransformer(nn.Module):
 
         topk_spatial_indices = encoder_out.indices()[:, topk_indices].T
 
-        # deduplication via non-maximum suppression to get the final object queries
+        # deduplication via non-maximum suppression to get the final object query positions
         nms_topk_indices = self.nms_on_topk_index(
-            topk_scores, topk_indices, topk_spatial_indices, iou_threshold=0.3
+            topk_scores.squeeze(-1), topk_indices, topk_spatial_indices, iou_threshold=0.3
         )
-        # sparse tensor with the nms-filtered pixels/queries
-        # pre-sort nms topk indices to skip explicit coalesce call
+        # nms-filtered pixels/queries
+        # Sort indices to preserve lexicographical order
         nms_topk_indices = nms_topk_indices.sort()[0]
-        nms_encoder_out = torch.sparse_coo_tensor(
-            encoder_out.indices()[:, nms_topk_indices],
-            encoder_out.values()[nms_topk_indices],
-            encoder_out.shape,
-        ).coalesce()
-        nms_encoder_out_normalized = encoder_out_normalized.values()[nms_topk_indices]
-        nms_topk_logits = encoder_out_logits[nms_topk_indices]
-        nms_encoder_out_indices = nms_encoder_out.indices()
-        nms_query_batch_offsets: Tensor = batch_offsets_from_sparse_tensor_indices(
-            nms_encoder_out_indices
-        )
-        nms_query_batch_sizes: Tensor = batch_offsets_to_seq_lengths(
-            nms_query_batch_offsets
-        )
-        nms_topk_position_offsets: Tensor = self.query_pos_offset_head(
-            nms_encoder_out_normalized.to(self.query_pos_offset_head.dtype)
-        )
-        # nms_topk_masks = self.segmentation_head(
-        #     encoder_out, nms_encoder_out_normalized, nms_topk_query_batch_offsets
-        # )
 
+        # Gather nms-filtered query tensor and indices
+        nms_encoder_out_normalized = encoder_out_normalized.values()[nms_topk_indices]
+        nms_spatial_indices = encoder_out_normalized.indices()[:, nms_topk_indices]
+
+        # Determine fractional position of query indices
         # [..., (i, j, level)]
         nms_proposal_positions = prep_multilevel_positions(
-            nms_encoder_out_indices[1:-1].T,
-            nms_encoder_out_indices[0],
-            nms_encoder_out_indices[-1],
+            nms_spatial_indices[1:-1].T,
+            nms_spatial_indices[0],
+            nms_spatial_indices[-1],
             cast(Tensor, score_dict["spatial_shapes"]),
         )
         nms_proposal_positions = nms_proposal_positions[..., :-1]  # [..., (i, j)]
@@ -272,7 +266,34 @@ class EMTransformer(nn.Module):
                 ],
                 -1,
             )
+
+        # Compute nms-filtered encoder output predictions
+        nms_topk_logits = encoder_out_logits[nms_topk_indices]
+        nms_query_batch_offsets: Tensor = batch_offsets_from_sparse_tensor_indices(
+            nms_spatial_indices
+        )
+        nms_query_batch_sizes: Tensor = batch_offsets_to_seq_lengths(
+            nms_query_batch_offsets
+        )
+        nms_topk_position_offsets: Tensor = self.query_pos_offset_head(nms_encoder_out_normalized)
         nms_encoder_out_positions = nms_proposal_positions + nms_topk_position_offsets
+        nms_encoder_out_std_cholesky = self.std_dev_head(nms_encoder_out_normalized)
+
+        nms_encoder_out_segmentation = self.segmentation_head(
+            nms_encoder_out_normalized,
+            nms_query_batch_offsets,
+            nms_encoder_out_positions,
+            encoder_out_normalized,
+            score_dict["spatial_shapes"],
+        )
+
+        nms_encoder_output = {
+            "pred_logits": nms_topk_logits,
+            "pred_positions": nms_encoder_out_positions,
+            "pred_std_dev_cholesky": nms_encoder_out_std_cholesky,
+            "pred_segmentation_logits": nms_encoder_out_segmentation,
+            "query_batch_offsets": nms_query_batch_offsets,
+        }
 
         # Save initial reference points (no grad)
         reference_points = nms_encoder_out_positions.detach()
@@ -342,13 +363,9 @@ class EMTransformer(nn.Module):
             decoder_out["segmentation_logits"],
             nms_query_batch_offsets,
             denoising_out,
-            nms_topk_logits,
-            nms_encoder_out_positions,
-            nms_topk_position_offsets,
-            nms_encoder_out_positions,
+            nms_encoder_output,
             score_dict,
             encoder_out,
-            encoder_out_logits,
             topk_scores,
             topk_indices,
             topk_spatial_indices,

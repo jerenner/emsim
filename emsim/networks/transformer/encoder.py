@@ -285,6 +285,7 @@ class EMTransformerEncoder(nn.Module):
                 stacked_feature_maps, batch_topk_spatial_indices, True
             )[0]
             if position_encoding is not None:
+                # additive position embedding instead of RoPE
                 pos_encoding_for_layer = batch_sparse_index(
                     stacked_pos_encodings, batch_topk_spatial_indices, True
                 )[0]

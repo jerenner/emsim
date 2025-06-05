@@ -79,6 +79,8 @@ class CriterionConfig:
     use_denoising_loss: bool = "${model.denoising.use_denoising}"
     denoising_loss_weight: float = "${model.denoising.denoising_loss_weight}"
 
+    encoder_out_loss_weight: float = 1.0
+
     # Nested configurations
     salience: SalienceConfig = field(default_factory=SalienceConfig)
     matcher: MatcherConfig = field(default_factory=MatcherConfig)

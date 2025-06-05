@@ -35,6 +35,7 @@ class EMCriterion(nn.Module):
             self.denoising_handler = DenoisingHandler(config)
         else:
             self.denoising_handler = None
+        self.encoder_out_handler = EncoderOutHandler(config)
 
         self.step_counter = 0
 
@@ -57,18 +58,24 @@ class EMCriterion(nn.Module):
 
         # Compute aux losses if required
         if self.aux_loss_handler is not None and "aux_outputs" in predicted_dict:
-            if self.aux_loss_handler.use_final_matches:
-                aux_loss_matches = matched_indices
-            else:
-                aux_loss_matches = None
             aux_loss_dict, _ = self.aux_loss_handler(
                 predicted_dict["aux_outputs"],
                 target_dict,
                 self.loss_calculator,
                 self.matcher,
-                aux_loss_matches,
+                matched_indices if self.aux_loss_handler.use_final_matches else None,
             )
             loss_dict.update(aux_loss_dict)
+
+        # Compute encoder output losses
+        encoder_out_loss_dict, _ = self.encoder_out_handler(
+            predicted_dict["encoder_out"],
+            target_dict,
+            self.loss_calculator,
+            self.matcher,
+            matched_indices if self.encoder_out_handler.use_final_matches else None,
+        )
+        loss_dict.update(encoder_out_loss_dict)
 
         # Compute denoising losses if required
         if self.denoising_handler is not None and "denoising_output" in predicted_dict:
@@ -114,6 +121,7 @@ class EMCriterion(nn.Module):
         loss_dict = self.loss_calculator.apply_loss_weights(loss_dict)
         if self.aux_loss_handler is not None:
             loss_dict = self.aux_loss_handler.apply_loss_weights(loss_dict)
+        loss_dict = self.encoder_out_handler.apply_loss_weights(loss_dict)
         if self.denoising_handler is not None:
             loss_dict = self.denoising_handler.apply_loss_weights(loss_dict)
 
@@ -168,6 +176,56 @@ class AuxLossHandler(nn.Module):
         for loss_name, loss in loss_dict.items():
             if "aux_loss" in loss_name:
                 out_dict[loss_name] = loss * self.aux_loss_weight
+            else:
+                out_dict[loss_name] = loss
+        return out_dict
+
+
+class EncoderOutHandler(nn.Module):
+    def __init__(self, config: CriterionConfig):
+        super().__init__()
+        self.use_final_matches = config.aux_loss.use_final_matches
+        self.register_buffer(
+            "encoder_out_loss_weight", torch.tensor(config.encoder_out_loss_weight)
+        )
+
+    def forward(
+        self,
+        encoder_output: dict[str, Tensor],
+        target_dict: dict[str, Tensor],
+        loss_calculator: LossCalculator,
+        matcher: Optional[HungarianMatcher] = None,
+        final_matched_indices: Optional[list[Tensor]] = None,
+    ):
+        if final_matched_indices is not None:
+            matched_indices = final_matched_indices
+        else:
+            assert matcher is not None
+            matched_indices = matcher(encoder_output, target_dict)
+            matched_indices = [
+                mi.to(encoder_output["pred_logits"].device) for mi in matched_indices
+            ]
+
+        # compute encoder output losses using same loss calculator
+        encoder_out_loss_dict, _ = loss_calculator(
+            encoder_output, target_dict, matched_indices
+        )
+
+        # label encoder output losses as such
+        encoder_out_loss_dict = {
+            f"encoder_out/{k}": v for k, v in encoder_out_loss_dict.items()
+        }
+
+        return encoder_out_loss_dict, matched_indices
+
+    def apply_loss_weights(self, loss_dict: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Applies the encoder output loss weight to tensors with the substring
+        'encoder_out' in their name in the loss dict, leaving other tensors unmodified.
+        """
+        out_dict = {}
+        for loss_name, loss in loss_dict.items():
+            if "encoder_out" in loss_name:
+                out_dict[loss_name] = loss * self.encoder_out_loss_weight
             else:
                 out_dict[loss_name] = loss
         return out_dict

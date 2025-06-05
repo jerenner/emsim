@@ -64,7 +64,8 @@ class CriterionConfig:
     loss_weights: LossWeights = field(default_factory=LossWeights)
     huber_delta: float = 1.0
 
-    no_electron_weight: float = 1.0
+    no_electron_weight: float = 0.1
+    standardize_no_electron_weight: bool = True
 
     predict_box: bool = "${model.predict_box}"
 

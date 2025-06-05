@@ -28,9 +28,15 @@ class LossComponent(nn.Module):
 
 
 class ClassificationLoss(LossComponent):
-    def __init__(self, no_electron_weight: float, weight: float = 1.0):
+    def __init__(
+        self,
+        no_electron_weight: float,
+        standardize_no_electron_weight: bool = False,
+        weight: float = 1.0,
+    ):
         super().__init__(weight)
         self.no_electron_weight = no_electron_weight
+        self.standardize_no_electron_weight = standardize_no_electron_weight
 
     def forward(
         self,
@@ -54,8 +60,12 @@ class ClassificationLoss(LossComponent):
         for batch, indices in enumerate(matched_indices):
             labels[indices + query_batch_offsets[batch]] = 1
 
-        if self.no_electron_weight != 1.0:
-            weights = torch.ones_like(pred_logits)
+        if self.standardize_no_electron_weight:
+            weights = torch.ones_like(pred_logits, dtype=torch.float)
+            num_pos = labels.sum()
+            weights[labels.logical_not()] = num_pos / (labels.numel() - num_pos)
+        elif self.no_electron_weight != 1.0:
+            weights = torch.ones_like(pred_logits, dtype=torch.float)
             weights[labels.logical_not()] = self.no_electron_weight
         else:
             weights = None
@@ -187,6 +197,7 @@ class LossCalculator(nn.Module):
             {
                 "classification": ClassificationLoss(
                     config.no_electron_weight,
+                    config.standardize_no_electron_weight,
                     config.loss_weights.classification,
                 ),
                 "mask_bce": MaskBCELoss(config.loss_weights.mask_bce),

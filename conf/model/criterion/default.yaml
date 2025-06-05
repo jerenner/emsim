@@ -25,7 +25,8 @@ loss_weights:
   box_l1: 1.0
   box_giou: 1.0
 
-no_electron_weight: 1.0
+no_electron_weight: 0.1
+standardize_no_electron_weight: true
 
 detach_likelihood_mean: false
 huber_delta: 1.0

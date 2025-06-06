@@ -140,9 +140,9 @@ class TestGetSparseIndexMapping:
         index_tensor = torch.tensor(
             [
                 [0, 0],  # valid
-                [3, 0],  # row out of bounds
-                [-1, 0],  # negative row
-                [0, 5],  # column out of bounds
+                [3, 0],  # out of bounds
+                [-1, 0],  # out of bounds
+                [0, 3],  # out of bounds
             ],
             device=device,
         )
@@ -151,7 +151,7 @@ class TestGetSparseIndexMapping:
 
         # Only the first index should be specified
         expected_specified = torch.tensor([True, False, False, False], device=device)
-        assert torch.all(is_specified == expected_specified)
+        assert torch.equal(is_specified, expected_specified)
 
 
 @pytest.mark.cpu_and_cuda

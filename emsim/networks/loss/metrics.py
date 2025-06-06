@@ -17,12 +17,12 @@ from emsim.config.criterion import CriterionConfig
 from .utils import (
     Mode,
     _flatten_metrics,
-    prep_detection_inputs,
     recursive_reset,
     resolve_mode,
     unstack_batch,
     unstack_model_output,
 )
+from .detection_ap import match_detections
 
 
 class MetricManager(nn.Module):
@@ -167,7 +167,7 @@ class MetricManager(nn.Module):
         target_dict_list = unstack_batch(target_dict)
 
         for threshold in self.config.detection_metric_distance_thresholds:
-            detection_inputs, _, _ = prep_detection_inputs(
+            detection_inputs, _, _ = match_detections(
                 predicted_dict_list, target_dict_list, threshold
             )
             key = str(threshold).replace(".", ",")

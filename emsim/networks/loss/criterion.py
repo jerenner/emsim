@@ -1,4 +1,3 @@
-import time
 from typing import Any, Optional
 
 import torch
@@ -9,12 +8,7 @@ from emsim.config.criterion import AuxLossConfig, CriterionConfig
 from .loss_calculator import LossCalculator
 from .matcher import HungarianMatcher
 from .metrics import MetricManager
-from .utils import (
-    Mode,
-    prep_detection_inputs,
-    unstack_batch,
-    unstack_model_output,
-)
+from .utils import Mode
 
 
 class EMCriterion(nn.Module):

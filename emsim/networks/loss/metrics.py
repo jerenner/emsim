@@ -161,14 +161,18 @@ class MetricManager(nn.Module):
         metrics = self.get_metrics(mode)["detection"]
         assert isinstance(metrics, nn.ModuleDict)
         start = time.time()
-        predicted_dict_list = unstack_model_output(
+        pred_dict_list = unstack_model_output(
             {k: v for k, v in predicted_dict.items() if isinstance(v, Tensor)}
         )
-        target_dict_list = unstack_batch(target_dict)
+        tgt_dict_list = unstack_batch(target_dict)
+
+        pred_positions = [pred["pred_positions"] for pred in pred_dict_list]
+        pred_logits = [pred["pred_logits"] for pred in pred_dict_list]
+        target_positions = [tgt["incidence_points_pixels_rc"] for tgt in tgt_dict_list]
 
         for threshold in self.config.detection_metric_distance_thresholds:
             detection_inputs, _, _ = match_detections(
-                predicted_dict_list, target_dict_list, threshold
+                pred_positions, pred_logits, target_positions, threshold
             )
             key = str(threshold).replace(".", ",")
             for scores, labels in detection_inputs:

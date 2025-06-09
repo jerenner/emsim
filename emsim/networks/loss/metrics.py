@@ -3,7 +3,7 @@ from typing import Any, Union
 
 import torch
 from torch import Tensor, nn
-from torchmetrics import MeanMetric, MetricCollection
+from torchmetrics import MeanMetric, Metric, MetricCollection
 from torchmetrics.aggregation import MaxMetric, MinMetric
 from torchmetrics.classification import (
     BinaryAccuracy,
@@ -14,15 +14,13 @@ from torchmetrics.classification import (
 
 from emsim.config.criterion import CriterionConfig
 
+from .detection_ap import match_detections
 from .utils import (
     Mode,
-    _flatten_metrics,
-    recursive_reset,
     resolve_mode,
     unstack_batch,
     unstack_model_output,
 )
-from .detection_ap import match_detections
 
 
 class MetricManager(nn.Module):
@@ -165,10 +163,14 @@ class MetricManager(nn.Module):
             {k: v for k, v in predicted_dict.items() if isinstance(v, Tensor)}
         )
         tgt_dict_list = unstack_batch(target_dict)
+        assert len(pred_dict_list) == len(tgt_dict_list)
 
         pred_positions = [pred["pred_positions"] for pred in pred_dict_list]
         pred_logits = [pred["pred_logits"] for pred in pred_dict_list]
-        target_positions = [tgt["incidence_points_pixels_rc"] for tgt in tgt_dict_list]
+        target_positions = [
+            tgt["incidence_points_pixels_rc"].to(pred)
+            for tgt, pred in zip(tgt_dict_list, pred_positions)
+        ]
 
         for threshold in self.config.detection_metric_distance_thresholds:
             detection_inputs, _, _ = match_detections(
@@ -231,7 +233,7 @@ class MetricManager(nn.Module):
         for metric in metrics.values():
             recursive_reset(metric)
 
-    def get_logs(self, mode: Union[str, Mode], reset: bool = True):
+    def get_logs(self, mode: Union[str, Mode], reset: bool = True) -> dict[str, Tensor]:
         mode = resolve_mode(mode)
         metrics = self.get_metrics(mode)
         log_dict = _flatten_metrics(metrics)
@@ -239,7 +241,9 @@ class MetricManager(nn.Module):
             self.reset(mode)
         log_dict = {k.replace(",", "."): v for k, v in log_dict.items()}
         if mode == Mode.DENOISING:
-            log_dict = {"dn/" + k: v for k, v in log_dict}
+            log_dict = {"dn/" + k: v for k, v in log_dict.items()}
+        elif mode == Mode.EVAL:
+            log_dict = {"eval/" + k: v for k, v in log_dict.items()}
         return log_dict
 
     @staticmethod
@@ -250,3 +254,24 @@ class MetricManager(nn.Module):
     def format_log_keys(log_dict: dict):
         log_dict = {k.replace("loss_", "loss/"): v for k, v in log_dict.items()}
         return log_dict
+
+
+def _flatten_metrics(metric_dict) -> dict[str, Tensor]:
+    out = {}
+    for k, v in metric_dict.items():
+        if isinstance(v, (nn.ModuleDict, MetricCollection)):
+            out.update(_flatten_metrics(v))
+        else:
+            assert isinstance(v, Metric)
+            out[k] = v.compute()
+    return out
+
+
+def recursive_reset(
+    metric_or_moduledict: Union[nn.ModuleDict, Metric, MetricCollection, nn.Module],
+):
+    if not hasattr(metric_or_moduledict, "reset"):
+        for metric in metric_or_moduledict.values():
+            recursive_reset(metric)
+    else:
+        metric_or_moduledict.reset()

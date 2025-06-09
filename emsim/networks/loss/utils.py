@@ -79,27 +79,6 @@ def sort_predicted_true_maps(
     return reordered_predicted, reordered_true
 
 
-def _flatten_metrics(metric_dict):
-    out = {}
-    for k, v in metric_dict.items():
-        if isinstance(v, (nn.ModuleDict, MetricCollection)):
-            out.update(_flatten_metrics(v))
-        else:
-            assert isinstance(v, Metric)
-            out[k] = v.compute()
-    return out
-
-
-def recursive_reset(
-    metric_or_moduledict: Union[nn.ModuleDict, Metric, MetricCollection, nn.Module],
-):
-    if not hasattr(metric_or_moduledict, "reset"):
-        for metric in metric_or_moduledict.values():
-            recursive_reset(metric)
-    else:
-        metric_or_moduledict.reset()
-
-
 @torch.jit.script
 def unstack_batch(batch: dict[str, Tensor]) -> list[dict[str, Tensor]]:
     split = {

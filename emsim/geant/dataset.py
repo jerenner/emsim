@@ -694,17 +694,17 @@ def regrid_electron(
     incidence_mm = np.array([electron.incidence.x, electron.incidence.y])
     incidence_pixel_xy = incidence_mm / electron.grid.pixel_size_um * 1000
     rescaled_incidence_pixel_xy = incidence_pixel_xy * (new_grid_size / old_grid_size)
-    pixel_shift = (incidence_pixel_xy - rescaled_incidence_pixel_xy).round()
+    pixel_shift_xy = (incidence_pixel_xy - rescaled_incidence_pixel_xy).round()
 
     min_pixel_xy = np.array([electron.pixels.xmin(), electron.pixels.ymin()])
-    new_min_pixel_xy = min_pixel_xy - pixel_shift
+    new_min_pixel_xy = min_pixel_xy - pixel_shift_xy
     max_pixel_xy = np.array([electron.pixels.xmax(), electron.pixels.ymax()])
-    new_max_pixel_xy = max_pixel_xy - pixel_shift
+    new_max_pixel_xy = max_pixel_xy - pixel_shift_xy
 
     pad_neg = np.minimum(0, new_min_pixel_xy - border_pixels)
     pad_pos = np.minimum(0, (new_grid_size - border_pixels - 1) - new_max_pixel_xy)
 
-    adj_pixel_shift = pixel_shift + pad_neg - pad_pos
+    adj_pixel_shift = pixel_shift_xy + pad_neg - pad_pos
 
     assert all(adj_pixel_shift == np.floor(adj_pixel_shift))  # check is integer pixels
     new_pixelset = PixelSet(
@@ -714,15 +714,15 @@ def regrid_electron(
         ]
     )
     if (
-        new_pixelset.xmin() >= border_pixels[0]
-        or new_pixelset.xmax() < new_grid_size[0] - border_pixels[0]
-        or new_pixelset.ymin() >= border_pixels[1]
-        or new_pixelset.ymax() < new_grid_size[1] - border_pixels[1]
+        new_pixelset.xmin() < border_pixels[0]
+        or new_pixelset.xmax() >= new_grid_size[0] - border_pixels[0]
+        or new_pixelset.ymin() < border_pixels[1]
+        or new_pixelset.ymax() >= new_grid_size[1] - border_pixels[1]
     ):
         # electron does not fit on the new grid with specified borders
         return None
 
-    new_incidence_pixel_xy = incidence_pixel_xy - pixel_shift
+    new_incidence_pixel_xy = incidence_pixel_xy - pixel_shift_xy
     new_incidence_mm = new_incidence_pixel_xy * electron.grid.pixel_size_um / 1000
     new_incidence_mm = np.round(new_incidence_mm, 5)
 

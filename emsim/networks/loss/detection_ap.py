@@ -5,11 +5,12 @@ based on spatial distance rather than bounding box IoU, suitable for point-based
 object detection tasks.
 """
 
+from typing import Optional
+
 import torch
 from torch import Tensor
 
 
-@torch.jit.script
 def sort_detections_by_score(
     predicted_scores: Tensor, predicted_positions: Tensor
 ) -> tuple[Tensor, Tensor, Tensor]:
@@ -69,11 +70,12 @@ def match_single_detection(
 
 
 @torch.jit.script
-def find_matches(
+def find_matches_for_image(
     predicted_positions: Tensor,
     predicted_scores: Tensor,
     target_positions: Tensor,
     distance_threshold: float,
+    min_score: Optional[float] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Find matches between predicted and target positions using greedy assignment.
 
@@ -84,7 +86,11 @@ def find_matches(
             the spatial dimension
         predicted_scores (Tensor): Prediction confidence scores, shape (N,)
         target_positions (Tensor): Ground truth positions, shape (M, D)
-        distance_threshold (Tensor): Maximum distance for a valid match
+        distance_threshold (float): Maximum distance for a valid match
+        min_score (Optional[float]): If set, scores under this threshold are not
+            attempted to be matched to any target. Useful to avoid wasting time
+            iterating through many non-detections.
+
 
     Returns:
         Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -95,7 +101,8 @@ def find_matches(
             - false_negatives: Indices of unmatched targets, shape (V,)
 
     Raises:
-        ValueError: If predicted and target positions have incompatible dimensions
+        ValueError: If predicted and target positions have incompatible dimensions,
+            or min_score is not in [0, 1)
     """
     # Validate dims
     if predicted_positions.ndim != 2 or target_positions.ndim != 2:
@@ -111,57 +118,77 @@ def find_matches(
             "Expected predicted and target positions to have same spatial dim, but got"
             f"{predicted_positions.shape[-1]} and {target_positions.shape[-1]}."
         )
+    if min_score is not None and not 0.0 <= min_score < 1.0:
+        raise ValueError(f"Expected `min_score` to be in [0, 1), got {min_score}")
+
     device = predicted_positions.device
 
     sorted_scores, sorted_positions, sorted_indices = sort_detections_by_score(
         predicted_scores, predicted_positions
     )
 
+    n_targets = len(target_positions)
+
     # Early exit for no targets
-    if len(target_positions) == 0:
+    if n_targets == 0:
         return (
             torch.zeros((0, 2), dtype=torch.long, device=device),
             torch.zeros((0,), dtype=predicted_scores.dtype, device=device),
             sorted_indices,
             sorted_scores,
-            torch.zeros((0,), dtype=torch.long, device=device)
+            torch.zeros((0,), dtype=torch.long, device=device),
         )
 
-    target_indices = torch.arange(len(target_positions), device=device)
+    # Compute pairwise distances
+    pairwise_distances = torch.cdist(sorted_positions, target_positions)  # (N, M)
+    distances_within_threshold = pairwise_distances <= distance_threshold
+
+    target_indices = torch.arange(n_targets, device=device)
+    target_matched = torch.zeros(n_targets, device=device, dtype=torch.bool)
+
     matches = []
-    no_matches = []
+    no_matches = []  # Predictions with no matches
     match_scores = []
     no_match_scores = []
-    for index, score, pos in zip(sorted_indices, sorted_scores, sorted_positions):
-        match_index = match_single_detection(pos, target_positions, distance_threshold)
-        if match_index == -1:  # no match among targets
-            no_matches.append(index)
+    for i, (pred_idx, score) in enumerate(zip(sorted_indices, sorted_scores)):
+        if min_score is not None and score < min_score:
+            # All remaining predictions are below threshold, so store them as unmatched
+            no_matches.extend(sorted_indices[i:].tolist())
+            no_match_scores.extend(sorted_scores[i:].tolist())
+            break
+
+        targets_in_range = distances_within_threshold[i] & ~target_matched
+        if not targets_in_range.any():  # no match among targets
+            no_matches.append(pred_idx)
             no_match_scores.append(score)
         else:
-            # store matched (query_index, target_index) pair
-            matched_target_id = target_indices[match_index]
-            matches.append(torch.stack([index, matched_target_id]))
+            # Find closest target
+            match_index = pairwise_distances[i][targets_in_range].argmin()
+            # Convert local argmin to global target index
+            matched_target_id = target_indices[targets_in_range][match_index]
+
+            # record matched pair
+            matches.append(torch.stack([pred_idx, matched_target_id]))
             match_scores.append(score)
 
-            # remove matched target from available targets
-            target_indices = target_indices[target_indices != matched_target_id]
-            target_positions = target_positions[
-                torch.arange(len(target_positions), device=device) != match_index
-            ]
+            # Mark target as matched
+            target_matched[matched_target_id] = True
 
+    # Stack outputs
     if len(matches) > 0:
         true_positives = torch.stack(matches)
         tp_scores = torch.stack(match_scores)
     else:
-        true_positives = torch.zeros((0, 2), dtype=torch.int, device=device)
-        tp_scores = torch.zeros((0,), dtype=torch.float, device=device)
+        true_positives = torch.zeros((0, 2), dtype=torch.long, device=device)
+        tp_scores = torch.zeros((0,), dtype=predicted_scores.dtype, device=device)
     if len(no_matches) > 0:
         unmatched = torch.stack(no_matches)
         unmatched_scores = torch.stack(no_match_scores)
     else:
-        unmatched = torch.zeros((0,), dtype=torch.int, device=device)
-        unmatched_scores = torch.zeros((0,), dtype=torch.float, device=device)
-    false_negatives = target_indices  # remaining (unmatched) target indices
+        unmatched = torch.zeros((0,), dtype=torch.long, device=device)
+        unmatched_scores = torch.zeros((0,), dtype=predicted_scores.dtype, device=device)
+
+    false_negatives = target_indices[~target_matched]  # unmatched targets
 
     return true_positives, tp_scores, unmatched, unmatched_scores, false_negatives
 
@@ -207,7 +234,7 @@ def match_detections(
         predicted_positions, predicted_logits, target_positions
     ):
         true_positives_i, tp_scores, unmatched_i, unmatched_scores, false_negatives = (
-            find_matches(
+            find_matches_for_image(
                 pred_pos,
                 pred_logits.sigmoid(),
                 tgt_pos,
@@ -226,7 +253,7 @@ def match_detections(
         scores[num_tp : num_tp + num_unmatched] = unmatched_scores
         # scores[num_tp + num_unmatched:] (false negatives) remain 0
 
-        labels = torch.ones(total_len, dtype=torch.int, device=tp_scores.device)
+        labels = torch.ones(total_len, dtype=torch.long, device=tp_scores.device)
         labels[num_tp : num_tp + num_unmatched] = 0  # false positives
         # labels for true positives and false negatives remain 1
 

@@ -208,7 +208,7 @@ def train(
         t0 = time.time()
         try:
             batch = next(iter_loader)
-        except StopIteration:
+        except StopIteration:  # end of epoch
             eval(epoch, i, t0, model, eval_dataloader, fabric)
             model.train()
             epoch += 1
@@ -282,8 +282,8 @@ def eval(
     criterion: EMCriterion = model.criterion
     for batch in eval_loader:
         output = model(batch)
-        criterion.eval_batch(output, batch)
-    metric_log_dict = criterion.get_eval_logs()
+        criterion.evaluate_batch(output, batch)
+    metric_log_dict = criterion.get_logs("eval")
     metric_log_dict = criterion.metric_manager.format_log_keys(metric_log_dict)
     log_str = criterion.metric_manager.make_log_str(metric_log_dict)
     elapsed_time = time.time() - start_time

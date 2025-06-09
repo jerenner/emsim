@@ -102,6 +102,10 @@ class EMCriterion(nn.Module):
 
         return loss_dict, {"matched_indices": matched_indices}
 
+    def evaluate_batch(self, predicted_dict, target_dict):
+        """Computes evaluation metrics on the batch and updates eval metric state"""
+        self._update_detection_metrics(predicted_dict, target_dict)
+
     def _update_detection_metrics(self, predicted_dict, target_dict):
         self.metric_manager.update_detection_metrics(
             Mode.TRAIN, predicted_dict, target_dict

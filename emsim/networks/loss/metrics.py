@@ -174,7 +174,7 @@ class MetricManager(nn.Module):
 
         for threshold in self.config.detection_metric_distance_thresholds:
             detection_inputs, _, _ = match_detections(
-                pred_positions, pred_logits, target_positions, threshold
+                pred_positions, pred_logits, target_positions, threshold, min_score=0.01
             )
             key = str(threshold).replace(".", ",")
             for scores, labels in detection_inputs:

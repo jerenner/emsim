@@ -153,8 +153,8 @@ def find_matches_for_image(
     for i, (pred_idx, score) in enumerate(zip(sorted_indices, sorted_scores)):
         if min_score is not None and score < min_score:
             # All remaining predictions are below threshold, so store them as unmatched
-            no_matches.extend(sorted_indices[i:].tolist())
-            no_match_scores.extend(sorted_scores[i:].tolist())
+            no_matches.append(sorted_indices[i:])
+            no_match_scores.append(sorted_scores[i:])
             break
 
         targets_in_range = distances_within_threshold[i] & ~target_matched
@@ -199,6 +199,7 @@ def match_detections(
     predicted_logits: list[Tensor],
     target_positions: list[Tensor],
     distance_threshold_pixels: float,
+    min_score: Optional[float] = None,
 ) -> tuple[list[tuple[Tensor, Tensor]], list[Tensor], list[Tensor]]:
     """Match predictions to targets across a batch of images for detection metrics.
 
@@ -213,7 +214,9 @@ def match_detections(
         target_positions (list[Tensor]): List of ground-truth target position tensors,
             each of shape (M_i, D)
         distance_threshold (float): Maximum distance for a valid match
-
+        min_score (Optional[float]): If set, scores under this threshold are not
+            attempted to be matched to any target. Useful to avoid wasting time
+            iterating through many non-detections.
 
     Returns:
         Tuple[list[tuple[Tensor, Tensor]], list[Tensor], list[Tensor]]:
@@ -239,6 +242,7 @@ def match_detections(
                 pred_logits.sigmoid(),
                 tgt_pos,
                 distance_threshold_pixels,
+                min_score=min_score
             )
         )
 

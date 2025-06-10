@@ -151,7 +151,7 @@ def select_values_and_project_kv(
     value_bias: Optional[Tensor],
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Retrieves source sequence elements and computes the key and value tensors for
-    multi-head attention
+    multi-head attention.
 
     Args:
         sparse_tensor_values (Tensor): Values from sparse tensor of shape

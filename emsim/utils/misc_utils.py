@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Any, List, Union, Optional, Sequence
+from typing_extensions import TypeGuard
 
 import sparse
 import torch
@@ -37,6 +38,14 @@ def inverse_sigmoid(x, eps: float = 1e-6):
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1 / x2)
+
+
+def is_str_dict(d: Any) -> TypeGuard[dict[str, Any]]:
+    return isinstance(d, dict) and all(isinstance(k, str) for k in d.keys())
+
+
+def is_tensor_list(list_: Any) -> TypeGuard[list[Tensor]]:
+    return isinstance(list_, list) and all(isinstance(item, Tensor) for item in list_)
 
 
 @torch.jit.ignore

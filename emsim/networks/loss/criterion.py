@@ -4,6 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from emsim.config.criterion import AuxLossConfig, CriterionConfig
+from emsim.utils.misc_utils import is_str_dict, is_tensor_list
 
 from .loss_calculator import LossCalculator
 from .matcher import HungarianMatcher
@@ -37,7 +38,7 @@ class EMCriterion(nn.Module):
         self,
         predicted_dict: dict[str, Any],
         target_dict: dict[str, Any],
-    ):
+    ) -> tuple[dict[str, Any], dict[str, list[Tensor]]]:
         # Match queries to targets
         device = predicted_dict["pred_logits"].device
         matched_indices = self.matcher(predicted_dict, target_dict)
@@ -47,8 +48,8 @@ class EMCriterion(nn.Module):
         loss_dict, extras_dict = self.loss_calculator(
             predicted_dict, target_dict, matched_indices
         )
-        assert isinstance(loss_dict, dict)
-        assert isinstance(extras_dict, dict)
+        assert is_str_dict(loss_dict)
+        assert is_str_dict(extras_dict)
 
         # Compute aux losses if required
         if self.aux_loss_handler is not None and "aux_outputs" in predicted_dict:
@@ -141,9 +142,9 @@ class AuxLossHandler(nn.Module):
         loss_calculator: LossCalculator,
         matcher: Optional[HungarianMatcher] = None,
         final_matched_indices: Optional[list[Tensor]] = None,
-    ):
-        aux_loss_dict = {}
-        matched_indices_dict = {}
+    ) -> tuple[dict[str, Tensor], dict[str, list[Tensor]]]:
+        aux_loss_dict: dict[str, Tensor] = {}
+        matched_indices_dict: dict[str, list[Tensor]] = {}
         assert len(aux_outputs) == self.n_aux_losses
         for idx, output_i in enumerate(aux_outputs):
             if final_matched_indices is not None:
@@ -151,6 +152,7 @@ class AuxLossHandler(nn.Module):
             else:
                 assert matcher is not None
                 matched_indices_i = matcher(output_i, target_dict)
+                assert is_tensor_list(matched_indices_i)
                 matched_indices_i = [
                     matched.to(output_i["pred_logits"].device)
                     for matched in matched_indices_i
@@ -158,6 +160,7 @@ class AuxLossHandler(nn.Module):
 
             # compute aux losses using same loss calculator
             aux_losses_i, _ = loss_calculator(output_i, target_dict, matched_indices_i)
+            assert is_str_dict(aux_losses_i)
 
             # label aux losses as such
             for k, v in aux_losses_i.items():
@@ -194,12 +197,13 @@ class EncoderOutHandler(nn.Module):
         loss_calculator: LossCalculator,
         matcher: Optional[HungarianMatcher] = None,
         final_matched_indices: Optional[list[Tensor]] = None,
-    ):
+    ) -> tuple[dict[str, Tensor], list[Tensor]]:
         if final_matched_indices is not None:
             matched_indices = final_matched_indices
         else:
             assert matcher is not None
             matched_indices = matcher(encoder_output, target_dict)
+            assert is_tensor_list(matched_indices)
             matched_indices = [
                 mi.to(encoder_output["pred_logits"].device) for mi in matched_indices
             ]
@@ -240,13 +244,14 @@ class DenoisingHandler(nn.Module):
         denoising_output: dict[str, Any],
         target_dict: dict[str, Any],
         aux_loss_handler: Optional[AuxLossHandler] = None,
-    ):
+    ) -> dict[str, Tensor]:
         # Compute denoising losses using same loss calculator
         denoising_losses = self.main_criterion.loss_calculator(
             denoising_output,
             target_dict,
             matched_indices=denoising_output["denoising_matched_indices"],
         )
+        assert is_str_dict(denoising_losses)
 
         # Compute aux losses using same aux loss calculator
         if "aux_outputs" in denoising_output:
@@ -259,7 +264,7 @@ class DenoisingHandler(nn.Module):
             denoising_losses.update(denoising_aux_losses)
 
         # label denoising losses as such
-        denoising_losses = {f"dn/{k}": v for k, v in denoising_losses}
+        denoising_losses = {f"dn/{k}": v for k, v in denoising_losses.items()}
         return denoising_losses
 
     def apply_loss_weights(self, loss_dict: dict[str, Tensor]) -> dict[str, Tensor]:

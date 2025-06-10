@@ -1,2 +1,2 @@
-events_per_image_range: [10, 10]
+events_per_image_range: [10, 20]
 new_grid_size: [64, 64]

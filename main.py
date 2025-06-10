@@ -1,41 +1,35 @@
-import os
-from typing import Union, cast
-import hydra
-import yaml
-from hydra.utils import get_original_cwd, to_absolute_path
-from omegaconf import DictConfig, OmegaConf
-import time
 import datetime
 import logging
+import os
+import time
+from typing import Any, Union, cast
 
-import torch
-from torch import Tensor, nn
-
-import MinkowskiEngine as ME
-
+import hydra
 import lightning as L
+import MinkowskiEngine as ME
+import torch
+import yaml
+from hydra.utils import get_original_cwd, to_absolute_path
 from lightning.fabric import Fabric
-from lightning.fabric.strategies.ddp import DDPStrategy
-from lightning.fabric.loggers.tensorboard import TensorBoardLogger
 from lightning.fabric.loggers.csv_logs import CSVLogger
+from lightning.fabric.loggers.tensorboard import TensorBoardLogger
+from lightning.fabric.strategies.ddp import DDPStrategy
+from omegaconf import DictConfig, OmegaConf
+from torch import Tensor, nn
 from torchmetrics.aggregation import RunningMean
-
 from transformers import get_cosine_schedule_with_warmup
 
-from emsim.networks import (
-    EMModel,
-    EMCriterion,
-)
-from emsim.networks.loss.utils import Mode
+from emsim.config.registry import Config, register_configs
 from emsim.geant.dataset import (
-    make_test_train_datasets,
     electron_collate_fn,
+    make_test_train_datasets,
     worker_init_fn,
 )
 from emsim.geant.io import convert_electron_pixel_file_to_hdf5
+from emsim.networks.loss.criterion import EMCriterion
+from emsim.networks.model import EMModel
 from emsim.preprocessing import NSigmaSparsifyTransform
-from emsim.config.system import SystemConfig
-from emsim.config.registry import register_configs, Config
+from emsim.utils.misc_utils import is_str_dict
 
 _logger = logging.getLogger(__name__)
 
@@ -49,11 +43,15 @@ register_configs()
 
 @hydra.main(version_base=None, config_path="./conf", config_name="config")
 def main(cfg: DictConfig):
+    """Main run script."""
+    # handle hydra config dict object
     if not isinstance(cfg, Config):
-        config: Config = cast(Config, OmegaConf.to_object(cfg))
+        config = OmegaConf.to_object(cfg)
         assert isinstance(config, Config)
     else:
         config = cfg
+
+    # Set up logging
     _logger.setLevel(config.training.log_level)
     _logger.info("Starting...")
     output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
@@ -66,7 +64,11 @@ def main(cfg: DictConfig):
                 else "lightning_logs"
             ),
         )
-        tb_logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
+        param_log_dict = OmegaConf.to_container(cfg, resolve=True)
+        assert is_str_dict(param_log_dict)
+        tb_logger.log_hyperparams(param_log_dict)
+
+    # Create Fabric object for DDP
     if config.system.device == "cpu":
         fabric = Fabric(accelerator="cpu")
     elif config.system.device == "cuda":
@@ -88,13 +90,19 @@ def main(cfg: DictConfig):
         )
     else:
         raise ValueError(f"Unrecognized device {config.system.device}")
+
+    # Log params
     if fabric.is_global_zero:
         _logger.info("Setting up...")
         _logger.info(print(yaml.dump(OmegaConf.to_container(cfg, resolve=True))))
         with open(os.path.join(output_dir, "config.yaml"), "w") as f:
             OmegaConf.save(cfg, f, True)
+
+    # Launch Fabric
     fabric.seed_everything(config.system.seed + fabric.global_rank)
     fabric.launch()
+
+    # Build Pytorch model
     model = EMModel.from_config(config.model)
     if config.model.backbone.convert_sync_batch_norm and fabric.world_size > 1:
         model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
@@ -103,11 +111,12 @@ def main(cfg: DictConfig):
             _logger.info("torch.compile-ing model...")
         model = torch.compile(model, dynamic=True)
 
+    # load data
     electron_hdf_file = os.path.join(
         config.dataset.directory,
         os.path.splitext(config.dataset.pixels_file)[0] + ".hdf5",
     )
-    if not os.path.exists(electron_hdf_file):
+    if not os.path.exists(electron_hdf_file):  # need to convert txt to hdf5
         if fabric.is_global_zero:
             pixels_file = os.path.join(
                 config.dataset.directory, config.dataset.pixels_file
@@ -115,7 +124,9 @@ def main(cfg: DictConfig):
             _logger.info(f"Converting {pixels_file} to {electron_hdf_file}...")
             convert_electron_pixel_file_to_hdf5(pixels_file, electron_hdf_file)
             _logger.info("Done converting.")
-    fabric.barrier()
+    fabric.barrier()  # wait for data to be converted if necessary
+
+    # make dataset and dataloader objects
     train_dataset, eval_dataset = make_test_train_datasets(
         electron_hdf_file=electron_hdf_file,
         events_per_image_range=config.dataset.events_per_image_range,
@@ -150,6 +161,7 @@ def main(cfg: DictConfig):
         worker_init_fn=worker_init_fn,
     )
 
+    # make optimizer and lr scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.lr)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer,
@@ -157,13 +169,14 @@ def main(cfg: DictConfig):
         config.training.num_steps,
     )
 
-    ## prepare fabric
+    # give training objects to fabric
     assert isinstance(model, nn.Module)
     model, optimizer = fabric.setup(model, optimizer)
     train_dataloader, eval_dataloader = fabric.setup_dataloaders(
         train_dataloader, eval_dataloader
     )
 
+    # load checkpoint if resuming
     if config.training.resume_file is not None:
         start_iter = load(config.training.resume_file, model, optimizer, fabric)
     else:
@@ -193,17 +206,23 @@ def train(
     save_dir,
     start_iter: int = 0,
 ):
-    if config.system.ddp.detect_anomaly:
+    """Main training loop."""
+    if config.system.ddp.detect_anomaly:  # debug option
         torch.autograd.set_detect_anomaly(True)
-    ## main training loop
+
+    # iter timer for logging
     iter_timer = RunningMean(config.training.print_interval).to(fabric.device)
+
+    # training setup
     model.train()
     iter_loader = iter(train_dataloader)
-    if fabric.is_global_zero:
-        _logger.info("Begin training.")
     epoch = 0
     criterion: EMCriterion = model.criterion
     training_start_time = time.time()
+    if fabric.is_global_zero:
+        _logger.info("Begin training.")
+
+    # run for N steps instead of N epochs
     for i in range(start_iter, config.training.num_steps):
         t0 = time.time()
         try:
@@ -215,26 +234,34 @@ def train(
             iter_loader = iter(train_dataloader)
             batch = next(iter_loader)
 
+        # forward pass
         loss_dict, model_output = model(batch)
+        assert is_str_dict(loss_dict)
         total_loss = loss_dict["loss"]
         if not torch.isfinite(total_loss):
             raise ValueError(f"Got invalid loss: {total_loss} on step {i}")
+
+        # backward pass
         fabric.backward(total_loss)
         fabric.clip_gradients(model, optimizer, config.training.max_grad_norm)
         if config.system.ddp.find_unused_parameters:
             __debug_find_unused_parameters(model)
+
+        # step everything
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()
 
+        # log
         with torch.no_grad():
             log_dict = fabric.all_reduce(loss_dict, reduce_op="mean")
-        assert isinstance(log_dict, dict)
+        assert is_str_dict(log_dict)
         log_dict["lr"] = lr_scheduler.get_last_lr()[0]
 
+        # on log interval, average metrics and print them
         if i % config.training.print_interval == 0 and i > 0:
             criterion.metric_manager.update_detection_metrics(
-                Mode.TRAIN, model_output, batch
+                "train", model_output, batch
             )
             metric_log_dict = criterion.metric_manager.get_logs("train")
             log_str = criterion.metric_manager.make_log_str(metric_log_dict)
@@ -249,19 +276,23 @@ def train(
             metric_log_dict["iter_time"] = iter_time
             log_dict.update(metric_log_dict)
 
+        # log to tensorboard
         log_dict = criterion.metric_manager.format_log_keys(log_dict)
         fabric.log_dict(log_dict, step=i)
 
+        # evaluate every eval_steps steps
         if i > 0 and i % config.training.eval_steps == 0:
             save(save_dir, f"step_{i}", model, optimizer, fabric, i)
             eval(epoch, i, t0, model, eval_dataloader, fabric)
             model.train()
 
         iter_timer.update(time.time() - t0)
+
         # MinkowskiEngine says to clear the cache periodically
         if i > 0 and i % config.training.clear_cache_interval == 0:
             torch.cuda.empty_cache()
 
+    # all done
     save(save_dir, "final", model, optimizer, fabric, i)
     if fabric.is_global_zero:
         elapsed_time_str = _elapsed_time_str(time.time() - training_start_time)
@@ -283,7 +314,7 @@ def eval(
     for batch in eval_loader:
         output = model(batch)
         criterion.evaluate_batch(output, batch)
-    metric_log_dict = criterion.get_logs("eval")
+    metric_log_dict = criterion.metric_manager.get_logs("eval")
     metric_log_dict = criterion.metric_manager.format_log_keys(metric_log_dict)
     log_str = criterion.metric_manager.make_log_str(metric_log_dict)
     elapsed_time = time.time() - start_time

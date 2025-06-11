@@ -235,6 +235,7 @@ class EncoderOutHandler(nn.Module):
 
 class DenoisingHandler(nn.Module):
     def __init__(self, config: CriterionConfig):
+        super().__init__()
         self.register_buffer(
             "denoising_loss_weight", torch.tensor(config.denoising_loss_weight)
         )

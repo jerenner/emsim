@@ -343,10 +343,15 @@ class TestUnit:
 
         tensor_copy = tensor.clone()
 
-        tensor_sorted, sorted_idx = lexsort_nd(tensor, vector_dim, sort_dim)
+        tensor_sorted, _ = lexsort_nd(tensor, vector_dim, sort_dim)
+        tensor_sorted_stable, sorted_idx_stable = lexsort_nd(
+            tensor, vector_dim, sort_dim, stable=True
+        )
+        assert torch.equal(tensor_sorted, tensor_sorted_stable)
         tensor_sorted_robust, sorted_idx_robust = lexsort_nd(
             tensor_copy.clone(), vector_dim, sort_dim, force_robust=True
         )
+        assert torch.equal(sorted_idx_stable, sorted_idx_robust)
         tensor_sorted_int, _ = lexsort_nd(tensor_copy.long(), vector_dim, sort_dim)
         numpy_sorted, numpy_idx = lexsort_nd_numpy(tensor_copy, vector_dim, sort_dim)
 

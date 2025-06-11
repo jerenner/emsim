@@ -112,6 +112,7 @@ def make_test_train_datasets(
             noise_std=noise_std,
             shuffle=False,
             shared_shuffle_seed=shared_shuffle_seed,
+            new_grid_size=new_grid_size,
         )
     else:
         test_dataset = None

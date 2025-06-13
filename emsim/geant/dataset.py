@@ -1,6 +1,8 @@
+import os
 from math import ceil, floor
 from typing import Any, Callable, Optional, Union, Sequence, cast
 import logging
+from typing_extensions import TypeGuard
 
 import numpy as np
 import sparse
@@ -9,13 +11,15 @@ import torch
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import default_collate
 
+from emsim.config.dataset import DatasetConfig
 from emsim.dataclasses import (
     BoundingBox,
     IonizationElectronPixel,
     PixelSet,
     IncidencePoint,
 )
-from emsim.geant.dataclasses import GeantElectron, Trajectory, GeantGridsize
+from emsim.preprocessing import NSigmaSparsifyTransform
+from emsim.geant.dataclasses import GeantElectron, GeantGridsize
 from emsim.geant.io import (
     read_electrons_from_hdf,
 )
@@ -118,6 +122,27 @@ def make_test_train_datasets(
         test_dataset = None
 
     return train_dataset, test_dataset
+
+
+def make_datasets_from_config(cfg: DatasetConfig):
+    hdf_file = os.path.join(
+        cfg.directory, os.path.splitext(cfg.pixels_file)[0] + ".hdf5"
+    )
+    return make_test_train_datasets(
+        electron_hdf_file=hdf_file,
+        events_per_image_range=cfg.events_per_image_range,
+        pixel_patch_size=cfg.pixel_patch_size,
+        hybrid_sparse_tensors=False,
+        train_percentage=cfg.train_percentage,
+        noise_std=cfg.noise_std,
+        transform=NSigmaSparsifyTransform(
+            cfg.n_sigma_sparsify,
+            cfg.pixel_patch_size,
+            max_pixels_to_keep=cfg.max_pixels_to_keep,
+        ),
+        shared_shuffle_seed=cfg.shared_shuffle_seed,
+        new_grid_size=cfg.new_grid_size,
+    )
 
 
 def worker_init_fn(worker_id: int):
@@ -674,6 +699,10 @@ def shift_pixel(pixel: IonizationElectronPixel, pixel_shift: np.ndarray):
     return IonizationElectronPixel(new_xy[0], new_xy[1], pixel.ionization_electrons)
 
 
+def is_ionizationpixellist(x: Any) -> TypeGuard[Sequence[IonizationElectronPixel]]:
+    return all(isinstance(x_i, IonizationElectronPixel) for x_i in x)
+
+
 def regrid_electron(
     electron: GeantElectron,
     new_grid_size: Union[np.ndarray, int, list[int]],
@@ -708,11 +737,9 @@ def regrid_electron(
     adj_pixel_shift = pixel_shift_xy + pad_neg - pad_pos
 
     assert all(adj_pixel_shift == np.floor(adj_pixel_shift))  # check is integer pixels
+    assert is_ionizationpixellist(electron.pixels._pixels)
     new_pixelset = PixelSet(
-        [
-            shift_pixel(cast(IonizationElectronPixel, pixel), adj_pixel_shift)
-            for pixel in electron.pixels
-        ]
+        [shift_pixel(pixel, adj_pixel_shift) for pixel in electron.pixels._pixels]
     )
     if (
         new_pixelset.xmin() < border_pixels[0]
@@ -723,7 +750,7 @@ def regrid_electron(
         # electron does not fit on the new grid with specified borders
         return None
 
-    new_incidence_pixel_xy = incidence_pixel_xy - pixel_shift_xy
+    new_incidence_pixel_xy = incidence_pixel_xy - adj_pixel_shift
     new_incidence_mm = new_incidence_pixel_xy * electron.grid.pixel_size_um / 1000
     new_incidence_mm = np.round(new_incidence_mm, 5)
 

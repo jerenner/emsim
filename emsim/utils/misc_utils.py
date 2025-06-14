@@ -18,9 +18,11 @@ def random_chunks(
     else:
         if rng is None:
             rng = np.random.default_rng()
-        chunk_sizes = rng.integers(min_size, max_size, size=len(x) // min_size)
-    chunk_sizes = np.concatenate([[0], chunk_sizes], 0)
-    start_indices = np.cumsum(chunk_sizes)
+        chunk_sizes = rng.integers(
+            min_size, max_size, size=len(x) // min_size, endpoint=True
+        )
+    start_indices = np.zeros(len(chunk_sizes) + 1, dtype=chunk_sizes.dtype)
+    start_indices[1:] = np.cumsum(chunk_sizes)
     chunked = [
         x[start:stop] for start, stop in zip(start_indices[:-1], start_indices[1:])
     ]

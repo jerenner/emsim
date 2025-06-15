@@ -20,3 +20,6 @@ class DatasetConfig:
 
     # if not None, re-map the electrons onto a new grid
     new_grid_size: Optional[list[int]] = None
+
+    # shared seed among all workers for dataset shuffling
+    shared_shuffle_seed: int = "${system.seed}"  # pyright: ignore[reportAssignmentType]

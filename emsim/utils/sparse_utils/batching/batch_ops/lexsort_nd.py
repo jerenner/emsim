@@ -332,7 +332,7 @@ def _lexsort_nd_int(
     component_min, component_max = tensor.aminmax(dim=0, keepdim=True)
     component_range = component_max.long() - component_min.long()
 
-    if (component_range < 0).any():  # Integer overflow
+    if (component_range + 1 < 0).any():  # Integer overflow
         # attempt sorting with float
         # (will itself fall back to robust if it can't sort)
         sort_indices = _lexsort_nd_float(

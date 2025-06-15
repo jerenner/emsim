@@ -152,42 +152,15 @@ def _break_float_ties(
     return idx_sorted_2d.view_as(idx_sorted)
 
 
-def _safe_float_dtype(
-    input_dtype: torch.dtype, vec_len: int, step: int = 2
-) -> Optional[torch.dtype]:
-    """Return the narrowest dtype that can represent the full weight vector."""
-    exp_span = step * (vec_len - 1)
-    if exp_span <= _MANTISSA_BITS[input_dtype]:
-        return input_dtype
-    if (
-        input_dtype in (torch.float16, torch.bfloat16)
-        and exp_span <= _MANTISSA_BITS[torch.float32]
-    ):
-        return torch.float32
-    if exp_span <= _MANTISSA_BITS[torch.float64]:
-        return torch.float64
-    return None  # even fp64 is not enough
-
-
 def _lexsort_nd_float(
     tensor: Tensor,
     descending: bool = False,
     stable: bool = False,
-    skip_fixup: bool = False,
-) -> Tensor:
-    """Lexicographically sorts floating-point tensors by projecting each vector into
-    a 1D basis defined by powers of 2.
+) -> tuple[Tensor, Tensor]:
+    """Lexicographically sorts floating-point tensors.
 
-    This function normalizes each vector input element to [0, 1], and projects the
-    vectors into a 1D basis defined as w_i = 2 ^ (step * (V - 1) - step * i) for
-    i \\in {0, ..., V}. The value of `step` is taken to be the mantissa bits of
-    `tensor`'s dtype minus 1. The input vectors are potentially upcasted if V is too
-    large to fit larger w_i's into the input tensor's dtype.
-    After sorting the projected elements, this function "breaks ties" with a targeted
-    fixup routine that stably sorts the original values whose projected versions were
-    found to be equal, either due to rounding errors or the input vectors actually
-    being equal. This fixup requires N_equal * V sorts of N_equal_elements, but in
-    practice should be significantly faster than the initial sort.
+    For now, this function just falls back to the robust sort. In the future, it will
+    use a multi-pass top-down segmented sort instead for greater efficiency.
 
     Args:
         tensor (Tensor): Floating-point tensor to be sorted. Must be permuted to have
@@ -196,79 +169,14 @@ def _lexsort_nd_float(
         descending (bool): Whether the sort should be in descending order.
             Default: False.
         stable (bool): Whether the sort should be stable (ordering of equal elements
-            kept). Note that the post-processing fixup robust sort already stably
-            sorts all duplicate elements, so the only real effect of this flag being
-            True is to make the initial projection sort slightly more expensive but
-            ensure its run-to-run consistency. Default: False.
-        skip_fixup (bool): If True, the final step of stably re-sorting values that are
-            equal in the projection space is skipped. Setting this to True means that
-            the output is not actually guaranteed to be sorted, so only do so if
-            performance is more important than correctness in your application.
-            Default: False.
+            kept). Currently ignored, and the sort is always stable.
 
     Returns:
-        sort_indices (Tensor): Long tensor of shape `tensor.shape[:-1]` with sort indices
-            for the input tensor. The sorted vectors are retrievable with
+        sort_indices (Tensor): Long tensor of shape `tensor.shape[:-1]` with sort
+            indices for the input tensor. The sorted vectors are retrievable with
             `tensor.gather(0, sort_indices.unsqueeze(-1).expand_as(tensor))`
     """
-    # vector_len = tensor.size(-1)
-
-    # # upcast bfloat - too flaky
-    # if tensor.dtype == torch.bfloat16:
-    #     tensor = tensor.float()
-
-    # # Exponential step size for base-2 encoding. Could be lowered to squeeze more
-    # # vector dims into smaller float dtypes at the cost of decreased initial sort
-    # # precision
-    # exp_step = _MANTISSA_BITS[tensor.dtype] - 1
-
-    # dtype = _safe_float_dtype(tensor.dtype, vector_len, step=exp_step)
-    # if dtype is None:  # Vector too long to losslessly compress: use robust impl
-    #     return _lexsort_nd_robust(tensor, descending)
-
-    # if dtype != tensor.dtype:
-    #     exp_step = _MANTISSA_BITS[dtype] - 1
-
-    # # 1. Normalize
-    # tensor_conv = tensor.to(dtype)
-    # component_min, component_max = tensor_conv.aminmax(dim=0, keepdim=True)
-    # component_range = component_max - component_min
-    # eps = _EPSILON[dtype]
-    # tensor_normed = (tensor_conv - component_min) / component_range.clamp_min(eps)
-
-    # # 2. weight vector (declining powers of 2)
-    # start_exp = exp_step * (vector_len - 1)
-    # weights = torch.exp2(
-    #     torch.arange(start_exp, -1, -exp_step, dtype=dtype, device=tensor.device)
-    # )  # shape (vector_len,)
-    # # weights = torch.logspace(start_exp, 0, vector_len, base=2, device=weights.device) # alternate method
-
-    # # 3. projection + sort
-    # proj = torch.matmul(tensor_normed, weights)
-    proj = tensor[..., 0]
-    proj_sorted, idx_sorted = torch.sort(
-        proj, dim=0, descending=descending, stable=stable
-    )
-
-    # 4. break ties
-    if not skip_fixup:
-        idx_sorted = _break_float_ties(tensor, proj_sorted, idx_sorted, descending)
-    return idx_sorted
-
-
-@torch.jit.script
-def _reduce_bitwise_or(tensor: Tensor, dim: int, keepdim: bool = False) -> Tensor:
-    out_shape = list(tensor.shape)
-    if keepdim:
-        out_shape[dim] = 1
-    else:
-        out_shape.pop(dim)
-    out = tensor.new_zeros(out_shape)
-    for subtensor in tensor.unbind(dim):
-        if keepdim:
-            subtensor = subtensor.unsqueeze(dim)
-        out |= subtensor
-    return out
+    return _lexsort_nd_robust(tensor, descending=descending)
 
 
 class LexsortIntOut(NamedTuple):
@@ -290,7 +198,7 @@ def _compute_sorted_inverse(sorted_tensor: Tensor) -> tuple[Tensor, Tensor]:
             each index of sorted_tensor
         has_duplicates (Tensor): Boolean tensor of shape [...] that is True if that
             batch of sorted vectors has any duplicate vectors
-        """
+    """
     new_group = sorted_tensor.new_zeros(sorted_tensor.shape[:-1], dtype=torch.bool)
     new_group[1:] = (sorted_tensor[1:] != sorted_tensor[:-1]).any(-1)
     sorted_inverse = new_group.cumsum(0, dtype=torch.long)
@@ -306,7 +214,7 @@ def _lexsort_nd_int(
 
     If the input values cannot be compressed to 64 bits due to the vector dimension
     being too large and/or the ranges of values being too large, this function falls
-    back to the "true" multi-pass lexicographic sort.
+    back to the robust sort.
 
     Args:
         tensor (Tensor): Integer tensor to be sorted. Must be permuted to have the sort
@@ -317,13 +225,17 @@ def _lexsort_nd_int(
             Default: False
         return_unique_inverse (bool): If True, this function will also return the
             second output of unique_consecutive(return_inverse=True, dim=0) on the
-            sorted keys, i.e., a tensor of ascending long integers
+            sorted keys, i.e., a tensor of ascending long integers.
 
     Returns:
-        sort_indices (Tensor): Long tensor of shape `tensor.shape[:-1]` with sort indices
-            for the input tensor. The sorted vectors are retrievable with
-            `tensor.gather(0, sort_indices.unsqueeze(-1).expand_as(tensor))`
-        unique_inverse (Optional[Tensor]): Returned if return_unique_inverse is True.
+        LexsortIntOut: A namedtuple subclass containing:
+            - sort_indices (Tensor): Long tensor of shape `tensor.shape[:-1]` with sort
+                indices for the input tensor. The sorted vectors are retrievable with
+                `tensor.gather(0, sort_indices.unsqueeze(-1).expand_as(tensor))`
+            - sorted_inverse (Optional[Tensor]): Returned if return_unique_inverse is True.
+            - has_duplicates (Optional[Tensor]): A tensor with the same shape as the batch
+                dimensions that specifies whether each sequence has duplicates. Returned
+                only if return_unique_inverse is True.
     """
     vector_len = tensor.size(-1)
 
@@ -337,15 +249,13 @@ def _lexsort_nd_int(
         # (will itself fall back to robust if it can't sort)
         sort_indices = _lexsort_nd_float(
             tensor.double(), descending=descending, stable=stable
-        )
-        if return_unique_inverse:
-            sorted_tensor = tensor.gather(
-                0, sort_indices.unsqueeze(-1).expand_as(tensor)
-            )
-            sorted_inverse, has_duplicates = _compute_sorted_inverse(sorted_tensor)
-            return LexsortIntOut(sort_indices, sorted_inverse, has_duplicates)
+        )[1]
+        if not return_unique_inverse:
+            return LexsortIntOut(sort_indices)
 
-        return LexsortIntOut(sort_indices)
+        sorted_tensor = tensor.gather(0, sort_indices.unsqueeze(-1).expand_as(tensor))
+        sorted_inverse, has_duplicates = _compute_sorted_inverse(sorted_tensor)
+        return LexsortIntOut(sort_indices, sorted_inverse, has_duplicates)
 
     # 2. Absolute largest range of values for each vector component across batches
     max_range = component_range.view(-1, vector_len).amax(dim=0)  # (vector_len,)
@@ -385,7 +295,9 @@ def _lexsort_nd_int(
     # 6. sort on the keys
     if n_keys == 1:
         # Accomplish with a single sort
-        sorted_keys, sort_indices = keys.sort(dim=0, descending=descending, stable=stable)
+        sorted_keys, sort_indices = keys.sort(
+            dim=0, descending=descending, stable=stable
+        )
         sort_indices = sort_indices.squeeze(-1)
     else:
         sorted_keys, sort_indices = _lexsort_nd_robust(
@@ -523,8 +435,9 @@ def lexsort_nd(
             tensor_permuted, descending=descending
         )
     elif torch.is_floating_point(tensor_permuted):
-        indices = _lexsort_nd_float(tensor_permuted, descending, stable)
-        sorted_tensor_permuted = None
+        sorted_tensor_permuted, indices = _lexsort_nd_float(
+            tensor_permuted, descending, stable
+        )
     elif tensor_permuted.dtype in _INT_TYPES:
         indices = _lexsort_nd_int(tensor_permuted, descending, stable).sort_indices
         sorted_tensor_permuted = None

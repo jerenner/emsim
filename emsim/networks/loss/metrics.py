@@ -182,6 +182,7 @@ class MetricManager(nn.Module):
 
         metrics["eval_time"].update(time.time() - start)
 
+    @torch.no_grad()
     def update_from_dict(
         self,
         mode: Union[str, Mode],
@@ -191,6 +192,7 @@ class MetricManager(nn.Module):
         for k, v in loss_dict.items():
             metrics[k].update(v)
 
+    @torch.no_grad()
     def update_classification_metrics(
         self,
         mode: Mode,
@@ -233,6 +235,7 @@ class MetricManager(nn.Module):
         for metric in metrics.values():
             recursive_reset(metric)
 
+    @torch.no_grad()
     def get_logs(self, mode: Union[str, Mode], reset: bool = True) -> dict[str, Tensor]:
         mode = resolve_mode(mode)
         metrics = self.get_metrics(mode)
@@ -256,6 +259,7 @@ class MetricManager(nn.Module):
         return log_dict
 
 
+@torch.no_grad()
 def _flatten_metrics(metric_dict) -> dict[str, Tensor]:
     out = {}
     for k, v in metric_dict.items():

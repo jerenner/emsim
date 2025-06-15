@@ -69,6 +69,64 @@ def match_single_detection(
         return torch.tensor(-1, device=match_index.device)
 
 
+def _match_loop(
+    sorted_indices: Tensor,
+    sorted_positions: Tensor,
+    sorted_scores: Tensor,
+    target_positions: Tensor,
+    distance_threshold: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    device = sorted_positions.device
+    n_targets = target_positions.size(0)
+    # Compute pairwise distances for detections above score threshold
+    pairwise_distances = torch.cdist(sorted_positions, target_positions)  # (N, M)
+    distances_within_threshold = pairwise_distances <= distance_threshold
+
+    # Trackers for matched targets
+    target_indices = torch.arange(n_targets, device=device)
+    target_matched = torch.zeros(n_targets, device=device, dtype=torch.bool)
+
+    matches = []  # Pairs (pred, tgt) for matches
+    match_scores = []  # Prediction scores for matches
+    no_matches = []  # Predictions with no matches
+    no_match_scores = []  # Scores of unmatched predictions
+    for i, (pred_idx, score) in enumerate(zip(sorted_indices, sorted_scores)):
+        targets_in_range = distances_within_threshold[i] & ~target_matched
+        if not targets_in_range.any():  # no match among targets
+            no_matches.append(pred_idx)
+            no_match_scores.append(score)
+        else:
+            # Find closest target
+            match_index = pairwise_distances[i][targets_in_range].argmin()
+            # Convert local argmin to global target index
+            matched_target_id = target_indices[targets_in_range][match_index]
+
+            # record matched pair
+            matches.append(torch.stack([pred_idx, matched_target_id]))
+            match_scores.append(score)
+
+            # Mark target as matched
+            target_matched[matched_target_id] = True
+
+    # Stack outputs
+    if len(matches) > 0:
+        true_positives = torch.stack(matches)
+        tp_scores = torch.stack(match_scores)
+    else:
+        true_positives = torch.zeros((0, 2), dtype=torch.long, device=device)
+        tp_scores = torch.zeros((0,), dtype=sorted_scores.dtype, device=device)
+    if len(no_matches) > 0:
+        unmatched = torch.stack(no_matches)
+        unmatched_scores = torch.stack(no_match_scores)
+    else:
+        unmatched = torch.zeros((0,), dtype=torch.long, device=device)
+        unmatched_scores = torch.zeros((0,), dtype=sorted_scores.dtype, device=device)
+
+    false_negatives = target_indices[~target_matched]
+
+    return true_positives, tp_scores, unmatched, unmatched_scores, false_negatives
+
+
 @torch.jit.script
 def find_matches_for_image(
     predicted_positions: Tensor,
@@ -131,68 +189,54 @@ def find_matches_for_image(
 
     # Early exit for no targets
     if n_targets == 0:
-        return (
-            torch.zeros((0, 2), dtype=torch.long, device=device),
-            torch.zeros((0,), dtype=predicted_scores.dtype, device=device),
-            sorted_indices,
-            sorted_scores,
-            torch.zeros((0,), dtype=torch.long, device=device),
-        )
-
-    # Compute pairwise distances
-    pairwise_distances = torch.cdist(sorted_positions, target_positions)  # (N, M)
-    distances_within_threshold = pairwise_distances <= distance_threshold
-
-    target_indices = torch.arange(n_targets, device=device)
-    target_matched = torch.zeros(n_targets, device=device, dtype=torch.bool)
-
-    matches = []
-    no_matches = []  # Predictions with no matches
-    match_scores = []
-    no_match_scores = []
-    for i, (pred_idx, score) in enumerate(zip(sorted_indices, sorted_scores)):
-        if min_score is not None and score < min_score:
-            # All remaining predictions are below threshold, so store them as unmatched
-            no_matches.append(sorted_indices[i:])
-            no_match_scores.append(sorted_scores[i:])
-            break
-
-        targets_in_range = distances_within_threshold[i] & ~target_matched
-        if not targets_in_range.any():  # no match among targets
-            no_matches.append(pred_idx)
-            no_match_scores.append(score)
-        else:
-            # Find closest target
-            match_index = pairwise_distances[i][targets_in_range].argmin()
-            # Convert local argmin to global target index
-            matched_target_id = target_indices[targets_in_range][match_index]
-
-            # record matched pair
-            matches.append(torch.stack([pred_idx, matched_target_id]))
-            match_scores.append(score)
-
-            # Mark target as matched
-            target_matched[matched_target_id] = True
-
-    # Stack outputs
-    if len(matches) > 0:
-        true_positives = torch.stack(matches)
-        tp_scores = torch.stack(match_scores)
-    else:
         true_positives = torch.zeros((0, 2), dtype=torch.long, device=device)
         tp_scores = torch.zeros((0,), dtype=predicted_scores.dtype, device=device)
-    if len(no_matches) > 0:
-        unmatched = torch.stack(no_matches)
-        unmatched_scores = torch.stack(no_match_scores)
-    else:
-        unmatched = torch.zeros((0,), dtype=torch.long, device=device)
-        unmatched_scores = torch.zeros((0,), dtype=predicted_scores.dtype, device=device)
+        unmatched = sorted_indices
+        unmatched_scores = sorted_scores
+        false_negatives = torch.zeros((0,), dtype=torch.long, device=device)
+        return true_positives, tp_scores, unmatched, unmatched_scores, false_negatives
 
-    false_negatives = target_indices[~target_matched]  # unmatched targets
+    # Filter out "detections" that fall below min score threshold
+    if min_score is None:
+        keep_mask = torch.ones_like(sorted_scores, dtype=torch.bool)
+    else:
+        keep_mask = sorted_scores >= min_score
+
+    kept_indices = sorted_indices[keep_mask]
+    kept_positions = sorted_positions[keep_mask]
+    kept_scores = sorted_scores[keep_mask]
+
+    skipped_indices = sorted_indices[~keep_mask]
+    skipped_scores = sorted_scores[~keep_mask]
+
+    if kept_indices.numel() == 0:  # All "detections" were under the score threshold
+        true_positives = torch.zeros((0, 2), dtype=torch.long, device=device)
+        tp_scores = torch.zeros((0,), dtype=predicted_scores.dtype, device=device)
+        unmatched = skipped_indices
+        unmatched_scores = skipped_scores
+        false_negatives = torch.arange(n_targets, device=device)
+        return true_positives, tp_scores, unmatched, unmatched_scores, false_negatives
+
+    # actually do the matching
+    true_positives, tp_scores, unmatched, unmatched_scores, false_negatives = (
+        _match_loop(
+            kept_indices,
+            kept_positions,
+            kept_scores,
+            target_positions,
+            distance_threshold,
+        )
+    )
+
+    # handle skipped predictions
+    if skipped_indices.size(0) > 0:
+        unmatched = torch.cat([unmatched, skipped_indices])
+        unmatched_scores = torch.cat([unmatched_scores, skipped_scores])
 
     return true_positives, tp_scores, unmatched, unmatched_scores, false_negatives
 
 
+@torch.no_grad()
 @torch.jit.script
 def match_detections(
     predicted_positions: list[Tensor],
@@ -242,7 +286,7 @@ def match_detections(
                 pred_logits.sigmoid(),
                 tgt_pos,
                 distance_threshold_pixels,
-                min_score=min_score
+                min_score=min_score,
             )
         )
 

@@ -148,7 +148,8 @@ def make_datasets_from_config(cfg: DatasetConfig):
 def worker_init_fn(worker_id: int):
     worker_info = torch.utils.data.get_worker_info()
     assert worker_info is not None
-    dataset: GeantElectronDataset = cast(GeantElectronDataset, worker_info.dataset)
+    dataset = worker_info.dataset
+    assert isinstance(dataset, GeantElectronDataset)
     dataset._set_noise_source_seed(worker_info.seed)
 
 
@@ -649,8 +650,9 @@ def electron_collate_fn(
 
     out_batch.update(default_collate_fn(to_default_collate))
 
-    out_batch["electron_batch_offsets"] = torch.as_tensor(
-        np.cumsum([0] + [len(item["electron_ids"]) for item in batch][:-1])
+    # normalized batch offsets
+    out_batch["electron_batch_offsets"] = torch.from_numpy(
+        np.cumsum([0] + [len(item["electron_ids"]) for item in batch])
     )
 
     return out_batch

@@ -443,8 +443,8 @@ class EMTransformer(nn.Module):
 
         batch_offsets = torch.cumsum(
             torch.tensor([feat.F.shape[0] for feat in backbone_features]), 0
-        )[:-1]
-        pos_encoded_feats = torch.tensor_split(pos_encoded_feats, batch_offsets)
+        )
+        pos_encoded_feats = split_batch_concatted_tensor(pos_encoded_feats, batch_offsets)
         pos_encoded_feats = [
             ME.SparseTensor(
                 pos_encoded.view_as(feat.F),

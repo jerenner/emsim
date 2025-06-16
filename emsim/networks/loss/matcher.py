@@ -7,6 +7,7 @@ from torch import Tensor, nn
 from torchvision.ops.boxes import generalized_box_iou
 
 from emsim.config.criterion import MatcherConfig
+from emsim.utils.sparse_utils.batching.batch_utils import split_batch_concatted_tensor
 from emsim.utils.sparse_utils.shape_ops import (
     sparse_flatten_hw,
 )
@@ -139,7 +140,7 @@ def get_class_cost(is_electron_logit: Tensor, batch_offsets: Tensor) -> list[Ten
     loss = F.binary_cross_entropy_with_logits(
         is_electron_logit, torch.ones_like(is_electron_logit), reduction="none"
     )
-    batch_losses = torch.tensor_split(loss, batch_offsets[1:].cpu(), 0)
+    batch_losses = split_batch_concatted_tensor(loss, batch_offsets)
     return list(batch_losses)
 
 
@@ -265,14 +266,14 @@ def get_nll_distance_cost(
     electron_batch_offsets: Tensor,
     image_sizes_xy: Tensor,
 ):
-    predicted_pos_per_image = torch.tensor_split(
-        predicted_positions, query_batch_offsets[1:].cpu(), 0
+    predicted_pos_per_image = split_batch_concatted_tensor(
+        predicted_positions, query_batch_offsets
     )
-    predicted_std_dev_per_image = torch.tensor_split(
-        predicted_std_dev_cholesky, query_batch_offsets[1:].cpu(), 0
+    predicted_std_dev_per_image = split_batch_concatted_tensor(
+        predicted_std_dev_cholesky, query_batch_offsets
     )
-    true_pos_per_image = torch.tensor_split(
-        true_positions, electron_batch_offsets[1:].cpu(), 0
+    true_pos_per_image = split_batch_concatted_tensor(
+        true_positions, electron_batch_offsets
     )
     image_size_per_image = image_sizes_xy.unbind(0)
 
@@ -311,14 +312,14 @@ def get_likelihood_distance_cost(
     electron_batch_offsets: Tensor,
     image_sizes_xy: Tensor,
 ):
-    predicted_pos_per_image = torch.tensor_split(
-        predicted_positions, query_batch_offsets[1:].cpu(), 0
+    predicted_pos_per_image = split_batch_concatted_tensor(
+        predicted_positions, query_batch_offsets
     )
-    predicted_std_dev_per_image = torch.tensor_split(
-        predicted_std_dev_cholesky, query_batch_offsets[1:].cpu(), 0
+    predicted_std_dev_per_image = split_batch_concatted_tensor(
+        predicted_std_dev_cholesky, query_batch_offsets
     )
-    true_pos_per_image = torch.tensor_split(
-        true_positions, electron_batch_offsets[1:].cpu(), 0
+    true_pos_per_image = split_batch_concatted_tensor(
+        true_positions, electron_batch_offsets
     )
     image_size_per_image = image_sizes_xy.unbind(0)
 
@@ -347,10 +348,10 @@ def get_huber_distance_cost(
     true_positions: Tensor,
     true_batch_offsets: Tensor,
 ) -> list[Tensor]:
-    predicted_batches = torch.tensor_split(
-        predicted_positions, predicted_batch_offsets[1:].cpu(), 0
+    predicted_batches = split_batch_concatted_tensor(
+        predicted_positions, predicted_batch_offsets
     )
-    true_batches = torch.tensor_split(true_positions, true_batch_offsets[1:].cpu(), 0)
+    true_batches = split_batch_concatted_tensor(true_positions, true_batch_offsets)
 
     return [
         batch_huber_loss(predicted, true)
@@ -365,10 +366,10 @@ def get_box_l1_cost(
     true_boxes_xyxy: Tensor,
     true_batch_offsets: Tensor,
 ) -> list[Tensor]:
-    predicted_batches = torch.tensor_split(
-        predicted_boxes_xyxy, predicted_batch_offsets[1:].cpu(), 0
+    predicted_batches = split_batch_concatted_tensor(
+        predicted_boxes_xyxy, predicted_batch_offsets
     )
-    true_batches = torch.tensor_split(true_boxes_xyxy, true_batch_offsets[1:].cpu(), 0)
+    true_batches = split_batch_concatted_tensor(true_boxes_xyxy, true_batch_offsets)
 
     return [
         torch.cdist(predicted, true, p=1.0)
@@ -383,10 +384,10 @@ def get_box_giou_cost(
     true_boxes_xyxy: Tensor,
     true_batch_offsets: Tensor,
 ) -> list[Tensor]:
-    predicted_batches = torch.tensor_split(
-        predicted_boxes_xyxy, predicted_batch_offsets[1:].cpu(), 0
+    predicted_batches = split_batch_concatted_tensor(
+        predicted_boxes_xyxy, predicted_batch_offsets
     )
-    true_batches = torch.tensor_split(true_boxes_xyxy, true_batch_offsets[1:].cpu(), 0)
+    true_batches = split_batch_concatted_tensor(true_boxes_xyxy, true_batch_offsets)
 
     return [
         -generalized_box_iou(predicted, true)

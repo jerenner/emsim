@@ -88,6 +88,7 @@ def unstack_batch(batch: dict[str, Tensor]) -> list[dict[str, Tensor]]:
             "normalized_incidence_points_xy",
             "incidence_points_pixels_rc",
             "normalized_centers_of_mass_xy",
+            "centers_of_mass_rc",
         )
     }
     split.update(
@@ -98,7 +99,7 @@ def unstack_batch(batch: dict[str, Tensor]) -> list[dict[str, Tensor]]:
     )
     split["image_sparsified"] = batch["image_sparsified"].unbind()
     out: list[dict[str, Tensor]] = []
-    for i in range(len(batch["electron_batch_offsets"])):
+    for i in range(len(batch["electron_batch_offsets"]) - 1):
         out.append({k: v[i] for k, v in split.items()})
     return out
 

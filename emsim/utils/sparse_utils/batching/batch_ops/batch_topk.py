@@ -50,7 +50,6 @@ def _normalize_k(
     return k.to(device=device, dtype=torch.long)
 
 
-@torch.jit.script
 def batch_topk(
     tensor: Tensor,
     batch_offsets: Tensor,

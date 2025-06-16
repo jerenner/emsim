@@ -236,8 +236,12 @@ class EMTransformer(nn.Module):
         topk_spatial_indices = encoder_out.indices()[:, topk_indices].T
 
         # deduplication via non-maximum suppression to get the final object query positions
+        assert topk_scores is not None
         nms_topk_indices = self.nms_on_topk_index(
-            topk_scores.squeeze(-1), topk_indices, topk_spatial_indices, iou_threshold=0.3
+            topk_scores.squeeze(-1),
+            topk_indices,
+            topk_spatial_indices,
+            iou_threshold=0.3,
         )
         # nms-filtered pixels/queries
         # Sort indices to preserve lexicographical order

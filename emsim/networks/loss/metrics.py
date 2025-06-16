@@ -98,16 +98,7 @@ class MetricManager(nn.Module):
         )
 
     def _build_detection_metrics(self):
-        detection_metrics = {}
-        for threshold in self.config.detection_metric_distance_thresholds:
-            # can't have periods in submodule names
-            name = str(threshold).replace(".", ",")
-            detection_metrics[name] = MetricCollection(
-                [BinaryPrecision(), BinaryRecall(), BinaryAveragePrecision()],
-                prefix=f"detection/{name}/",
-            )
-        detection_metrics["eval_time"] = MeanMetric()
-        return nn.ModuleDict(detection_metrics)
+        return DetectionMetrics(self.config.detection_metric_distance_thresholds)
 
     def _build_aux_metrics(self) -> dict[str, MeanMetric]:
         assert self.config.aux_loss.n_aux_losses > 0
@@ -157,30 +148,8 @@ class MetricManager(nn.Module):
         target_dict: dict[str, Any],
     ):
         metrics = self.get_metrics(mode)["detection"]
-        assert isinstance(metrics, nn.ModuleDict)
-        start = time.time()
-        pred_dict_list = unstack_model_output(
-            {k: v for k, v in predicted_dict.items() if isinstance(v, Tensor)}
-        )
-        tgt_dict_list = unstack_batch(target_dict)
-        assert len(pred_dict_list) == len(tgt_dict_list)
-
-        pred_positions = [pred["pred_positions"] for pred in pred_dict_list]
-        pred_logits = [pred["pred_logits"] for pred in pred_dict_list]
-        target_positions = [
-            tgt["incidence_points_pixels_rc"].to(pred)
-            for tgt, pred in zip(tgt_dict_list, pred_positions)
-        ]
-
-        for threshold in self.config.detection_metric_distance_thresholds:
-            detection_inputs, _, _ = match_detections(
-                pred_positions, pred_logits, target_positions, threshold, min_score=0.01
-            )
-            key = str(threshold).replace(".", ",")
-            for scores, labels in detection_inputs:
-                metrics[key].update(scores, labels)
-
-        metrics["eval_time"].update(time.time() - start)
+        assert isinstance(metrics, DetectionMetrics)
+        metrics(predicted_dict, target_dict)
 
     @torch.no_grad()
     def update_from_dict(
@@ -257,6 +226,51 @@ class MetricManager(nn.Module):
     def format_log_keys(log_dict: dict):
         log_dict = {k.replace("loss_", "loss/"): v for k, v in log_dict.items()}
         return log_dict
+
+
+class DetectionMetrics(nn.ModuleDict):
+    def __init__(self, distance_thresholds: list[float]):
+        super().__init__()
+        self.thresholds = distance_thresholds
+        detection_metrics = {}
+        for threshold in distance_thresholds:
+            # can't have periods in submodule names
+            name = str(threshold).replace(".", ",")
+            detection_metrics[name] = MetricCollection(
+                [BinaryPrecision(), BinaryRecall(), BinaryAveragePrecision()],
+                prefix=f"detection/{name}/",
+            )
+        detection_metrics["eval_time"] = MeanMetric()
+        self.update(detection_metrics)
+
+    def forward(
+        self,
+        predicted_dict: dict[str, Any],
+        target_dict: dict[str, Any],
+    ):
+        start = time.time()
+        pred_dict_list = unstack_model_output(
+            {k: v for k, v in predicted_dict.items() if isinstance(v, Tensor)}
+        )
+        tgt_dict_list = unstack_batch(target_dict)
+        assert len(pred_dict_list) == len(tgt_dict_list)
+
+        pred_positions = [pred["pred_positions"] for pred in pred_dict_list]
+        pred_logits = [pred["pred_logits"] for pred in pred_dict_list]
+        target_positions = [
+            tgt["incidence_points_pixels_rc"].to(pred)
+            for tgt, pred in zip(tgt_dict_list, pred_positions)
+        ]
+
+        for threshold in self.thresholds:
+            detection_inputs, _, _ = match_detections(
+                pred_positions, pred_logits, target_positions, threshold, min_score=0.01
+            )
+            key = str(threshold).replace(".", ",")
+            for scores, labels in detection_inputs:
+                self[key].update(scores, labels)
+
+        self["eval_time"].update(time.time() - start)
 
 
 @torch.no_grad()

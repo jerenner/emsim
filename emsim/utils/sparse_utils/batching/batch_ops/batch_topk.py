@@ -189,9 +189,11 @@ def batch_topk(
         # Clamp k to seq length
         seq_len_int = int(seq_lens[0].item())
         if dim == 0:
-            k_max_int = int(torch.min(k.amax(), seq_lens[0]).item())
+            k_max = torch.min(k.amax(), seq_lens[0])
         else:
-            k_max_int = int(k.amax().clamp_max(tensor.shape[dim]).item())
+            k_max = k.amax().clamp_max(tensor.shape[dim])
+        k = k.clamp_max(k_max)
+        k_max_int = int(k_max.item())
 
         # Compute per-batch result size
         if dim == 0:

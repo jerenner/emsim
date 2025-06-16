@@ -17,6 +17,7 @@ from ...utils.sparse_utils.batching import (
     batch_offsets_to_seq_lengths,
     batch_topk,
     split_batch_concatted_tensor,
+    seq_lengths_to_batch_offsets,
 )
 from ...utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
 from ...utils.sparse_utils.shape_ops import sparse_resize
@@ -441,10 +442,12 @@ class EMTransformer(nn.Module):
         )
         pos_encoded_feats = self.pos_embedding(stacked_feats, prepped_coords)
 
-        batch_offsets = torch.cumsum(
-            torch.tensor([feat.F.shape[0] for feat in backbone_features]), 0
+        batch_offsets = seq_lengths_to_batch_offsets(
+            torch.tensor([feat.F.shape[0] for feat in backbone_features])
         )
-        pos_encoded_feats = split_batch_concatted_tensor(pos_encoded_feats, batch_offsets)
+        pos_encoded_feats = split_batch_concatted_tensor(
+            pos_encoded_feats, batch_offsets
+        )
         pos_encoded_feats = [
             ME.SparseTensor(
                 pos_encoded.view_as(feat.F),

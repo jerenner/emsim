@@ -74,16 +74,26 @@ class EMCriterion(nn.Module):
 
         # Compute denoising losses if required
         if self.denoising_handler is not None and "denoising_output" in predicted_dict:
-            dn_loss_dict = self.denoising_handler(
-                predicted_dict["denoising_output"], target_dict, self.aux_loss_handler
+            dn_loss_dict, dn_extras_dict = self.denoising_handler(
+                predicted_dict["denoising_output"],
+                target_dict,
+                self.loss_calculator,
+                self.aux_loss_handler,
             )
             loss_dict.update(dn_loss_dict)
+            # update denoising metrics
+            self.metric_manager.update_classification_metrics(
+                Mode.DENOISING, predicted_dict["denoising_output"], dn_extras_dict
+            )
+            self.metric_manager.update_localization_metrics(
+                Mode.DENOISING, dn_extras_dict["position_data"]
+            )
 
         # Compute total loss
         loss_dict["loss"] = self._compute_total_loss(loss_dict)
 
         # Update metrics
-        self.metric_manager.update_from_dict(Mode.TRAIN, loss_dict)
+        self.metric_manager.update_from_loss_dict(loss_dict)
         self.metric_manager.update_classification_metrics(
             Mode.TRAIN, predicted_dict, extras_dict
         )
@@ -246,10 +256,11 @@ class DenoisingHandler(nn.Module):
         self,
         denoising_output: dict[str, Any],
         target_dict: dict[str, Any],
+        loss_calculator: LossCalculator,
         aux_loss_handler: Optional[AuxLossHandler] = None,
-    ) -> dict[str, Tensor]:
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         # Compute denoising losses using same loss calculator
-        denoising_losses = self.main_criterion.loss_calculator(
+        denoising_losses, denoising_extas_dict = loss_calculator(
             denoising_output,
             target_dict,
             matched_indices=denoising_output["denoising_matched_indices"],
@@ -268,7 +279,7 @@ class DenoisingHandler(nn.Module):
 
         # label denoising losses as such
         denoising_losses = {f"dn/{k}": v for k, v in denoising_losses.items()}
-        return denoising_losses
+        return denoising_losses, denoising_extas_dict
 
     def apply_loss_weights(self, loss_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         """Applies the denoising loss weight to tensors whose key in the loss dict

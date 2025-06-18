@@ -1,13 +1,19 @@
 import torch
 from torch import Tensor, nn
 
-from emsim.utils.sparse_utils.batching import split_batch_concatted_tensor
+from emsim.utils.sparse_utils.batching.batch_utils import (
+    split_batch_concatted_tensor,
+    normalize_batch_offsets,
+    batch_offsets_to_seq_lengths,
+    seq_lengths_to_batch_offsets,
+)
 from emsim.config.denoising import DenoisingConfig
 
 
 class DenoisingGenerator(nn.Module):
     def __init__(self, config: DenoisingConfig):
         super().__init__()
+        self.config = config
         self.embed_dim = config.embed_dim
         self.max_denoising_group_size = config.max_electrons_per_image
         self.max_total_denoising_queries = config.max_total_denoising_queries
@@ -22,233 +28,290 @@ class DenoisingGenerator(nn.Module):
         )
         self.pos_neg_queries_share_embedding = config.pos_neg_queries_share_embedding
 
-    def forward(self, batch_dict: dict[str, Tensor]):
+    def forward(
+        self, batch_dict: dict[str, Tensor]
+    ) -> tuple[list[Tensor], list[Tensor]]:
         true_positions = batch_dict["incidence_points_pixels_rc"]
         image_size = batch_dict["image_size_pixels_rc"]
-        electrons_per_image = batch_dict["batch_size"]
+        objects_per_image = batch_dict["batch_size"]
         batch_offsets = batch_dict["electron_batch_offsets"]
+        n_images = objects_per_image.size(0)
+        spatial_dim = image_size.size(-1)
+        device = true_positions.device
 
-        max_electrons_per_image = electrons_per_image.max()
+        max_electrons_per_image = int(objects_per_image.max())
+        n_total_objects = int(objects_per_image.sum())
         assert max_electrons_per_image > 0, "Zero case unsupported"
 
+        # Select 2x as many queries if positive and negative use different embeddings
+        posneg_mult = 1 if self.pos_neg_queries_share_embedding else 2
+        n_dn_embeddings = self.dn_query_embedding.weight.size(0)
+        needed_queries = posneg_mult * max_electrons_per_image
+        assert (
+            needed_queries <= n_dn_embeddings
+        ), f"Not enough denoising queries ({n_dn_embeddings}, need {needed_queries})"
+
         n_denoising_groups = max(
-            self.max_total_denoising_queries // sum(electrons_per_image) // 2, 1
+            int(self.max_total_denoising_queries // n_total_objects // 2), 1
         )
 
-        noised_positions = self.make_pos_neg_noised_positions(
-            true_positions, n_denoising_groups, image_size, electrons_per_image
+        true_positions_split = split_batch_concatted_tensor(
+            true_positions, batch_offsets
         )
-        assert noised_positions.ndim == 4
 
-        ext_batch_offsets = torch.cat(
-            [batch_offsets, batch_offsets.new_tensor([len(true_positions)])]
+        per_image_noised_positions = self.make_pos_neg_noised_positions(
+            true_positions_split, n_denoising_groups, image_size
         )
-        denoising_queries = self.dn_query_embedding.weight.new_zeros(
-            [*noised_positions.shape[:3], self.dn_query_embedding.weight.shape[1]]
+        # (dn group, object, pos/neg, spatial dim)
+        assert all(
+            pos.shape
+            == (n_denoising_groups, objects_per_image[b].item(), 2, spatial_dim)
+            for b, pos in enumerate(per_image_noised_positions)
         )
-        for i in range(len(electrons_per_image)):
-            n_electrons = electrons_per_image[i]
-            posneg_mult = 1 if self.pos_neg_queries_share_embedding else 2
-            assert (
-                n_electrons * posneg_mult <= self.dn_query_embedding.num_embeddings
-            ), "Not enough denoising embeddings"
-            query_indices = torch.randperm(
-                n_electrons * posneg_mult, device=denoising_queries.device
+
+        batch_offsets = normalize_batch_offsets(batch_offsets, n_total_objects)
+
+        # Extract denoising queries
+        # Random query permutation to ensure all get trained
+        query_permutation = torch.randperm(
+            max_electrons_per_image * posneg_mult, device=device
+        )
+        selected_queries = self.dn_query_embedding.weight.index_select(
+            0, query_permutation
+        )
+        per_image_queries = []
+        for b in range(n_images):
+            n_objects_b = int(objects_per_image[b])
+            queries_b = selected_queries[: (n_objects_b * posneg_mult)]
+            queries_b = (
+                queries_b.view(1, n_objects_b, posneg_mult, self.embed_dim)
+                .expand(n_denoising_groups, -1, 2, -1)
+                .contiguous()
             )
-            dn_queries_this_image: Tensor = self.dn_query_embedding(query_indices)
-            dn_queries_this_image = dn_queries_this_image.reshape(
-                n_electrons, 1, posneg_mult, -1
-            )
-            dn_queries_this_image = dn_queries_this_image.expand(
-                -1, n_denoising_groups, 2, -1
-            )
+            per_image_queries.append(queries_b)
 
-            start = ext_batch_offsets[i]
-            end = ext_batch_offsets[i + 1]
-            denoising_queries[start:end] = dn_queries_this_image
-
-        return denoising_queries, noised_positions
+        return per_image_queries, per_image_noised_positions
 
     def make_pos_neg_noised_positions(
         self,
-        true_positions_pixels_ij: Tensor,
+        true_positions_pixels_ij: list[Tensor],
         denoising_groups: int,
         image_size_rc: Tensor,
-        electrons_per_image: Tensor,
-    ):
-        true_positions_pixels_ij = true_positions_pixels_ij.unsqueeze(1).expand(
-            -1, denoising_groups, -1
-        )
-        position_noise = (
-            torch.randn_like(true_positions_pixels_ij) * self.position_noise_scale
-        )
+    ) -> list[Tensor]:
+        per_image_noised_positions = []
+        n_images = len(true_positions_pixels_ij)
+        for b in range(n_images):
+            true_pts_b = true_positions_pixels_ij[b]
+            expanded_pts = true_pts_b.unsqueeze(0).expand(denoising_groups, -1, -1)
 
-        pos_points = true_positions_pixels_ij + position_noise
-        neg_points = true_positions_pixels_ij + position_noise * (
-            torch.rand_like(true_positions_pixels_ij) + 1.0
-        )
+            position_noise = torch.randn_like(expanded_pts) * self.position_noise_scale
 
-        image_size_per_point = torch.cat(
-            [
-                size.expand(n_elecs, -1)
-                for size, n_elecs in zip(image_size_rc, electrons_per_image)
-            ],
-            0,
-        ).flip(-1)
-        image_size_per_point = image_size_per_point.unsqueeze(1)
+            pos_points = expanded_pts + position_noise
+            neg_1to2x = torch.rand_like(position_noise) + 1.0
+            neg_points = expanded_pts + position_noise * neg_1to2x
 
-        # (electron x denoising group x 2)
-        pos_points_normalized_xy = pos_points.flip(-1).double() / image_size_per_point
-        neg_points_normalized_xy = neg_points.flip(-1).double() / image_size_per_point
+            noised_positions_b = torch.stack([pos_points, neg_points], 2)
+            noised_positions_b.clamp_(
+                noised_positions_b.new_zeros([]),
+                image_size_rc[b].expand_as(noised_positions_b),
+            )
 
-        # (electron x denoising group x pos/neg x 2)
-        positions = torch.stack([pos_points_normalized_xy, neg_points_normalized_xy], 2)
-        positions = positions.clamp(0.0, 1.0)
-        return positions
+            per_image_noised_positions.append(noised_positions_b)
+
+        return per_image_noised_positions
+
+    @staticmethod
+    def _per_image_to_per_object(tensor: Tensor, objects_per_image: Tensor):
+        assert tensor.size(0) == objects_per_image.size(0)
+        # figure out how many images and objects
+        n_images = objects_per_image.size(0)
+        batch_offsets = seq_lengths_to_batch_offsets(objects_per_image)
+
+        out_shape = list(tensor.shape)
+        out_shape[0] = int(batch_offsets[-1].item())
+        out = tensor.new_empty(out_shape)
+
+        for i in range(n_images):
+            start = int(batch_offsets[i])
+            end = int(batch_offsets[i + 1])
+            out[start:end] = tensor[i]
+
+        return out
 
     @staticmethod
     def stack_main_and_denoising_queries(
         main_queries: Tensor,
         main_reference_points: Tensor,
         query_batch_offsets: Tensor,
-        denoising_queries: Tensor,
-        denoising_reference_points: Tensor,
-        electron_batch_offsets: Tensor,
+        denoising_queries: list[Tensor],
+        denoising_reference_points: list[Tensor],
+        object_batch_offsets: Tensor,
         n_attn_heads: int,
         mask_main_queries_from_denoising: bool = False,
     ):
         device = main_queries.device
-        assert denoising_queries.ndim == 4  # (electron, dn group, pos/neg, feature)
-        assert denoising_reference_points.ndim == 4
-        n_electrons = torch.tensor(denoising_queries.shape[0], device=device)
-        n_dn_groups = torch.tensor(denoising_queries.shape[1], device=device)
-        main_queries_per_image = split_batch_concatted_tensor(
-            main_queries, query_batch_offsets
-        )
-        n_main_queries_per_image = torch.tensor(
-            [q.shape[0] for q in main_queries_per_image],
-            device=device,
-        )
-        denoising_queries_per_image = split_batch_concatted_tensor(
-            denoising_queries, electron_batch_offsets
-        )
-        main_reference_points_per_image = split_batch_concatted_tensor(
-            main_reference_points, query_batch_offsets
-        )
-        denoising_reference_points_per_image = split_batch_concatted_tensor(
-            denoising_reference_points, electron_batch_offsets
-        )
-        n_electrons_per_image = [q.shape[0] for q in denoising_queries_per_image]
+        n_images = len(denoising_queries)
 
-        denoising_positive_mask = torch.zeros(
-            denoising_queries.shape[:-1],
+        # (dn group, object, pos/neg, feature)
+        assert all(q.ndim == 4 for q in denoising_queries)
+        assert all(refpt.ndim == 4 for refpt in denoising_reference_points)
+        assert query_batch_offsets.shape == object_batch_offsets.shape
+
+        # index bookkeeping
+        n_objects_per_image = [dn.size(1) for dn in denoising_queries]
+        n_dn_groups = denoising_queries[0].size(0)
+        n_dn_queries_per_image = [
+            n_obj * n_dn_groups * 2 for n_obj in n_objects_per_image
+        ]
+
+        n_main_queries_per_image = batch_offsets_to_seq_lengths(
+            query_batch_offsets
+        ).tolist()
+
+        n_total_main_queries, embed_dim = main_queries.shape
+        assert n_total_main_queries == sum(n_main_queries_per_image)
+        position_dim = main_reference_points.size(1)
+
+        n_stacked_queries_per_image = [
+            main + dn
+            for main, dn in zip(n_main_queries_per_image, n_dn_queries_per_image)
+        ]
+
+        n_total_dn_queries = sum(n_dn_queries_per_image)
+        n_total_stacked_queries = sum(n_stacked_queries_per_image)
+        assert n_total_stacked_queries == n_total_main_queries + n_total_dn_queries
+
+        # Create tensors that will be filled in
+        output_stacked_queries = main_queries.new_empty(
+            n_total_stacked_queries, embed_dim
+        )
+        output_stacked_refpoints = main_reference_points.new_empty(
+            n_total_stacked_queries, position_dim
+        )
+        stacked_batch_offsets = torch.zeros_like(query_batch_offsets)
+        # Denoising queries are in the order (dn group, object, pos/neg).flatten()
+
+        # Create attn mask tensor in stacked and padded instead of batch-concat format
+        max_stacked_batch = max(n_stacked_queries_per_image)
+        stacked_attn_mask = torch.zeros(
+            (n_images, max_stacked_batch, max_stacked_batch),
+            device=device,
             dtype=torch.bool,
-            device=device,
         )
-        denoising_positive_mask[..., 0] = True
+        dn_matched_indices = []  # for loss calculation
 
-        # flatten denoising group dim and pos/neg dim
-        denoising_queries_per_image = [
-            queries.view(-1, queries.shape[-1])
-            for queries in denoising_queries_per_image
-        ]
-        denoising_reference_points_per_image = [
-            refpoints.view(-1, refpoints.shape[-1])
-            for refpoints in denoising_reference_points_per_image
-        ]
+        # fill in output tensor image by image
+        output_cursor = 0
+        for b in range(n_images):
+            ### bookkeeping ###
+            n_main_queries_b = int(n_main_queries_per_image[b])
+            n_objects_b = int(n_objects_per_image[b])
+            n_dn_b = n_objects_b * n_dn_groups * 2
 
-        # concatenate the main and denoising queries
-        stacked_queries_per_image = [
-            torch.cat([main, denoising], 0)
-            for main, denoising in zip(
-                main_queries_per_image, denoising_queries_per_image
+            ### main queries and reference points ###
+            # start and end position of this image in input tensor
+            main_in_start = int(query_batch_offsets[b])
+            main_in_end = int(query_batch_offsets[b + 1])
+
+            # extract main queries and refpoints
+            main_queries_b = main_queries[main_in_start:main_in_end]
+            main_refpoints_b = main_reference_points[main_in_start:main_in_end]
+
+            # start and end position of this image's main queries in new output tensor
+            main_out_start = output_cursor
+            main_out_end = output_cursor + n_main_queries_b
+
+            # copy over the embeddings and refpoints
+            output_stacked_queries[main_out_start:main_out_end] = main_queries_b
+            output_stacked_refpoints[main_out_start:main_out_end] = main_refpoints_b
+
+            ### denoising queries and reference points ###
+            # extract denoising embedding and refpoints
+            dn_queries_b = denoising_queries[b]
+            dn_refpoints_b = denoising_reference_points[b]
+
+            assert dn_queries_b.shape == (n_dn_groups, n_objects_b, 2, embed_dim)
+            assert dn_refpoints_b.shape == (n_dn_groups, n_objects_b, 2, position_dim)
+
+            # get start and end position in output tensor
+            dn_out_start = main_out_end
+            dn_out_end = dn_out_start + n_dn_b
+
+            # copy over denoising values, flattening dn group, object, pos/neg dims
+            output_stacked_queries[dn_out_start:dn_out_end] = dn_queries_b.view(
+                n_dn_b, embed_dim
             )
-        ]
-        stacked_refpoints_per_image = [
-            torch.cat([main, denoising], 0)
-            for main, denoising in zip(
-                main_reference_points_per_image, denoising_reference_points_per_image
+            output_stacked_refpoints[dn_out_start:dn_out_end] = dn_refpoints_b.view(
+                n_dn_b, position_dim
             )
-        ]
-        main_mask_per_image = [
-            torch.cat(
-                [
-                    torch.ones(main.shape[:-1], device=device, dtype=torch.bool),
-                    torch.zeros(denoising.shape[:-1], device=device, dtype=torch.bool),
-                ],
-                0,
+
+            ### attention mask to separate denoising groups ###
+            submask_b = stacked_attn_mask[b]
+            # mask out denoising queries from main queries
+            submask_b[:n_main_queries_b, n_main_queries_b:] = True
+
+            if mask_main_queries_from_denoising:
+                submask_b[n_main_queries_b:, :n_main_queries_b] = True
+
+            dn_group_size = n_objects_b * 2
+            assert dn_group_size == n_objects_per_image[b] * 2
+            for i in range(n_dn_groups):
+                dn_start_row = dn_start_col = n_main_queries_b + dn_group_size * i
+                dn_end_row = dn_end_col = n_main_queries_b + dn_group_size * (i + 1)
+                assert dn_end_col <= submask_b.size(1)
+                # Mask this group out from the other dn groups
+                submask_b[dn_start_row:dn_end_row, n_main_queries_b:dn_start_col] = True
+                submask_b[dn_start_row:dn_end_row, dn_end_col:] = True
+
+            # mask out the padding queries just for completeness
+            submask_b[n_main_queries_b + n_dn_b :] = True
+
+            assert torch.equal(stacked_attn_mask[b], submask_b)  # sanity check
+
+            ### matching indices for loss calculation ###
+            # prepare matching indices
+            object_indices = (
+                torch.arange(n_objects_b, device=device)
+                .unsqueeze(0)
+                .expand(n_dn_groups, n_objects_b)
+                .flatten()
             )
-            for main, denoising in zip(
-                main_queries_per_image, denoising_queries_per_image
-            )
-        ]
+            query_indices = torch.arange(n_dn_b, device=device)
+            query_indices = query_indices.view(n_objects_b, n_dn_groups, 2)
+            query_indices = query_indices[:, :, 0].flatten()  # select only positives
 
-        stacked_queries = torch.cat(stacked_queries_per_image)
-        stacked_refpoints = torch.cat(stacked_refpoints_per_image)
-        stacked_batch_offsets = torch.cumsum(
-            torch.tensor(
-                [0, *[queries.shape[0] for queries in stacked_queries_per_image[:-1]]],
-                device=device,
-            ),
-            0,
-        )
+            dn_matched_indices.append(torch.stack([query_indices, object_indices]))
 
-        assert stacked_queries.shape[:-1] == stacked_refpoints.shape[:-1]
-        total_main_queries = sum(n_main_queries_per_image)
-        total_denoising_queries = sum(
-            [q * n_dn_groups * 2 for q in n_electrons_per_image]
-        )
-        assert stacked_queries.shape[0] == total_main_queries + total_denoising_queries
+            ### update bookkeeping ###
+            output_cursor = dn_out_end
+            stacked_batch_offsets[b + 1] = dn_out_end
 
-        attn_mask = DenoisingGenerator.make_attn_mask(
-            main_queries,
-            query_batch_offsets,
-            denoising_queries,
-            electron_batch_offsets,
-            n_dn_groups,
-            n_attn_heads,
-            mask_main_queries_from_denoising,
-        )
-
-        # make matched indices for loss calculation
-        denoising_matched_indices = []
-        dn_pos_mask_by_image = split_batch_concatted_tensor(
-            denoising_positive_mask, electron_batch_offsets
-        )
-        for n_elecs, dn_positives in zip(n_electrons_per_image, dn_pos_mask_by_image):
-            electron_indices = torch.arange(n_elecs, device=device).unsqueeze(1)
-            electron_indices = electron_indices.expand(-1, n_dn_groups).flatten()
-
-            query_indices = torch.arange(n_elecs * n_dn_groups * 2, device=device)
-            query_indices = query_indices.view(n_elecs, n_dn_groups, 2)
-            query_indices = query_indices[dn_positives]
-
-            denoising_matched_indices.append(
-                torch.stack([query_indices, electron_indices])
-            )
+        assert dn_out_end == output_stacked_queries.size(0) == n_total_stacked_queries
 
         dn_batch_mask_dict = {
-            "main_query_masks": main_mask_per_image,
-            "denoising_positive_mask": denoising_positive_mask,
             "stacked_batch_offsets": stacked_batch_offsets,
             "n_main_queries_per_image": n_main_queries_per_image,
-            "n_electrons_per_image": n_electrons_per_image,
+            "n_objects_per_image": n_objects_per_image,
             "n_denoising_groups": n_dn_groups,
-            "n_total_gt_electrons": n_electrons,
-            "electron_batch_offsets": electron_batch_offsets,
-            "denoising_matched_indices": denoising_matched_indices,
+            "electron_batch_offsets": object_batch_offsets,
+            "denoising_matched_indices": dn_matched_indices,
         }
-        return stacked_queries, stacked_refpoints, attn_mask, dn_batch_mask_dict
+        return (
+            output_stacked_queries,
+            output_stacked_refpoints,
+            stacked_attn_mask,
+            dn_batch_mask_dict,
+        )
 
     @staticmethod
     def unstack_main_and_denoising_tensor(
         stacked_tensor: Tensor,
         dn_batch_mask_dict: dict,
     ):
-        main_query_masks = dn_batch_mask_dict["main_query_masks"]
         stacked_batch_offsets = dn_batch_mask_dict["stacked_batch_offsets"]
         n_denoising_groups = dn_batch_mask_dict["n_denoising_groups"]
-        n_total_gt_electrons = dn_batch_mask_dict["n_total_gt_electrons"]
+        n_objects_per_image = dn_batch_mask_dict["n_objects_per_image"]
+        n_main_queries_per_image = dn_batch_mask_dict["n_main_queries_per_image"]
 
         if stacked_tensor.ndim == 2:  # query x feature
             dummy_layer_dim = True
@@ -259,103 +322,32 @@ class DenoisingGenerator(nn.Module):
 
         batch_split_tensor = torch.tensor_split(
             stacked_tensor,
-            stacked_batch_offsets[1:].cpu(),
+            stacked_batch_offsets[1:-1].cpu(),
             dim=1,
         )
+        batch_split_tensor = [t for t in batch_split_tensor if t.numel() > 0]
 
-        main_parts = [
-            queries[:, mask]
-            for queries, mask in zip(batch_split_tensor, main_query_masks)
-        ]
-        denoising_parts = [
-            queries[:, mask.logical_not()]
-            for queries, mask in zip(batch_split_tensor, main_query_masks)
-        ]
+        main_tensors = []
+        denoising_tensors = []
+        for b, tensor_b in enumerate(batch_split_tensor):
+            main_b, dn_b = torch.tensor_split(
+                tensor_b, [n_main_queries_per_image[b]], dim=1
+            )
+            assert dn_b.size(1) == n_objects_per_image[b] * n_denoising_groups * 2
+            main_tensors.append(main_b)
+            denoising_tensors.append(dn_b)
 
-        catted_main_parts = torch.cat(main_parts, dim=1)
-        catted_denoising_parts = torch.cat(denoising_parts, dim=1)
+        main_tensor = torch.cat(main_tensors, dim=1)
+        dn_tensor = torch.cat(denoising_tensors, dim=1)
 
-        reshaped_denoising_parts = catted_denoising_parts.view(
-            catted_denoising_parts.shape[0],
-            n_total_gt_electrons,
-            n_denoising_groups,
-            2,
-            *catted_denoising_parts.shape[2:],
+        # reshape dn tensor to add back dn group, object, and pos/neg dims
+        dn_tensor = dn_tensor.view(
+            (dn_tensor.size(0), n_denoising_groups, sum(n_objects_per_image), 2)
+            + dn_tensor.shape[2:]
         )
+
         if dummy_layer_dim:
-            catted_main_parts = catted_main_parts.squeeze(0)
-            reshaped_denoising_parts = reshaped_denoising_parts.squeeze(0)
+            main_tensor = main_tensor.squeeze(0)
+            dn_tensor = dn_tensor.squeeze(0)
 
-        return catted_main_parts, reshaped_denoising_parts
-
-    @torch.no_grad()
-    @staticmethod
-    def make_attn_mask(
-        main_queries: Tensor,
-        query_batch_offsets: Tensor,
-        denoising_queries: Tensor,
-        electron_batch_offsets: Tensor,
-        n_denoising_groups: int,
-        n_attn_heads: int,
-        mask_main_queries_from_denoising: bool = False,
-    ):
-        assert denoising_queries.ndim == 4  # electron, dn group, pos/neg, 2
-        batch_size = len(query_batch_offsets)
-
-        def _queries_per_image(batch_offsets: Tensor, total_queries: int):
-            ext_batch_offsets = torch.cat(
-                [batch_offsets, batch_offsets.new_tensor([total_queries])]
-            )
-            return ext_batch_offsets[1:] - ext_batch_offsets[:-1]
-
-        n_main_queries_per_image = _queries_per_image(
-            query_batch_offsets, main_queries.shape[0]
-        )
-        electron_batch_offsets = electron_batch_offsets.to(query_batch_offsets)
-        n_denoising_queries_per_image = (
-            _queries_per_image(electron_batch_offsets, denoising_queries.shape[0])
-            * n_denoising_groups
-            * 2
-        )
-        n_total_queries_per_image = (
-            n_main_queries_per_image + n_denoising_queries_per_image
-        )
-
-        padded_seq_length = max(n_total_queries_per_image)
-        attn_masks = []
-        for i, (n_main, n_denoising) in enumerate(
-            zip(n_main_queries_per_image, n_denoising_queries_per_image)
-        ):
-            mask = torch.zeros(
-                [padded_seq_length, padded_seq_length],
-                dtype=torch.bool,
-                device=main_queries.device,
-            )
-            # mask out denoising queries from main queries
-            mask[:n_main, n_main:] = True
-
-            if mask_main_queries_from_denoising:
-                mask[n_main:, :n_main] = True
-
-            assert n_denoising % n_denoising_groups == 0
-            dn_group_size = n_denoising // n_denoising_groups
-            for i in range(n_denoising_groups):
-                dn_start_row = dn_start_col = n_main + dn_group_size * i
-                dn_end_row = dn_end_col = n_main + dn_group_size * (i + 1)
-                assert dn_end_col <= padded_seq_length
-                # Mask this group out from the other dn groups
-                mask[dn_start_row:dn_end_row, n_main:dn_start_col] = True
-                mask[dn_start_row:dn_end_row, dn_end_col:] = True
-
-            # mask out the padding queries just for completeness
-            mask[n_main + n_denoising :] = True
-
-            attn_masks.append(mask)
-
-        attn_mask = torch.stack(attn_masks)
-        attn_mask = attn_mask.unsqueeze(1).expand(-1, n_attn_heads, -1, -1)
-        attn_mask = attn_mask.reshape(
-            batch_size * n_attn_heads, padded_seq_length, padded_seq_length
-        )
-
-        return attn_mask
+        return main_tensor, dn_tensor

@@ -1,5 +1,6 @@
 import time
 from typing import Any, Union
+import re
 
 import torch
 from torch import Tensor, nn
@@ -21,6 +22,14 @@ from .utils import (
     unstack_batch,
     unstack_model_output,
 )
+
+__dn = re.compile(r"(?<=dn/).*")
+
+
+def _search_dn_match(string: str) -> str:
+    match = __dn.search(string)
+    assert match is not None
+    return match.group(0)
 
 
 class MetricManager(nn.Module):
@@ -152,14 +161,18 @@ class MetricManager(nn.Module):
         metrics(predicted_dict, target_dict)
 
     @torch.no_grad()
-    def update_from_dict(
+    def update_from_loss_dict(
         self,
-        mode: Union[str, Mode],
         loss_dict: dict[str, Tensor],
     ):
-        metrics = self.get_metrics(mode)
         for k, v in loss_dict.items():
-            metrics[k].update(v)
+            if k.startswith("dn/"):
+                metrics = self.get_metrics(Mode.DENOISING)
+                key = _search_dn_match(k)
+            else:
+                metrics = self.get_metrics(Mode.TRAIN)
+                key = k
+            metrics[key].update(v)
 
     @torch.no_grad()
     def update_classification_metrics(

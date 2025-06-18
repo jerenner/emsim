@@ -601,7 +601,9 @@ class EMTransformer(nn.Module):
         }
 
     def unstack_main_denoising_outputs(
-        self, decoder_out: dict[str, Tensor], dn_batch_mask_dict: dict[str, Tensor]
+        self,
+        decoder_out: dict[str, Union[Tensor, list[Tensor]]],
+        dn_batch_mask_dict: dict[str, Union[Tensor, int, list[int]]],
     ):
 
         main_out = {}
@@ -609,6 +611,9 @@ class EMTransformer(nn.Module):
             "electron_batch_offsets": dn_batch_mask_dict["electron_batch_offsets"],
             "dn_batch_mask_dict": dn_batch_mask_dict,
         }
+        assert isinstance(dn_batch_mask_dict["n_main_queries_per_image"], list)
+        assert isinstance(dn_batch_mask_dict["n_objects_per_image"], list)
+        assert isinstance(dn_batch_mask_dict["n_denoising_groups"], int)
 
         for key, value in decoder_out.items():
             if isinstance(value, Tensor):
@@ -619,32 +624,34 @@ class EMTransformer(nn.Module):
                 )
             else:
                 assert key == "segmentation_logits"
+                # segmentation logits have decoder layer as outer loop and image as inner loop
                 main_out[key] = []
                 denoising_out[key] = []
                 for layer_seg_logits in value:
                     main = []
                     denoising = []
-                    for logits, main_end, n_elecs in zip(
+                    for b, logits in enumerate(
                         layer_seg_logits,
-                        dn_batch_mask_dict["n_main_queries_per_image"],
-                        dn_batch_mask_dict["n_electrons_per_image"],
                     ):
-                        logits: Tensor
+                        n_main_b = dn_batch_mask_dict["n_main_queries_per_image"][b]
+                        n_elecs_b = dn_batch_mask_dict["n_objects_per_image"][b]
                         logits = logits.coalesce()
-                        n_dn = n_elecs * dn_batch_mask_dict["n_denoising_groups"] * 2
-                        dn_end = main_end + n_dn
-                        main_i = sparse_index_select(
-                            logits,
-                            logits.ndim - 1,
-                            torch.arange(main_end, device=logits.device),
+                        n_dn = n_elecs_b * dn_batch_mask_dict["n_denoising_groups"] * 2
+                        dn_end = n_main_b + n_dn
+
+                        main.append(
+                            sparse_index_select(
+                                logits,
+                                logits.ndim - 1,
+                                torch.arange(n_main_b, device=logits.device),
+                            )
                         )
-                        main.append(main_i)
                         denoising.append(
                             sparse_index_select(
                                 logits,
                                 logits.ndim - 1,
                                 torch.arange(
-                                    main_end,
+                                    n_main_b,
                                     dn_end,
                                     device=logits.device,
                                 ),

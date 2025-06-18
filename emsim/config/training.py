@@ -15,6 +15,8 @@ class TrainingConfig:
     cpu_only: bool = False  # set True to not use cuda
 
     eval_steps: int = 1000  # evaluation interval
+    # optional save interval
+    save_steps: int = "${training.eval_steps}"  # pyright: ignore[reportAssignmentType]
 
     seed: int = 1234
     print_interval: int = 10
@@ -29,3 +31,5 @@ class TrainingConfig:
 
     log_level: str = "INFO"  # passed to logger
     compile: bool = False  # whether to use torch.compile
+
+    skip_checkpoints: bool = False # don't save checkpoints

@@ -33,7 +33,7 @@ class EMModel(nn.Module):
         self.criterion = criterion
         self.denoising_generator = denoising_generator
 
-        self.aux_loss = getattr(self.criterion, "use_aux_loss", False)
+        self.aux_loss = criterion.config.aux_loss.use_aux_loss
         self.include_aux_outputs = True if self.aux_loss else include_aux_outputs
 
         self.reset_parameters()

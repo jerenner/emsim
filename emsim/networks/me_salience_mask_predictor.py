@@ -7,11 +7,21 @@ from torch import Tensor, nn
 from emsim.utils.sparse_utils.minkowskiengine import MinkowskiGELU, MinkowskiLayerNorm
 
 
+assert issubclass(MinkowskiGELU, nn.Module), "MinkowskiEngine not imported successfully"
+
+
 @torch.compiler.disable
 class MESparseMaskPredictor(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int, dimension: int = 2):
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        dimension: int = 2,
+        meanpool_half_features: bool = False,
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.meanpool_half_features = meanpool_half_features
         self.layer1 = nn.Sequential(
             MinkowskiLayerNorm(in_dim),
             ME.MinkowskiConvolution(in_dim, hidden_dim, 1, dimension=dimension),
@@ -32,7 +42,8 @@ class MESparseMaskPredictor(nn.Module):
     def forward(self, x: ME.SparseTensor):
         assert isinstance(x, ME.SparseTensor)
         z = self.layer1(x)
-        z = self.batchwise_global_mean_second_half_features(z)
+        if self.meanpool_half_features:
+            z = self.batchwise_global_mean_second_half_features(z)
         out = self.layer2(z)
         return out
 

@@ -194,7 +194,6 @@ class EMModel(nn.Module):
         config: Union[DictConfig, EMModelConfig]
         if not isinstance(cfg, EMModelConfig):
             config = OmegaConf.structured(cfg)
-            assert isinstance(config, EMModelConfig)
         else:
             config = cfg
 

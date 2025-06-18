@@ -77,8 +77,10 @@ class EMTransformer(nn.Module):
             config.decoder.classification_head.n_layers,
             config.decoder.classification_head.activation_fn,
         )
-        self.query_pos_offset_head = PositionOffsetHead(
-            config.d_model, config.d_model, 2, config.predict_box
+        self.query_pos_offset_head = (
+            PositionOffsetHead(config.d_model, config.d_model, 2, config.predict_box)
+            if config.decoder.layers_share_heads
+            else None
         )
         self.std_dev_head = StdDevHead.from_config(config.decoder.std_dev_head)
         self.segmentation_head = PatchedSegmentationMapPredictor.from_config(
@@ -161,7 +163,8 @@ class EMTransformer(nn.Module):
         nn.init.uniform_(self.alpha, -0.3, 0.3)
         self.encoder.reset_parameters()
         self.encoder_output_norm.reset_parameters()
-        self.query_pos_offset_head.reset_parameters()
+        if self.query_pos_offset_head is not None:
+            self.query_pos_offset_head.reset_parameters()
         self.std_dev_head.reset_parameters()
         for layer in self.salience_unpoolers:
             layer.reset_parameters()
@@ -280,8 +283,9 @@ class EMTransformer(nn.Module):
         nms_query_batch_sizes: Tensor = batch_offsets_to_seq_lengths(
             nms_query_batch_offsets
         )
-        nms_topk_position_offsets: Tensor = self.query_pos_offset_head(nms_encoder_out_normalized)
-        nms_encoder_out_positions = nms_proposal_positions + nms_topk_position_offsets
+        # nms_topk_position_offsets: Tensor = self.query_pos_offset_head(nms_encoder_out_normalized)
+        # nms_encoder_out_positions = nms_proposal_positions + nms_topk_position_offsets
+        nms_encoder_out_positions = nms_proposal_positions
         nms_encoder_out_std_cholesky = self.std_dev_head(nms_encoder_out_normalized)
 
         nms_encoder_out_segmentation = self.segmentation_head(

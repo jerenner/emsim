@@ -273,6 +273,7 @@ class DenoisingHandler(nn.Module):
             denoising_aux_losses, _ = aux_loss_handler(
                 denoising_output["aux_outputs"],
                 target_dict,
+                loss_calculator=loss_calculator,
                 final_matched_indices=denoising_output["denoising_matched_indices"],
             )
             denoising_losses.update(denoising_aux_losses)

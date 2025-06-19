@@ -1,8 +1,15 @@
 use_denoising: false
+denoising_loss_weight: 1.0
+
 embed_dim: ${model.transformer.d_model}
+
 max_electrons_per_image: 400
+
 max_total_denoising_queries: 1200
-position_noise_variance: 1.0
+
+position_noise_std: 1.0
+
+negative_noise_mult_range: [1.0, 2.0]
+
 mask_main_queries_from_denoising: false
 pos_neg_queries_share_embedding: false
-denoising_loss_weight: 1.0

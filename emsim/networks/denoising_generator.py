@@ -17,7 +17,8 @@ class DenoisingGenerator(nn.Module):
         self.embed_dim = config.embed_dim
         self.max_denoising_group_size = config.max_electrons_per_image
         self.max_total_denoising_queries = config.max_total_denoising_queries
-        self.position_noise_scale = config.position_noise_variance
+        self.position_noise_std = config.position_noise_std
+        self.negative_noise_mult_range = config.negative_noise_mult_range
         self.dn_query_embedding = nn.Embedding(
             (
                 config.max_electrons_per_image
@@ -94,23 +95,33 @@ class DenoisingGenerator(nn.Module):
 
     def make_pos_neg_noised_positions(
         self,
-        true_positions_pixels_ij: list[Tensor],
+        true_positions_per_image: list[Tensor],
         denoising_groups: int,
         image_size_rc: Tensor,
     ) -> list[Tensor]:
         per_image_noised_positions = []
-        n_images = len(true_positions_pixels_ij)
+        n_images = len(true_positions_per_image)
         for b in range(n_images):
-            true_pts_b = true_positions_pixels_ij[b]
-            expanded_pts = true_pts_b.unsqueeze(0).expand(denoising_groups, -1, -1)
+            true_pts_b = true_positions_per_image[b]  # (obj, spatial dim)
+            expanded_pts = true_pts_b[None, :, None, :].expand(
+                denoising_groups, -1, 2, -1
+            )
 
-            position_noise = torch.randn_like(expanded_pts) * self.position_noise_scale
+            noise = torch.randn_like(expanded_pts) * self.position_noise_std
+            norm = noise.norm(p=2, dim=-1, keepdim=True)
+            pos_norm, neg_norm = norm.unbind(2)
 
-            pos_points = expanded_pts + position_noise
-            neg_1to2x = torch.rand_like(position_noise) + 1.0
-            neg_points = expanded_pts + position_noise * neg_1to2x
+            eps = 1e-6
+            # negative noise needs to have magnitude equal to ||pos|| * U(a,b)
+            neg_scaling_factor = torch.empty_like(neg_norm)  # (group, obj, 2, 1)
+            neg_scaling_factor.uniform_(*self.negative_noise_mult_range)
+            neg_scaling_factor /= neg_norm.add_(eps)
+            neg_scaling_factor *= pos_norm
 
-            noised_positions_b = torch.stack([pos_points, neg_points], 2)
+            # scale negative noise
+            noise[:, :, 1].mul_(neg_scaling_factor)
+
+            noised_positions_b = expanded_pts + noise
             noised_positions_b.clamp_(
                 noised_positions_b.new_zeros([]),
                 image_size_rc[b].expand_as(noised_positions_b),
@@ -146,7 +157,6 @@ class DenoisingGenerator(nn.Module):
         denoising_queries: list[Tensor],
         denoising_reference_points: list[Tensor],
         object_batch_offsets: Tensor,
-        n_attn_heads: int,
         mask_main_queries_from_denoising: bool = False,
     ):
         device = main_queries.device
@@ -288,30 +298,30 @@ class DenoisingGenerator(nn.Module):
 
         assert dn_out_end == output_stacked_queries.size(0) == n_total_stacked_queries
 
-        dn_batch_mask_dict = {
+        dn_info_dict = {
             "stacked_batch_offsets": stacked_batch_offsets,
             "n_main_queries_per_image": n_main_queries_per_image,
             "n_objects_per_image": n_objects_per_image,
             "n_denoising_groups": n_dn_groups,
-            "electron_batch_offsets": object_batch_offsets,
+            "object_batch_offsets": object_batch_offsets,
             "denoising_matched_indices": dn_matched_indices,
         }
         return (
             output_stacked_queries,
             output_stacked_refpoints,
             stacked_attn_mask,
-            dn_batch_mask_dict,
+            dn_info_dict,
         )
 
     @staticmethod
     def unstack_main_and_denoising_tensor(
         stacked_tensor: Tensor,
-        dn_batch_mask_dict: dict,
+        dn_info_dict: dict,
     ):
-        stacked_batch_offsets = dn_batch_mask_dict["stacked_batch_offsets"]
-        n_denoising_groups = dn_batch_mask_dict["n_denoising_groups"]
-        n_objects_per_image = dn_batch_mask_dict["n_objects_per_image"]
-        n_main_queries_per_image = dn_batch_mask_dict["n_main_queries_per_image"]
+        stacked_batch_offsets = dn_info_dict["stacked_batch_offsets"]
+        n_denoising_groups = dn_info_dict["n_denoising_groups"]
+        n_objects_per_image = dn_info_dict["n_objects_per_image"]
+        n_main_queries_per_image = dn_info_dict["n_main_queries_per_image"]
 
         if stacked_tensor.ndim == 2:  # query x feature
             dummy_layer_dim = True

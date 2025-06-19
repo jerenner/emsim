@@ -140,10 +140,10 @@ class EMModel(nn.Module):
         return loss_dict, output
 
     def prep_denoising_dict(self, denoising_out: dict[str, Any]):
-        dn_batch_mask_dict = denoising_out["dn_batch_mask_dict"]
+        dn_info_dict = denoising_out["dn_info_dict"]
         flattened_batch_offsets = (
-            dn_batch_mask_dict["electron_batch_offsets"]
-            * dn_batch_mask_dict["n_denoising_groups"]
+            dn_info_dict["object_batch_offsets"]
+            * dn_info_dict["n_denoising_groups"]
             * 2
         )
         denoising_output = {
@@ -155,8 +155,8 @@ class EMModel(nn.Module):
         }
         denoising_output.update(
             {
-                "dn_batch_mask_dict": dn_batch_mask_dict,
-                "denoising_matched_indices": dn_batch_mask_dict[
+                "dn_batch_mask_dict": dn_info_dict,
+                "denoising_matched_indices": dn_info_dict[
                     "denoising_matched_indices"
                 ],
             }
@@ -170,7 +170,7 @@ class EMModel(nn.Module):
                     "pred_std_dev_cholesky": cholesky.flatten(0, -3),
                     "pred_segmentation_logits": seg_logits,
                     "query_batch_offsets": flattened_batch_offsets,
-                    "dn_batch_mask_dict": dn_batch_mask_dict,
+                    "dn_batch_mask_dict": dn_info_dict,
                     # "output_queries": queries,
                 }
                 for logits, positions, cholesky, seg_logits in zip(

@@ -177,9 +177,9 @@ class EMTransformer(nn.Module):
         self,
         backbone_features: list[ME.SparseTensor],
         image_size: Tensor,
-        denoising_queries: Optional[Tensor] = None,
-        denoising_reference_points: Optional[Tensor] = None,
-        denoising_batch_offsets: Optional[Tensor] = None,
+        denoising_queries: Optional[list[Tensor]] = None,
+        denoising_reference_points: Optional[list[Tensor]] = None,
+        denoising_object_batch_offsets: Optional[Tensor] = None,
     ):
         assert len(backbone_features) == self.n_levels
 
@@ -319,22 +319,21 @@ class EMTransformer(nn.Module):
         queries = self.object_query_embedding.weight.index_select(0, query_indices)
 
         if self.training and denoising_queries is not None:
-            assert denoising_batch_offsets is not None
+            assert denoising_object_batch_offsets is not None
             assert denoising_reference_points is not None
-            queries, reference_points, attn_mask, dn_batch_mask_dict = (
+            queries, reference_points, attn_mask, dn_info_dict = (
                 DenoisingGenerator.stack_main_and_denoising_queries(
                     queries,
                     reference_points,
                     nms_query_batch_offsets,
                     denoising_queries,
                     denoising_reference_points,
-                    denoising_batch_offsets,
-                    self.decoder.layers[0].n_heads,
+                    denoising_object_batch_offsets,
                     self.mask_main_queries_from_denoising,
                 )
             )
             denoising = True
-            query_batch_offsets = dn_batch_mask_dict["stacked_batch_offsets"]
+            query_batch_offsets = dn_info_dict["stacked_batch_offsets"]
         else:
             attn_mask = None
             denoising = False
@@ -351,7 +350,7 @@ class EMTransformer(nn.Module):
 
         if denoising:
             decoder_out, denoising_out = self.unstack_main_denoising_outputs(
-                decoder_out, dn_batch_mask_dict
+                decoder_out, dn_info_dict
             )
         else:
             denoising_out = None
@@ -607,23 +606,23 @@ class EMTransformer(nn.Module):
     def unstack_main_denoising_outputs(
         self,
         decoder_out: dict[str, Union[Tensor, list[Tensor]]],
-        dn_batch_mask_dict: dict[str, Union[Tensor, int, list[int]]],
+        dn_info_dict: dict[str, Union[Tensor, int, list[int]]],
     ):
 
         main_out = {}
         denoising_out = {
-            "electron_batch_offsets": dn_batch_mask_dict["electron_batch_offsets"],
-            "dn_batch_mask_dict": dn_batch_mask_dict,
+            "object_batch_offsets": dn_info_dict["object_batch_offsets"],
+            "dn_info_dict": dn_info_dict,
         }
-        assert isinstance(dn_batch_mask_dict["n_main_queries_per_image"], list)
-        assert isinstance(dn_batch_mask_dict["n_objects_per_image"], list)
-        assert isinstance(dn_batch_mask_dict["n_denoising_groups"], int)
+        assert isinstance(dn_info_dict["n_main_queries_per_image"], list)
+        assert isinstance(dn_info_dict["n_objects_per_image"], list)
+        assert isinstance(dn_info_dict["n_denoising_groups"], int)
 
         for key, value in decoder_out.items():
             if isinstance(value, Tensor):
                 main_out[key], denoising_out[key] = (
                     DenoisingGenerator.unstack_main_and_denoising_tensor(
-                        value, dn_batch_mask_dict
+                        value, dn_info_dict
                     )
                 )
             else:
@@ -637,10 +636,10 @@ class EMTransformer(nn.Module):
                     for b, logits in enumerate(
                         layer_seg_logits,
                     ):
-                        n_main_b = dn_batch_mask_dict["n_main_queries_per_image"][b]
-                        n_elecs_b = dn_batch_mask_dict["n_objects_per_image"][b]
+                        n_main_b = dn_info_dict["n_main_queries_per_image"][b]
+                        n_elecs_b = dn_info_dict["n_objects_per_image"][b]
                         logits = logits.coalesce()
-                        n_dn = n_elecs_b * dn_batch_mask_dict["n_denoising_groups"] * 2
+                        n_dn = n_elecs_b * dn_info_dict["n_denoising_groups"] * 2
                         dn_end = n_main_b + n_dn
 
                         main.append(

@@ -17,10 +17,10 @@ class DenoisingConfig:
     max_total_denoising_queries: int = 1200
 
     # noise statistics
-    position_noise_std: float = 1.0
+    position_noise_std: float = 5.0
 
     # how much further out the negative points should be
-    negative_noise_mult_range: list[float] = field(default_factory=lambda: [1.0, 2.0])
+    negative_noise_mult_range: list[float] = field(default_factory=lambda: [1.5, 2.5])
 
     # technical details of handling embeddings in transformer
     pos_neg_queries_share_embedding: bool = False

@@ -99,37 +99,37 @@ class DenoisingGenerator(nn.Module):
         denoising_groups: int,
         image_size_rc: Tensor,
     ) -> list[Tensor]:
-        per_image_noised_positions = []
-        n_images = len(true_positions_per_image)
-        for b in range(n_images):
-            true_pts_b = true_positions_per_image[b]  # (obj, spatial dim)
-            expanded_pts = true_pts_b[None, :, None, :].expand(
-                denoising_groups, -1, 2, -1
-            )
+        n_obj_per_image = [pos.size(0) for pos in true_positions_per_image]
 
-            noise = torch.randn_like(expanded_pts) * self.position_noise_std
-            norm = noise.norm(p=2, dim=-1, keepdim=True)
-            pos_norm, neg_norm = norm.unbind(2)
+        true_pts_all = torch.cat(true_positions_per_image, dim=0)
+        true_pts_b = true_pts_all  # (obj, spatial dim)
+        expanded_pts = true_pts_b[None, :, None, :].expand(denoising_groups, -1, 2, -1)
 
-            eps = 1e-6
-            # negative noise needs to have magnitude equal to ||pos|| * U(a,b)
-            neg_scaling_factor = torch.empty_like(neg_norm)  # (group, obj, 2, 1)
-            neg_scaling_factor.uniform_(*self.negative_noise_mult_range)
-            neg_scaling_factor /= neg_norm.add_(eps)
-            neg_scaling_factor *= pos_norm
+        noise = torch.randn_like(expanded_pts) * self.position_noise_std
+        norm = noise.norm(p=2, dim=-1, keepdim=True)
+        pos_norm, neg_norm = norm.unbind(2)
 
-            # scale negative noise
-            noise[:, :, 1].mul_(neg_scaling_factor)
+        eps = 1e-6
+        # negative noise needs to have magnitude equal to ||pos|| * U(a,b)
+        neg_scaling_factor = torch.empty_like(neg_norm)  # (group, obj, 2, 1)
+        neg_scaling_factor.uniform_(*self.negative_noise_mult_range)
+        neg_scaling_factor /= neg_norm.add_(eps)
+        neg_scaling_factor *= pos_norm
 
-            noised_positions_b = expanded_pts + noise
-            noised_positions_b.clamp_(
-                noised_positions_b.new_zeros([]),
-                image_size_rc[b].expand_as(noised_positions_b),
-            )
+        # scale negative noise
+        noise[:, :, 1].mul_(neg_scaling_factor)
 
-            per_image_noised_positions.append(noised_positions_b)
+        noised_positions = expanded_pts + noise
 
-        return per_image_noised_positions
+        per_image_noised = list(
+            noised_positions.split_with_sizes(n_obj_per_image, dim=1)
+        )
+
+        _zero_tensor = noised_positions.new_zeros([])
+        for b, noised_pos_b in enumerate(per_image_noised):
+            noised_pos_b.clamp_(_zero_tensor, image_size_rc[b])
+
+        return per_image_noised
 
     @staticmethod
     def _per_image_to_per_object(tensor: Tensor, objects_per_image: Tensor):
@@ -251,9 +251,9 @@ class DenoisingGenerator(nn.Module):
             output_stacked_queries[dn_out_start:dn_out_end] = dn_queries_b.view(
                 n_dn_b, embed_dim
             )
-            output_stacked_refpoints[dn_out_start:dn_out_end] = dn_refpoints_b.view(
-                n_dn_b, position_dim
-            )
+            output_stacked_refpoints[dn_out_start:dn_out_end].view_as(
+                dn_refpoints_b  # assign without temporary copy
+            ).copy_(dn_refpoints_b)
 
             ### attention mask to separate denoising groups ###
             submask_b = stacked_attn_mask[b]

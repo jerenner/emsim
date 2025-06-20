@@ -72,7 +72,7 @@ class CriterionConfig:
     detach_likelihood_mean: bool = False
 
     detection_metric_distance_thresholds: list[float] = field(
-        default_factory=lambda: [0.5, 1.0, 5.0]
+        default_factory=lambda: [0.05, 0.1, 0.5, 1.0, 5.0]
     )
     detection_metric_interval: int = "${training.print_interval}"
 

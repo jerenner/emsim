@@ -18,12 +18,13 @@ from emsim.networks.transformer.blocks.neighborhood_attn import (
     get_multilevel_neighborhoods,
 )
 from emsim.utils.sparse_utils.batching import batch_offsets_to_indices
-from emsim.utils.sparse_utils.indexing.script_funcs import unflatten_nd_indices
 from emsim.utils.sparse_utils.ops.subset_attn.subset_attn import (
     BatchSparseIndexSubsetAttention,
 )
+from tests.networks.blocks.conftest import simple_sparse_input_tensors
 
 from ..conftest import ModuleHook
+from .conftest import random_multilevel_sparse_tensor_indices
 
 
 @pytest.fixture
@@ -51,74 +52,6 @@ def base_module_instance(
 ) -> SparseNeighborhoodAttentionBlock:
     """Create a module instance for testing."""
     return SparseNeighborhoodAttentionBlock(**base_config).to(device)
-
-
-def simple_input_tensors(
-    device: str,
-    n_queries: int = 4,
-    position_dim: int = 2,
-    embed_dim: int = 64,
-    random_seed: Optional[int] = None,
-) -> dict[str, torch.Tensor]:
-    """Generate test data for SparseNeighborhoodAttentionBlock."""
-    if random_seed is not None:
-        torch.manual_seed(random_seed)
-
-    # Query embeddings
-    query = torch.randn(n_queries, embed_dim, device=device)
-
-    # Query spatial positions
-    query_spatial_positions = torch.rand(n_queries, position_dim, device=device) * 16.0
-
-    # Batch information (assume single batch for simplicity)
-    query_batch_offsets = torch.tensor([0, n_queries], device=device)
-
-    # Feature maps at different levels with decreasing resolution
-    level_spatial_shapes = torch.tensor([[16, 16], [8, 8], [4, 4]], device=device)
-
-    # Create feature maps for all levels
-    nonzero_indices_list = []
-    for level, (h, w) in enumerate(level_spatial_shapes):
-        hw_indices = torch.stack(
-            torch.meshgrid(
-                torch.arange(int(h), device=device),
-                torch.arange(int(w), device=device),
-                indexing="ij",
-            ),
-            dim=-1,
-        ).flatten(0, 1)
-        n_level_indices = hw_indices.size(0)
-        level_indices = torch.cat(
-            [
-                torch.tensor([[0]], device=device).expand(n_level_indices, 1),
-                hw_indices,
-                torch.tensor([[level]], device=device).expand(n_level_indices, 1),
-            ],
-            dim=-1,
-        )
-        # 80% sparsity
-        nonzero_indices = level_indices[
-            torch.randperm(n_level_indices, device=device)[: int(n_level_indices * 0.2)]
-        ]
-        nonzero_indices_list.append(nonzero_indices)
-
-    nonzero_indices = torch.cat(nonzero_indices_list)
-    sparse_size = (1, 16, 16, 3, embed_dim)
-
-    stacked_feature_maps = torch.sparse_coo_tensor(
-        nonzero_indices.T,
-        torch.randn(nonzero_indices.size(0), embed_dim, device=device),
-        sparse_size,
-        device=device,
-    ).coalesce()
-
-    return {
-        "query": query,
-        "query_spatial_positions": query_spatial_positions,
-        "query_batch_offsets": query_batch_offsets,
-        "stacked_feature_maps": stacked_feature_maps,
-        "level_spatial_shapes": level_spatial_shapes,
-    }
 
 
 @st.composite
@@ -336,46 +269,13 @@ def strategy_input_tensors(
     )
 
     # 2. Randomly sample a portion of all indices to be nonzero
-    sparse_nonzero_indices = []
-    for level, level_shape in enumerate(level_spatial_shapes):
-        # add batch dimension to level feature map shape
-        extended_level_shape = level_shape.new_full(
-            (level_shape.size(0) + 1,), fill_value=batch_size
-        )
-        extended_level_shape[1:] = level_shape
-        n_level_indices = int(torch.prod(extended_level_shape).item())
-
-        n_sampled_indices = int(n_level_indices * (1 - sparse_region_sparsity))
-        n_sampled_indices = min(
-            max(n_sampled_indices, 1), n_level_indices, 1000
-        )  # hard cap at 1000 to avoid blowup
-
-        # sample from the available indices in 1D form
-        if n_level_indices <= 1000:
-            sampled_flat_indices = torch.randperm(n_level_indices, device=device)[
-                :n_sampled_indices
-            ]
-        else:
-            sampled_flat_indices = (
-                torch.rand(n_sampled_indices, device=device) * n_level_indices
-            ).long()
-
-        # "unflatten" the sampled 1D indices to the true index
-        # (dim x N, last entry of axis 0 is level index)
-        sampled_unflattened_indices = sampled_flat_indices.new_full(
-            (extended_level_shape.size(0) + 1, n_sampled_indices), fill_value=level
-        )
-        sampled_unflattened_indices[:-1] = unflatten_nd_indices(
-            sampled_flat_indices.unsqueeze(0), extended_level_shape
-        )
-
-        assert torch.all(sampled_unflattened_indices[:-1].T < extended_level_shape)
-
-        sparse_nonzero_indices.append(sampled_unflattened_indices)
+    sparse_nonzero_indices = random_multilevel_sparse_tensor_indices(
+        level_spatial_shapes, sparse_region_sparsity, batch_size, 1000, device
+    )
 
     # 3. Construct the sparse tensor
     all_nonzero_indices = torch.cat(
-        [nhood_indices[~oob_mask].T] + sparse_nonzero_indices, dim=1
+        [nhood_indices[~oob_mask].T, sparse_nonzero_indices], dim=1
     )  # (D x nnz)
     if max_spatial_shape.ndim == 2:
         max_spatial_shape = max_spatial_shape.max(0)[0]
@@ -742,7 +642,7 @@ class TestForward:
         self, base_module_instance: SparseNeighborhoodAttentionBlock, device: str
     ):
         """Test that output shape matches input shape."""
-        input_data = simple_input_tensors(device=device)
+        input_data = simple_sparse_input_tensors(device=device)
         query = input_data["query"]
 
         output = base_module_instance(**input_data)
@@ -758,7 +658,7 @@ class TestForward:
         """Test forward pass with minimal-sized inputs."""
         # Create minimal input - just one query
         torch.manual_seed(42)
-        input_data = simple_input_tensors(
+        input_data = simple_sparse_input_tensors(
             device=device,
             n_queries=1,
             embed_dim=base_module_instance.embed_dim,
@@ -785,7 +685,7 @@ class TestForward:
 
         # Create input data
         torch.manual_seed(0)
-        input_data = simple_input_tensors(
+        input_data = simple_sparse_input_tensors(
             device=device,
             n_queries=4,
             embed_dim=config["embed_dim"],
@@ -828,7 +728,7 @@ class TestForward:
 
         # Generate random input
         torch.manual_seed(0)
-        input_data = simple_input_tensors(
+        input_data = simple_sparse_input_tensors(
             device=device,
             n_queries=8,
             embed_dim=config["embed_dim"],
@@ -869,7 +769,7 @@ class TestForward:
     ):
         """Test gradient flow through the module."""
         # Make query require grad
-        input_tensors = simple_input_tensors(device=device)
+        input_tensors = simple_sparse_input_tensors(device=device)
         input_copy = {
             k: (
                 v.detach().clone().requires_grad_(True)
@@ -920,7 +820,7 @@ class TestAttentionMechanism:
         """Test that different positions produce different outputs."""
         # Generate baseline data
         torch.manual_seed(0)
-        original_data = simple_input_tensors(
+        original_data = simple_sparse_input_tensors(
             device=device,
             n_queries=4,
             position_dim=base_module_instance.position_dim,
@@ -948,7 +848,9 @@ class TestAttentionMechanism:
         embed_dim = base_config["embed_dim"]
 
         # Generate data with identical query embeddings but different positions
-        input_data = simple_input_tensors(device=device, n_queries=2, random_seed=0)
+        input_data = simple_sparse_input_tensors(
+            device=device, n_queries=2, random_seed=0
+        )
 
         input_data["query"] = torch.randn(1, embed_dim, device=device).expand(2, -1)
         input_data["query_spatial_positions"] = torch.tensor(
@@ -976,7 +878,7 @@ class TestEdgeCases:
     ):
         """Test validation of input tensor dimensions."""
         # Generate valid data
-        input_data = simple_input_tensors(device=device)
+        input_data = simple_sparse_input_tensors(device=device)
 
         # Create invalid query (1D instead of 2D)
         invalid_data = input_data.copy()
@@ -1001,7 +903,7 @@ class TestEdgeCases:
     ):
         """Test handling of batch size mismatch."""
         # Generate valid data
-        input_data = simple_input_tensors(device=device)
+        input_data = simple_sparse_input_tensors(device=device)
 
         # Create invalid batch_offsets (wrong number of batches)
         invalid_data = input_data.copy()
@@ -1034,7 +936,7 @@ class TestEdgeCases:
         assert not torch.allclose(original_out_proj_weight, module.out_proj.weight)
 
         # Module should still work
-        input_data = simple_input_tensors(device=device)
+        input_data = simple_sparse_input_tensors(device=device)
         output = module(**input_data)
         assert output.shape == input_data["query"].shape
 
@@ -1045,7 +947,7 @@ class TestEdgeCases:
         # Create data with empty first batch
         torch.manual_seed(0)
 
-        input_data = simple_input_tensors(device=device, n_queries=0)
+        input_data = simple_sparse_input_tensors(device=device, n_queries=0)
 
         # Run forward pass - should handle empty batch gracefully
         output = module(**input_data)

@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch import nn, Tensor
 import math
@@ -5,6 +7,7 @@ from torch.nn.init import constant_, xavier_uniform_
 
 from ...utils.misc_utils import inverse_sigmoid
 from .utils import sparse_split_heads, multilevel_sparse_bilinear_grid_sample
+from emsim.utils.sparse_utils.batching.batch_utils import batch_offsets_to_indices
 
 
 ## Based on https://github.com/fundamentalvision/Deformable-DETR/blob/main/models/ops/modules/ms_deform_attn.py
@@ -12,30 +15,21 @@ from .utils import sparse_split_heads, multilevel_sparse_bilinear_grid_sample
 class SparseMSDeformableAttention(nn.Module):
     def __init__(
         self,
-        embed_dim: int = 256,
-        num_levels: int = 4,
-        num_heads: int = 8,
-        num_points: int = 4,
-        double_presigmoid_sampling_offsets=False,
+        embed_dim: int,
+        n_heads: int,
+        n_levels: int = 4,
+        n_points: int = 4,
     ):
         super().__init__()
         self.embed_dim = embed_dim
-        self.num_levels = num_levels
-        self.num_heads = num_heads
-        self.num_points = num_points
-        self.double_presigmoid_sampling_offsets = double_presigmoid_sampling_offsets
+        self.n_levels = n_levels
+        self.n_heads = n_heads
+        self.n_points = n_points
         self.sampling_offsets = nn.Linear(
             embed_dim,
-            num_levels * num_points * num_heads * 2,
-            dtype=(
-                torch.double
-                if double_presigmoid_sampling_offsets
-                else torch.get_default_dtype()
-            ),
+            n_points * n_levels * n_heads * 2,
         )
-        self.attention_weights = nn.Linear(
-            embed_dim, num_points * num_levels * num_heads
-        )
+        self.attention_weights = nn.Linear(embed_dim, n_points * n_levels * n_heads)
         self.value_proj = nn.Linear(embed_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
         self.reset_parameters()
@@ -43,15 +37,17 @@ class SparseMSDeformableAttention(nn.Module):
     def reset_parameters(self):
         constant_(self.sampling_offsets.weight.data, 0.0)
         thetas = torch.arange(
-            self.num_heads, dtype=self.sampling_offsets.bias.dtype
-        ) * (2.0 * math.pi / self.num_heads)
+            self.n_heads,
+            dtype=self.sampling_offsets.bias.dtype,
+            device=self.sampling_offsets.bias.device,
+        ) * (2.0 * math.pi / self.n_heads)
         grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
         grid_init = (
             (grid_init / grid_init.abs().max(-1, keepdim=True)[0])
-            .view(self.num_heads, 1, 1, 2)
-            .repeat(1, self.num_levels, self.num_points, 1)
+            .view(self.n_heads, 1, 1, 2)
+            .repeat(1, self.n_levels, self.n_points, 1)
         )
-        for i in range(self.num_points):
+        for i in range(self.n_points):
             grid_init[:, :, i, :] *= i + 1
         with torch.no_grad():
             self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
@@ -65,135 +61,167 @@ class SparseMSDeformableAttention(nn.Module):
     def forward(
         self,
         query: Tensor,
-        batch_offsets: Tensor,
-        xy_reference_points: Tensor,
-        stacked_value_tensors: Tensor,
-        spatial_shapes: Tensor,
-    ):
+        query_spatial_positions: Tensor,
+        query_batch_offsets: Tensor,
+        stacked_feature_maps: Tensor,
+        level_spatial_shapes: Tensor,
+        query_level_indices: Optional[Tensor] = None,
+        background_embedding: Optional[Tensor] = None,
+    ) -> Tensor:
         """Forward function for SparseMSDeformableAttention
 
         Args:
             query (Tensor): Batch-flattened query tensor of shape [n_query x embed_dim]
-            query_offsets (Tensor): batchsize-long tensor with the ith element
-                being the start index in the query tensor for batch element i
-            reference_points (Tensor): normalized reference points for queries
-                with shape [n_query x 2], where the last two
-                dimensions are the (x, y) coordinates in the range (0, 1).
-                Should be of dtype double (float64)
-            value_tensors (Tensor): Sparse tensor of all feature maps with the
-                shape [batch x height x width x level x channels]
-            spatial_shapes (Tensor): Tensor of shape [n_levels x 2] with the
-                (height, width) of each level's feature map
+            query_batch_offsets (Tensor): Tensor of shape [batch_size+1] with values
+                such that item i is the start of batch i and item i+1 is the end of
+                batch i in the query tensor.
+            query_spatial_positions (Tensor): Spatial positions of queries,
+                shape [n_queries, position_dim]. The positions must be floating-point
+                values scaled in the shape of the feature level in which that query
+                resides, as specified by query_level_indices.
+            stacked_feature_maps (Tensor): Sparse tensor containing feature maps
+                stacked across all levels, with total shape
+                [batch, height, width, levels, embed_dim], where the last dimension
+                is dense and the others are sparse.
+            level_spatial_shapes (Tensor): Spatial dimensions of each level,
+                shape [n_levels, 2]. Contains the height and width
+                of feature maps at each resolution level.
+            query_level_indices (Optional[Tensor]): Level indices of each query, shape
+                [n_queries]. If None, it defaults to every query being from the level
+                of the maximum spatial shape. This value should be specified in the
+                encoder, where queries are tokens at various levels, but may be
+                unspecified in the decoder, where queries are the object queries that
+                are given as being at the full-scale level.
+
+        Returns:
+            Tensor: Output embeddings after sparse deformable attention,
+                shape [n_queries, embed_dim].
         """
-        assert xy_reference_points.dtype == torch.double
         n_total_queries = query.shape[0]
 
-        stacked_value_tensors = torch.sparse_coo_tensor(
-            stacked_value_tensors.indices(),
-            self.value_proj(stacked_value_tensors.values()),
-            size=stacked_value_tensors.shape,
-            is_coalesced=stacked_value_tensors.is_coalesced(),
+        # Perform input value projection
+        stacked_feature_maps = torch.sparse_coo_tensor(
+            stacked_feature_maps.indices(),
+            self.value_proj(stacked_feature_maps.values()),
+            size=stacked_feature_maps.shape,
+            is_coalesced=stacked_feature_maps.is_coalesced(),
         ).coalesce()
 
-        sampling_offsets = self.sampling_offsets(
-            query.to(self.sampling_offsets.weight)  # cast to double
-        ).view(n_total_queries, self.num_levels, self.num_points, self.num_heads, 2)
-        attention_weights = self.attention_weights(query).view(
-            n_total_queries, self.num_levels * self.num_points, self.num_heads
+        sampling_offsets: Tensor = self.sampling_offsets(query).view(
+            n_total_queries, self.n_points, self.n_levels, self.n_heads, 2
+        )
+
+        attention_weights: Tensor = self.attention_weights(query).view(
+            n_total_queries, self.n_points * self.n_levels, self.n_heads
         )
         attention_weights = attention_weights.softmax(-2)
         attention_weights = attention_weights.view(
-            n_total_queries, self.num_levels, self.num_points, self.num_heads
+            n_total_queries, self.n_points, self.n_levels, self.n_heads
         )
 
-        # spatial_scaler = spatial_shapes.flip([1])  # flip i,j to x,y
-        # sampling_locations = xy_reference_points.reshape(
-        #     n_total_queries, 1, 1, 1, 2
-        # ) + sampling_offsets / spatial_scaler.reshape(1, 1, self.num_levels, 1, 2)
-
-        # n_queries, num_levels, num_points, num_heads, 2
-        sampling_locations = torch.sigmoid(
-            inverse_sigmoid(xy_reference_points.view(n_total_queries, 1, 1, 1, 2))
-            + sampling_offsets
+        scaled_spatial_positions = self._scale_to_multilevel(
+            query_spatial_positions, level_spatial_shapes, query_level_indices
         )
 
-        output = multi_scale_deformable_attention(
-            stacked_value_tensors,
-            spatial_shapes,
+        # n_queries, n_points, n_levels, n_heads, 2
+        sampling_locations = (
+            scaled_spatial_positions[:, None, :, None, :] + sampling_offsets
+        )
+        sampling_locations = sampling_locations.clamp(
+            sampling_locations.new_zeros([]), level_spatial_shapes[:, None, :]
+        )
+
+        output = self.multi_scale_deformable_attention(
+            stacked_feature_maps,
+            level_spatial_shapes,
             sampling_locations,
-            batch_offsets,
+            query_batch_offsets,
             attention_weights,
-            torch.get_default_dtype(),
+            background_embedding=background_embedding,
         )
 
         output = self.output_proj(output)
         return output
 
+    def _scale_to_multilevel(
+        self,
+        spatial_positions: Tensor,
+        level_spatial_shapes: Tensor,
+        level_indices: Optional[Tensor] = None,
+    ) -> Tensor:
+        """Scales single-level spatial positions to multiple levels of different spatial shape.
 
-@torch.jit.script
-def multi_scale_deformable_attention(
-    stacked_value_tensors: Tensor,
-    value_spatial_shapes: Tensor,
-    sampling_locations: Tensor,
-    query_offsets: Tensor,
-    attention_weights: Tensor,
-    interp_weight_dtype: torch.dtype = torch.float32,
-) -> Tensor:
-    assert isinstance(stacked_value_tensors, Tensor)
-    assert stacked_value_tensors.is_sparse
-    assert stacked_value_tensors.ndim == 5  # (batch, height, width, level, feature)
+        Args:
+            spatial_positions (Tensor): Tensor of shape [n_points, spatial_dim] where
+                each point's position is in the local coordinates of its resident level.
+            level_spatial_shapes (Tensor): Tensor of shape [n_levels, spatial_dim] that
+                contains the spatial extent of each level.
+            level_indices (Optional[Tensor], optional): Tensor of shape [n_points] that
+                contains the level in which each point in `spatial_positions` resides.
+                If None, a default `level_indices` is used that assumes every point is
+                in the feature level of maximum size according to `level_spatial_shapes`.
 
-    n_queries, n_levels, n_points, n_heads, _ = sampling_locations.shape
-    embed_dim = stacked_value_tensors.shape[-1]
+        Returns:
+            Tensor: Tensor of shape [n_points, n_levels, spatial_dim] that rescales each
+                point to the coordinate system of each feature level.
+        """
+        if level_indices is None:
+            max_spatial_level = level_spatial_shapes.prod(1).argmax(0)
+            level_indices = max_spatial_level.expand(spatial_positions.size(0))
 
-    stacked_value_tensors = sparse_split_heads(stacked_value_tensors, n_heads)
-    # now (batch, height, width, level, heads, head_dim)
+        broadcasted_level_shapes = level_spatial_shapes[level_indices]
+        normalized_positions = spatial_positions / broadcasted_level_shapes
+        out = normalized_positions.unsqueeze(1) * level_spatial_shapes
+        return out
 
-    sampling_locations = sampling_locations * 2 - 1  # rescale to (-1, 1)
+    def multi_scale_deformable_attention(
+        self,
+        stacked_value_tensors: Tensor,
+        level_spatial_shapes: Tensor,
+        sampling_locations: Tensor,
+        query_batch_offsets: Tensor,
+        attention_weights: Tensor,
+        background_embedding: Optional[Tensor] = None,
+    ) -> Tensor:
+        assert isinstance(stacked_value_tensors, Tensor)
+        assert stacked_value_tensors.is_sparse
+        assert stacked_value_tensors.ndim == 5  # (batch, height, width, level, feature)
 
-    batch_sizes: list[int] = torch.diff(
-        torch.cat(
-            [
-                query_offsets,
-                torch.tensor(
-                    [n_queries], device=query_offsets.device, dtype=query_offsets.dtype
-                ),
-            ]
+        n_queries, n_points, n_levels, n_heads, _ = sampling_locations.shape
+        embed_dim = stacked_value_tensors.shape[-1]
+        head_dim = embed_dim // n_heads
+
+        stacked_value_tensors = sparse_split_heads(stacked_value_tensors, n_heads)
+        # now (batch, height, width, level, heads, head_dim)
+
+        batch_indices = batch_offsets_to_indices(query_batch_offsets)
+        batch_indices = batch_indices.unsqueeze(-1).expand(-1, self.n_points)
+
+        sampled_values = multilevel_sparse_bilinear_grid_sample(
+            stacked_value_tensors,
+            sampling_locations,
+            batch_indices,
+            level_spatial_shapes,
+            background_embedding=background_embedding,
         )
-    ).tolist()
-    xy_batch_indices = torch.cat(
-        [
-            torch.full([size], i, device=sampling_locations.device, dtype=torch.int)
-            for i, size in enumerate(batch_sizes)
-        ]
-    )
-    xy_batch_indices = xy_batch_indices.view(-1, 1, 1, 1).expand(
-        n_queries, n_levels, n_points, n_heads
-    )
-    xy_level_indices = (
-        torch.arange(n_levels, device=xy_batch_indices.device, dtype=torch.int)
-        .view(1, -1, 1, 1)
-        .expand(n_queries, n_levels, n_points, n_heads)
-    )
+        sampled_values = sampled_values.to(attention_weights)
 
-    sampled_values = multilevel_sparse_bilinear_grid_sample(
-        stacked_value_tensors,
-        sampling_locations,
-        xy_batch_indices,
-        xy_level_indices,
-        value_spatial_shapes,
-        interp_weight_dtype,
-    )
-    sampled_values = sampled_values.to(attention_weights)
+        assert sampled_values.shape == (
+            n_queries,
+            n_points,
+            n_levels,
+            n_heads,
+            head_dim,
+        )
+        assert attention_weights.shape == (n_queries, n_points, n_levels, n_heads)
 
-    assert sampled_values.shape == (
-        n_queries,
-        n_levels,
-        n_points,
-        n_heads,
-        embed_dim // n_heads,
-    )
-    assert attention_weights.shape == (n_queries, n_levels, n_points, n_heads)
-    output = torch.einsum("qlphd,qlph->qhd", sampled_values, attention_weights)
-    output = output.view(n_queries, embed_dim)
-    return output
+        # do the attention multiplication
+        val = sampled_values.permute(0, 3, 4, 1, 2).reshape(
+            n_queries * n_heads, head_dim, n_points * n_levels
+        )
+        w = attention_weights.permute(0, 3, 1, 2).reshape(
+            n_queries * n_heads, n_points * n_levels, 1
+        )
+        output = torch.bmm(val, w).view(n_queries, embed_dim)
+
+        return output

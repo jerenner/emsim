@@ -23,13 +23,11 @@ def split_batch_concatted_tensor(tensor: Tensor, batch_offsets: Tensor) -> list[
     """
     if batch_offsets[0] == 0:
         batch_offsets = batch_offsets[1:]
+    if batch_offsets[-1] == tensor.size(0):
+        batch_offsets = batch_offsets[:-1]
 
     # cpu transfer required for tensor_split
     split_tensor = torch.tensor_split(tensor, batch_offsets.cpu())
-
-    # Check for empty last tensor (if batch_offsets[-1] == len(tensor))
-    if split_tensor[-1].size(0) == 0:
-        split_tensor = split_tensor[:-1]
 
     return list(split_tensor)
 

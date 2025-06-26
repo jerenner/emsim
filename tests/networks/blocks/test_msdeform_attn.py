@@ -3,6 +3,7 @@ from typing import Optional, Union, Any
 import random
 import torch
 from torch import Tensor, nn
+import torch.nn.functional as F
 import numpy as np
 import pytest
 from hypothesis import strategies as st
@@ -232,6 +233,105 @@ class TestMultilevelSparseBilinearGridSample:
             out.sum().backward()
             assert data["sparse_tensor"].grad is not None
 
+    def test_2x2_grid_unit(self, device: Union[str, torch.device]):
+        """Tests interpolation on a simple 2x2 image"""
+        device = torch.device(device)
+        tensor = torch.tensor([[0.0, 1.0], [2.0, 3.0]], device=device)
+        # (batch_size, h, w, n_levels, n_heads, head_dim)
+        tensor = tensor.view(1, 2, 2, 1, 1, 1)
+        tensor = tensor.to_sparse(dense_dim=1)
+
+        # sampling points: 0,0 pixel center and midpoint of grid
+        spatial_positions = torch.tensor([[0.5, 0.5], [1.0, 1.0]], device=device)
+        # (n_pts, n_levels, n_heads, 2)
+        spatial_positions = spatial_positions[:, None, None, :]
+
+        batch_indices = torch.tensor([0, 0], device=device)
+        level_spatial_shapes = torch.tensor([[2, 2]], device=device)
+
+        out = multilevel_sparse_bilinear_grid_sample(
+            tensor,
+            spatial_positions,
+            batch_indices,
+            level_spatial_shapes,
+        ).squeeze()
+        expected = out.new_tensor([0.0, 1.5], device=device)
+        assert torch.allclose(out, expected)
+
+    @example(
+        batch_size=1,
+        height=2,
+        width=3,
+        head_dim=1,
+        n_points_per_batch=1,
+        seed=0,
+    )
+    @settings(suppress_health_check=[HealthCheck.differing_executors], deadline=None)
+    @given(
+        batch_size=st.integers(1, 3),
+        height=st.integers(2, 32),
+        width=st.integers(2, 32),
+        head_dim=st.integers(1, 16),
+        n_points_per_batch=st.integers(1, 32),
+        seed=st.integers(0, 2**10),
+    )
+    def test_dense_grid_sample_hypothesis(
+        self,
+        batch_size: int,
+        height: int,
+        width: int,
+        head_dim: int,
+        n_points_per_batch: int,
+        seed: int,
+        device: Union[str, torch.device],
+    ):
+        """Test sparse bilinear sampling against an equivalent usage of F.grid_sample
+        on a dense tensor.
+        """
+        device = torch.device(device)
+        torch.manual_seed(seed)
+
+        dense = torch.randn(batch_size, head_dim, height, width, device=device)
+        # (batch_size, height, width, n_levels (=1), n_heads (=1), head_dim)
+        sparse = sparse_split_heads(
+            dense.permute(0, 2, 3, 1).unsqueeze(-2).to_sparse(dense_dim=1), 1
+        )
+
+        level_spatial_shapes = dense.new_tensor([[height, width]], dtype=torch.long)
+
+        # make sampling points with a 0.5 margin to avoid edges
+        margin = 0.5
+        pos = torch.rand(batch_size, n_points_per_batch, 2, device=device)
+        pos = pos * (level_spatial_shapes - 1 - 2 * margin) + margin
+
+        # flatten across batches and add singleton level and head dims
+        spatial_positions = pos.view(-1, 1, 1, 2)
+        batch_indices = torch.repeat_interleave(
+            torch.arange(batch_size, device=device),
+            n_points_per_batch,
+        )
+
+        # normalized positions within [-1, 1] for F.grid_sample
+        # shape: batch_size, n_pts, 1, 2, with last dim [x, y] instead of [i, j]
+        norm_pos = (pos / level_spatial_shapes * 2.0 - 1.0).unsqueeze(2).flip(-1)
+
+        # do the interpolations
+        out_sparse = multilevel_sparse_bilinear_grid_sample(
+            sparse,
+            spatial_positions,
+            batch_indices,
+            level_spatial_shapes,
+        ).view(batch_size * n_points_per_batch, head_dim)
+
+        out_dense = F.grid_sample(
+            dense, norm_pos, mode="bilinear", align_corners=False
+        ).squeeze(
+            -1
+        )  # (batch_size, head_dim, n_points_per_batch)
+        out_dense = out_dense.permute(0, 2, 1).reshape(-1, head_dim)
+
+        assert torch.allclose(out_sparse, out_dense, atol=1e-5, rtol=1e-4)
+
 
 @pytest.mark.cpu_and_cuda
 class TestMakeIndexAndWeightTensors:
@@ -272,6 +372,31 @@ class TestMakeIndexAndWeightTensors:
         out = (weight_tensor.unsqueeze(-2) @ indexed_values).squeeze(-2)
         assert out is not None
         assert out.shape == (n_pts, n_levels, n_heads, sparse_tensor_split.shape[-1])
+
+    @settings(suppress_health_check=[HealthCheck.differing_executors], deadline=None)
+    @given(inputs=grid_sample_strategy())
+    def test_weights_sum_to_one_hypothesis(
+        self, inputs, device: Union[str, torch.device]
+    ):
+        device = torch.device(device)
+        data = grid_sample_tensors(**inputs, device=device)
+
+        assert data["spatial_positions"] is not None
+        assert data["batch_indices"] is not None
+        assert data["level_spatial_shapes"] is not None
+        if data["level_indices"] is None:
+            data["level_indices"] = torch.arange(inputs["n_levels"], device=device)
+        if data["head_indices"] is None:
+            data["head_indices"] = torch.arange(inputs["n_heads"], device=device)
+
+        _, weights = _make_index_and_weight_tensors(
+            data["spatial_positions"],
+            data["batch_indices"],
+            data["level_indices"],
+            data["level_spatial_shapes"],
+            data["head_indices"],
+        )
+        assert torch.allclose(weights.sum(-1), weights.new_ones([]))
 
 
 @pytest.mark.cpu_and_cuda

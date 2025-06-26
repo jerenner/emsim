@@ -43,7 +43,7 @@ def sparse_split_heads(sparse_tensor: Tensor, n_heads: int) -> Tensor:
     return new_sparse_tensor
 
 
-@torch.jit.script
+# @torch.jit.script
 def _make_index_and_weight_tensors(
     spatial_positions: Tensor,
     batch_indices: Tensor,
@@ -80,7 +80,8 @@ def _make_index_and_weight_tensors(
     index_tensor[..., 1:3] += pos_offset
 
     # distance from nearest 4 pixel centers
-    weights = (index_tensor[..., 1:3] + 0.5 - spatial_positions_exp).abs().prod(-1)
+    delta = (spatial_positions_exp - (index_tensor[..., 1:3] + 0.5)).abs()
+    weights = (1.0 - delta).prod(-1)
     assert torch.allclose(weights.sum(-1), weights.new_ones([]))
 
     level_shapes_broadcasted = level_spatial_shapes[level_indices][:, None, None, :]
@@ -93,7 +94,7 @@ def _make_index_and_weight_tensors(
     return index_tensor, weights
 
 
-@torch.jit.script
+# @torch.jit.script
 def multilevel_sparse_bilinear_grid_sample(
     sparse_tensor: Tensor,
     spatial_positions: Tensor,

@@ -1,12 +1,13 @@
+# pyright: reportCallIssue=false, reportArgumentType=false
 from dataclasses import dataclass, field
 
+from omegaconf import OmegaConf
 from hydra.core.config_store import ConfigStore
 
 from .system import SystemConfig
 from .model import EMModelConfig
 from .dataset import DatasetConfig
 from .training import TrainingConfig
-from .resolvers import register_resolvers
 
 
 @dataclass
@@ -26,3 +27,7 @@ def register_configs():
     cs.store(name="base_config", node=Config)
 
     register_resolvers()
+
+
+def register_resolvers():
+    OmegaConf.register_new_resolver("eval", eval)

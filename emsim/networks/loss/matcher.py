@@ -97,7 +97,7 @@ class HungarianMatcher(nn.Module):
                 target_dict["electron_batch_offsets"],
             )
 
-        total_costs = [
+        total_costs: list[Tensor] = [
             self.cost_coef_class * _class
             + self.cost_coef_mask * mask
             + self.cost_coef_dice * dice
@@ -128,7 +128,17 @@ class HungarianMatcher(nn.Module):
                 f"Got fewer queries than electrons: {[c.shape for c in total_costs]}"
             )
 
-        indices = [linear_sum_assignment(cost.cpu()) for cost in total_costs]
+        indices = []
+        for b, cost in enumerate(total_costs):
+            try:
+                indices_b = linear_sum_assignment(cost.cpu())
+            except ValueError as ex:
+                raise ValueError(
+                    f"{cost.cpu()=} \n {class_cost[b]=} \n {mask_cost[b]=}"
+                    f"{dice_cost[b]=} \n {distance_cost[b]=} \n {nll_cost[b]=}"
+                    f"{likelihood_cost[b]=}"
+                ) from ex
+            indices.append(indices_b)
 
         return [
             torch.stack([torch.as_tensor(i), torch.as_tensor(j)]) for i, j in indices
@@ -154,7 +164,7 @@ def get_bce_cost(
         logits_values, torch.ones_like(logits_values), reduction="none"
     )
     nonzero_pos_indices = pos_values.nonzero().squeeze(1)
-    pos_tensor = sparse_flatten_hw(
+    pos_tensor: Tensor = sparse_flatten_hw(
         torch.sparse_coo_tensor(
             logits_indices[:, nonzero_pos_indices],
             pos_values[nonzero_pos_indices],
@@ -166,7 +176,7 @@ def get_bce_cost(
         logits_values, torch.zeros_like(logits_values), reduction="none"
     )
     nonzero_neg_indices = neg_values.nonzero().squeeze(1)
-    neg_tensor = sparse_flatten_hw(
+    neg_tensor: Tensor = sparse_flatten_hw(
         torch.sparse_coo_tensor(
             logits_indices[:, nonzero_neg_indices],
             neg_values[nonzero_neg_indices],
@@ -174,7 +184,7 @@ def get_bce_cost(
         )
     )
 
-    true_segmap_binarized = sparse_flatten_hw(
+    true_segmap_binarized: Tensor = sparse_flatten_hw(
         torch.sparse_coo_tensor(
             segmap.indices(),
             segmap.values().to(torch.bool).to(segmap.dtype),
@@ -201,7 +211,7 @@ def get_bce_cost(
             neg_select.T, targ_select
         )
 
-        nnz = targ._nnz()
+        nnz = max(targ._nnz(), 1)
         loss = (pos_loss + neg_loss) / nnz
         out.append(loss[:q, :e])
 
@@ -215,10 +225,10 @@ def get_dice_cost(
     n_queries: Tensor,
     n_electrons: Tensor,
 ) -> list[Tensor]:
-    portions = torch.sparse.softmax(portion_logits, -1)
+    portions: Tensor = torch.sparse.softmax(portion_logits, -1)
 
-    portions_flat = sparse_flatten_hw(portions)
-    true_portions_flat = sparse_flatten_hw(true_portions)
+    portions_flat: Tensor = sparse_flatten_hw(portions)
+    true_portions_flat: Tensor = sparse_flatten_hw(true_portions)
 
     out = []
     for pred, true, q, e in zip(

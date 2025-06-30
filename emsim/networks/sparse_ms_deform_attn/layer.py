@@ -194,7 +194,7 @@ class SparseMSDeformableAttention(nn.Module):
         stacked_value_tensors = sparse_split_heads(stacked_value_tensors, n_heads)
         # now (batch, height, width, level, heads, head_dim)
 
-        batch_indices = batch_offsets_to_indices(query_batch_offsets)
+        batch_indices: Tensor = batch_offsets_to_indices(query_batch_offsets)
         batch_indices = batch_indices.unsqueeze(-1).expand(-1, self.n_points)
 
         sampled_values = multilevel_sparse_bilinear_grid_sample(

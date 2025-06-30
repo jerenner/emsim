@@ -18,7 +18,7 @@ from ..conftest import (
 
 
 @pytest.mark.cuda_if_available
-@settings(deadline=None, max_examples=25)
+@settings(deadline=None, max_examples=100)
 @given(
     input_params=exhaustive_attention_input_configs(
         dtypes=[torch.double], min_requiring_grads=1

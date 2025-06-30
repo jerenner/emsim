@@ -170,9 +170,16 @@ class TestBasicForwardBackward:
         elif tensor_requiring_grads in ("key_positions", "rope_freqs"):
             use_rope = "from_freqs"
         else:
-            use_rope = None
+            use_rope = "none"
 
-        inputs = attention_inputs(use_rope=use_rope, device=device)
+        if tensor_requiring_grads == "selection_fill":
+            use_selection_fill = True
+        else:
+            use_selection_fill = False
+
+        inputs = attention_inputs(
+            use_rope=use_rope, use_selection_fill=use_selection_fill, device=device
+        )
         inputs = set_requires_grad(inputs, tensor_requiring_grads)
 
         # Forward pass
@@ -199,10 +206,14 @@ class TestBasicForwardBackward:
         """Hypothesis-based test to try random combinations of inputs"""
         use_biases = tensor_configs["use_biases"]
         use_rope = tensor_configs["use_rope"]
+        use_selection_fill = tensor_configs["use_selection_fill"]
         tensors_requiring_grads = tensor_configs["tensors_requiring_grads"]
 
         inputs = attention_inputs(
-            use_biases=use_biases, use_rope=use_rope, device=device
+            use_biases=use_biases,
+            use_rope=use_rope,
+            use_selection_fill=use_selection_fill,
+            device=device,
         )
 
         inputs = set_requires_grad(inputs, tensors_requiring_grads)

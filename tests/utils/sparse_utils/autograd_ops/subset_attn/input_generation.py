@@ -17,6 +17,7 @@ def attention_inputs(
     use_rope: Union[
         Literal["none"], Literal["precomputed", Literal["from_freqs"]]
     ] = "none",  # none, precomputed, from_freqs
+    use_selection_fill: bool = False,
     position_dim: int = 2,
     n_freq_groups: int = 1,
     sparse_height: int = 8,
@@ -52,6 +53,8 @@ def attention_inputs(
             - "none": No positional encoding
             - "precomputed": Use precomputed RoPE values
             - "from_freqs": Generate RoPE from frequency components
+        use_selection_fill (bool): Whether to create a `selection_fill` tensor to serve
+            as a background embedding for selected keys corresponding to empty pixels
         position_dim (int): Number of dimensions for positional encoding (when using RoPE).
         n_freq_groups (int): Number of frequency groups for RoPE.
         sparse_height (int): Height dimension of the sparse spatial grid.
@@ -109,6 +112,7 @@ def attention_inputs(
             - batched_key_positions: Key positions for RoPE in batched format
                 (if applicable)
             - rope_freqs: RoPE frequency components (if applicable)
+            - selection_fill: Tensor of shape [n_queries, 1, embed_dim] (if applicable)
             - scale_factor: Optional scale factor for attention scores
             - dropout_p: Dropout probability
             - training: Training mode flag
@@ -254,6 +258,14 @@ def attention_inputs(
 
         rope_freqs *= freq_mask
 
+    # Selection fill if applicable
+    if use_selection_fill:
+        selection_fill = torch.randn(
+            sum(n_queries), 1, embed_dim, device=device, dtype=dtype
+        )
+    else:
+        selection_fill = None
+
     # Random scale factor or None (defaults to 1/sqrt(embed_dim) in the function)
     scale_factor: Optional[float] = (
         torch.rand(1).item() if np.random.random() > 0.5 else None
@@ -286,6 +298,7 @@ def attention_inputs(
         "key_rope_encoding": batched_key_rope_encoding,
         "key_positions": batched_key_positions,
         "rope_freqs": rope_freqs,
+        "selection_fill": selection_fill,
         "scale_factor": scale_factor,
         "dropout_p": dropout_p,
         "training": training,
@@ -457,9 +470,8 @@ def create_sparse_and_index_tensor(
         if n_hits_this_batch < hits_this_batch_nz.size(0):
             # Need to set some hits to misses
             perm = torch.randperm(hits_this_batch_nz.size(0), device=device)
-            hits_to_flip = perm[:hits_this_batch_nz.size(0) - n_hits_this_batch]
+            hits_to_flip = perm[: hits_this_batch_nz.size(0) - n_hits_this_batch]
             hits_this_batch_mask[hits_this_batch_nz[hits_to_flip].unbind(-1)] = False
-
 
         n_misses_this_batch = hits_this_batch_mask.numel() - n_hits_this_batch
 

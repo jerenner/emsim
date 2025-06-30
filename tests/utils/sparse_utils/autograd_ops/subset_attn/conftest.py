@@ -23,6 +23,7 @@ DIFFERENTIABLE_TENSOR_NAMES = [
     "value_weight",
     "key_bias",
     "value_bias",
+    "selection_fill",
     "key_rope_encoding",
     "key_positions",
     "rope_freqs",
@@ -69,6 +70,7 @@ def ordered_autograd_inputs(
         inputs["value_weight"],
         inputs["key_bias"],
         inputs["value_bias"],
+        inputs["selection_fill"],
         subsetted_key_tensors["key_rope_encoding"],
         subsetted_key_tensors["key_positions"],
         inputs["rope_freqs"],
@@ -93,6 +95,7 @@ def set_requires_grad(inputs: dict[str, Any], tensor_names: Union[str, list[str]
 def filter_valid_tensor_names(
     use_rope: Union[Literal["none"], Literal["precomputed"], Literal["from_freqs"]],
     use_biases: bool,
+    use_selection_fill: bool,
 ) -> list[str]:
     """Filter tensor names based on the given parameters.
 
@@ -118,6 +121,9 @@ def filter_valid_tensor_names(
             t for t in valid_tensors if t not in ["key_bias", "value_bias"]
         ]
 
+    if not use_selection_fill:
+        valid_tensors = [t for t in valid_tensors if t != "selection_fill"]
+
     return valid_tensors
 
 
@@ -125,9 +131,10 @@ def _draw_shared_attention_params(draw, min_requiring_grads: int = 0):
     """Helper function that does the drawing of base parameters for both strategies"""
     use_rope = draw(st.sampled_from(["none", "precomputed", "from_freqs"]))
     use_biases = draw(st.booleans())
+    use_selection_fill = draw(st.booleans())
 
     # Get valid tensor names for these parameters
-    available_tensors = filter_valid_tensor_names(use_rope, use_biases)
+    available_tensors = filter_valid_tensor_names(use_rope, use_biases, use_selection_fill)
 
     # Draw a non-empty subset of available tensors
     tensors_requiring_grads = draw(
@@ -145,6 +152,7 @@ def _draw_shared_attention_params(draw, min_requiring_grads: int = 0):
     return {
         "use_rope": use_rope,
         "use_biases": use_biases,
+        "use_selection_fill": use_selection_fill,
         "tensors_requiring_grads": tensors_requiring_grads,
         "seed": seed,
     }
@@ -232,6 +240,7 @@ def exhaustive_attention_input_configs(
         "dtype": dtype,
         "use_biases": base_params["use_biases"],
         "use_rope": base_params["use_rope"],
+        "use_selection_fill": base_params["use_selection_fill"],
         "tensors_requiring_grads": base_params["tensors_requiring_grads"],
         "seed": base_params["seed"],
     }

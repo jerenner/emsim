@@ -27,6 +27,7 @@ def traceable_subset_attention(
     value_weight: Tensor,
     key_bias: Optional[Tensor] = None,
     value_bias: Optional[Tensor] = None,
+    selection_fill: Optional[Tensor] = None,
     key_rope_encoding: Optional[Tensor] = None,
     key_positions: Optional[Tensor] = None,
     rope_freqs: Optional[Tensor] = None,
@@ -51,7 +52,7 @@ def traceable_subset_attention(
 
     # Gather values using the same helper as the custom op
     selected = gather_mask_and_fill(
-        sparse_tensor_values, linear_index_tensor, is_specified_mask
+        sparse_tensor_values, linear_index_tensor, is_specified_mask, fill=selection_fill,
     )
 
     if batch_kv_projection:
@@ -93,10 +94,13 @@ def traceable_subset_attention(
     # attn_scores: (n_queries, n_heads, n_keys_per_query)
 
     # Apply masking and softmax
-    assert is_specified_mask.shape == (n_queries, n_keys_per_query)
-    attn_scores_masked = attn_scores.masked_fill(
-        ~is_specified_mask.unsqueeze(1), -torch.inf
-    )
+    if selection_fill is None:
+        assert is_specified_mask.shape == (n_queries, n_keys_per_query)
+        attn_scores_masked = attn_scores.masked_fill(
+            ~is_specified_mask.unsqueeze(1), -torch.inf
+        )
+    else:
+        attn_scores_masked = attn_scores
     attn_weights = attn_scores_masked.softmax(-1)
     attn_weights = attn_weights.nan_to_num(0.0)
 
@@ -140,6 +144,7 @@ def traceable_batched_attention(
     value_weight: Tensor,
     key_bias: Tensor,
     value_bias: Tensor,
+    selection_fill: Optional[Tensor] = None,
     key_rope_encoding: Optional[Tensor] = None,
     key_positions: Optional[Tensor] = None,
     rope_freqs: Optional[Tensor] = None,

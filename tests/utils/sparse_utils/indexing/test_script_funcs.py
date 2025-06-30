@@ -216,7 +216,9 @@ class TestGatherMaskAndFill:
         # Portion of False values in mask
         mask_sparsity=st.floats(min_value=0.0, max_value=1.0),
         # Fill strategy
-        fill_type=st.sampled_from(["none", "scalar", "vector", "full"]),
+        fill_type=st.sampled_from(
+            ["none", "scalar", "vector", "per_index_broadcasted", "full"]
+        ),
         test_grads=st.booleans(),
     )
     def test_hypothesis(
@@ -258,6 +260,14 @@ class TestGatherMaskAndFill:
             fill = torch.randn(
                 values_feature_dims[-1], device=device, requires_grad=test_grads
             )
+        elif fill_type == "per_index_broadcasted":
+            assume(len(indices_shape) > 0)
+            fill_shape = (
+                [indices_shape[0]]
+                + ([1] * len(indices_shape[:-1]))
+                + values_feature_dims
+            )
+            fill = torch.randn(fill_shape, device=device, requires_grad=test_grads)
         else:
             fill = torch.randn(
                 expected_output_shape, device=device, requires_grad=test_grads

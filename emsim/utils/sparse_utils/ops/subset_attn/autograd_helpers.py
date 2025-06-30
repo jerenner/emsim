@@ -149,6 +149,7 @@ def select_values_and_project_kv(
     value_weight: Tensor,
     key_bias: Optional[Tensor],
     value_bias: Optional[Tensor],
+    fill: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Retrieves source sequence elements and computes the key and value tensors for
     multi-head attention.
@@ -168,6 +169,10 @@ def select_values_and_project_kv(
         value_weight (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
         key_bias (Optional[Tensor]): Key projection bias of shape [embed_dim]
         value_bias (Optional[Tensor]): Value projection bias of shape [embed_dim]
+        fill (Optional[Tensor]): Optional fill value to be put in the selected
+            pre-projection tensor in locations corresponding to linear_index_tensor
+            being False. If None, a default fill value of 0 is used. Must be
+            broadcastable to the final shape.
 
     Returns:
         - keys (Tensor): Key tensor of shape
@@ -180,7 +185,7 @@ def select_values_and_project_kv(
     assert linear_index_tensor.ndim == 2
     assert sparse_tensor_values.ndim == 2
 
-    selected = gather_mask_and_fill(sparse_tensor_values, linear_index_tensor, is_specified_mask)
+    selected = gather_mask_and_fill(sparse_tensor_values, linear_index_tensor, is_specified_mask, fill=fill)
 
     keys, values = project_kv(selected, key_weight, value_weight, key_bias, value_bias)
     return keys, values, selected

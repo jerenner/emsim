@@ -118,10 +118,10 @@ def test_end_to_end_subset_attn(
         value_weight,
         key_bias,
         value_bias,
-        key_pos_encoding,
-        key_positions,
-        rope_freqs,
-        scale_factor,
+        key_rope_encoding=key_pos_encoding,
+        key_positions=key_positions,
+        rope_freqs=rope_freqs,
+        scale_factor=scale_factor,
     )
 
     # Check output shapes
@@ -157,24 +157,6 @@ class TestModule:
         else:
             assert module.kv_proj.bias is None
 
-    @example(
-        input_config={
-            "n_queries": 1,
-            "embed_dim": 2,
-            "n_heads": 1,
-            "n_keys_per_query": 1,
-            "num_sparse_values": 5,
-            "position_dim": 1,
-            "n_freq_groups": 1,
-            "unspecified_query_indices": None,
-            "unspecified_prob": 0.0,
-            "dtype": torch.float32,
-            "use_biases": False,
-            "use_rope": "none",
-            "tensors_requiring_grads": ["key_weight"],
-            "seed": 0,
-        },
-    )
     @settings(deadline=None)
     @given(
         input_config=exhaustive_attention_input_configs(
@@ -231,6 +213,7 @@ class TestModule:
             value_weight=inputs["value_weight"],
             key_bias=inputs["key_bias"],
             value_bias=inputs["value_bias"],
+            background_embedding=inputs["selection_fill"],
             key_rope_encoding=inputs["key_rope_encoding"],
             key_positions=inputs["key_positions"],
             rope_freqs=inputs["rope_freqs"],
@@ -246,6 +229,7 @@ class TestModule:
             key_positions=inputs_module["key_positions"],
             rope_freqs=inputs_module["rope_freqs"],
             scale_factor=inputs_module["scale_factor"],
+            background_embedding=inputs_module["selection_fill"],
         )
 
         assert torch.allclose(wrapper_out, module_out)
@@ -263,12 +247,16 @@ class TestModule:
                 wrapper_grad = inputs[tensor_name].grad
                 if tensor_name in module_kv_params:
                     if tensor_name == "key_weight":
+                        assert module.kv_proj.weight.grad is not None
                         module_grad = module.kv_proj.weight.grad[: module.embed_dim]
                     elif tensor_name == "value_weight":
+                        assert module.kv_proj.weight.grad is not None
                         module_grad = module.kv_proj.weight.grad[module.embed_dim :]
                     elif tensor_name == "key_bias":
+                        assert module.kv_proj.bias.grad is not None
                         module_grad = module.kv_proj.bias.grad[: module.embed_dim]
                     elif tensor_name == "value_bias":
+                        assert module.kv_proj.bias.grad is not None
                         module_grad = module.kv_proj.bias.grad[module.embed_dim :]
                 else:
                     module_grad = inputs_module[tensor_name].grad

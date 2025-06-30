@@ -2,7 +2,7 @@ from typing import Any, cast, Optional
 
 import pytest
 import torch
-from hypothesis import given, settings
+from hypothesis import given, settings, assume
 from torch import Tensor
 
 from emsim.utils.sparse_utils.batching import remove_batch_dim_and_concat
@@ -327,6 +327,7 @@ class TestAgainstReferenceHypothesis:
         uses padding instead of stacking the queries, and masking instead of key
         subsets
         """
+        assume(not inputs_config["use_selection_fill"])  # not implemented in batched
         inputs = attention_inputs(
             **inputs_config,
             dropout_p=0.0,
@@ -367,6 +368,7 @@ class TestAgainstReferenceHypothesis:
         device: str,
     ) -> None:
         """Test equivalence of the two traceable implementations."""
+        assume(not inputs_config["use_selection_fill"])  # not implemented in batched
         inputs = attention_inputs(
             **inputs_config, device=device, dropout_p=0.0, training=False
         )
@@ -480,6 +482,7 @@ class TestGradientsHypothesis:
         self, device: str, inputs_config: dict[str, Any]
     ):
         """Test gradients against the reference implementation that uses autograd"""
+        assume(not inputs_config["use_selection_fill"])  # not implemented in batched
         tensors_requiring_grads = inputs_config["tensors_requiring_grads"]
         torch.set_anomaly_enabled(True)
 

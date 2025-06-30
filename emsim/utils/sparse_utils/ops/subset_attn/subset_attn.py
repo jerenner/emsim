@@ -18,6 +18,7 @@ def batch_sparse_index_subset_attn(
     value_weight: Tensor,
     key_bias: Optional[Tensor] = None,
     value_bias: Optional[Tensor] = None,
+    background_embedding: Optional[Tensor] = None,
     key_rope_encoding: Optional[Tensor] = None,
     key_positions: Optional[Tensor] = None,
     rope_freqs: Optional[Tensor] = None,
@@ -43,9 +44,12 @@ def batch_sparse_index_subset_attn(
 
     Notes:
         - Key indices in index_tensor pointing to spatial locations in sparse_tensor
-            that do not have specified values will be masked out in the attention
-            calculation similar to masking out padding in standard attention.
-        - Queries whose keys are all unspecified will get an output vector of all 0.
+            that do not have specified values will either be masked out in the attention
+            calculation similar to masking out padding in standard attention, or, if
+            background_embedding is specified, will be given the corresponding
+            background embedding for that query.
+        - Queries whose keys are all unspecified will get an output vector of all 0
+            in the background_embedding=None case.
         - For rotary position encodings, either provide key_rope_encoding OR both
             key_positions and rope_freqs. Providing both options simultaneously is
             not supported.
@@ -75,6 +79,9 @@ def batch_sparse_index_subset_attn(
         value_weight (Tensor): Value projection matrix of shape [M, M].
         key_bias (Optional[Tensor]): Optional bias vector for key projection of shape [M].
         value_bias (Optional[Tensor]): Optional bias vector for value projection of shape [M].
+        background_embedding (Optional[Tensor]): Optional tensor that will be used as a
+            fill value for keys that are not specified in the sparse tensor. Must be
+            broadcastable to [..., L, M].
         key_rope_encoding (Optional[Tensor]): Optional positional encoding for keys
             of shape [..., L, n_heads, head_dim], where ... matches the batch dimensions
             from index_tensor. Used for rotary position embedding (RoPE). The n_heads
@@ -102,7 +109,7 @@ def batch_sparse_index_subset_attn(
         check_all_specified (bool): If True, this function will raise a ValueError
             if any of the indices in `index_tensor` are not specified in `sparse_tensor`.
             If False, unspecified indices will be masked out in the attention calculation.
-            Defaults to False.
+            Incompatible with background_embedding. Defaults to False.
 
     Returns:
         - Tensor: Output tensor after attention of shape [..., M], where ... are the
@@ -144,14 +151,13 @@ def batch_sparse_index_subset_attn(
         value_weight,
         key_bias,
         value_bias,
+        background_embedding,
         key_rope_encoding,
         key_positions,
         rope_freqs,
         scale_factor,
     )
 
-    out_shape = query_tensor.shape[:-1] + (value_weight.size(0),)
-    assert attended.shape == out_shape
     assert is_specified_mask.shape == index_tensor.shape[:-1]
 
     return attended, is_specified_mask
@@ -180,6 +186,7 @@ class BatchSparseIndexSubsetAttention(nn.Module):
         key_positions: Optional[Tensor] = None,
         rope_freqs: Optional[Tensor] = None,
         scale_factor: Optional[float] = None,
+        background_embedding: Optional[Tensor] = None,
         check_all_specified: bool = False,
     ):
         kv_params = self.kv_params()
@@ -193,6 +200,7 @@ class BatchSparseIndexSubsetAttention(nn.Module):
             value_weight=kv_params["value_weight"],
             key_bias=kv_params["key_bias"],
             value_bias=kv_params["value_bias"],
+            background_embedding=background_embedding,
             key_rope_encoding=key_rope_encoding,
             key_positions=key_positions,
             rope_freqs=rope_freqs,

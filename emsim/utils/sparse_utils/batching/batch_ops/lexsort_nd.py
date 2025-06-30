@@ -262,11 +262,11 @@ def _lexsort_nd_int(
 
     # bits needed per component
     bits_tensor = (max_range + 1).log2().ceil().long()  # (vector_len,)
-    cum_bits = bits_tensor.cumsum(0)
+    cum_bits = bits_tensor.cumsum(0).clamp_min_(1)
 
     # 3. Greedily assign components to subkeys
     MAX_KEY_BITS = 63
-    subkey_id = cum_bits // MAX_KEY_BITS  # (vector_len,)
+    subkey_id = (cum_bits - 1) // MAX_KEY_BITS  # (vector_len,)
     n_keys = int(subkey_id[-1].item()) + 1
     subkey_arange = torch.arange(n_keys, device=subkey_id.device)
     subkey_mask = subkey_arange.unsqueeze(1) == subkey_id.unsqueeze(0)  # (K, V)
@@ -280,7 +280,7 @@ def _lexsort_nd_int(
     global_min = component_min.view(-1, vector_len).amin(0)  # (V)
     normalized = tensor.long() - global_min.long()  # (N, ..., V)
     keys = normalized.unsqueeze(-2) << shift_tensor  # # (N, ..., K, V)
-    keys = keys.masked_fill_(~subkey_mask, 0.0).sum(-1)  # (N, ..., K)
+    keys = keys.masked_fill_(~subkey_mask, 0).sum(-1)  # (N, ..., K)
 
     # Handle descending for unsigned integers
     if descending and tensor.dtype in (

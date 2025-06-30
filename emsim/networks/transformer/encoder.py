@@ -15,7 +15,7 @@ from emsim.networks.transformer.blocks import (
     FFNBlock,
     MultilevelSelfAttentionBlockWithRoPE,
     SelfAttentionBlock,
-    SparseDeformableAttentionBlock,
+    SparseMSDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
 from emsim.utils.sparse_utils.batching import (
@@ -85,7 +85,7 @@ class TransformerEncoderLayer(nn.Module):
             )
         if use_msdeform_attn:
             raise ValueError("Sparse MSDeformAttention not updated yet")
-            self.msdeform_attn = SparseDeformableAttentionBlock(
+            self.msdeform_attn = SparseMSDeformableAttentionBlock(
                 d_model,
                 n_heads,
                 n_feature_levels,

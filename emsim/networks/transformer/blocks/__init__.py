@@ -1,9 +1,6 @@
-from .rope import MultilevelIndependentRoPE
-from .ffn import FFNBlock
 from .cross_attn import MultilevelCrossAttentionBlockWithRoPE
-from .self_attn import SelfAttentionBlock, MultilevelSelfAttentionBlockWithRoPE
-from .ms_deform_attn import (
-    SparseDeformableAttentionBlock,
-    SparseDeformableAttentionBlockWithRoPE,
-)
+from .ffn import FFNBlock
+from .ms_deform_attn import SparseMSDeformableAttentionBlock
 from .neighborhood_attn import SparseNeighborhoodAttentionBlock
+from .rope import MultilevelIndependentRoPE
+from .self_attn import MultilevelSelfAttentionBlockWithRoPE, SelfAttentionBlock

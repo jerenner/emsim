@@ -1,84 +1,77 @@
-from emsim.networks.sparse_ms_deform_attn import SparseMSDeformableAttention
-
+from typing import Optional, Union
 
 from torch import Tensor, nn
 
+from emsim.networks.sparse_ms_deform_attn import SparseMSDeformableAttention
 
-class SparseDeformableAttentionBlock(nn.Module):
+
+class SparseMSDeformableAttentionBlock(nn.Module):
     def __init__(
         self,
-        d_model: int,
+        embed_dim: int,
         n_heads: int,
         n_levels: int,
-        n_points_per_level_per_head: int,
-        dropout: float = 0.1,
+        n_points: int,
+        dropout: float = 0.0,
+        bias: bool = False,
         norm_first: bool = True,
     ):
         super().__init__()
-        self.d_model = d_model
+        self.embed_dim = embed_dim
         self.n_heads = n_heads
+        self.n_levels = n_levels
+        self.n_points = n_points
         self.norm_first = norm_first
 
-        self.attn = SparseMSDeformableAttention(
-            d_model, n_levels, n_heads, n_points_per_level_per_head
+        self.norm = nn.LayerNorm(embed_dim)
+
+        self.q_in_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.msdeform_attn = SparseMSDeformableAttention(
+            embed_dim,
+            n_heads,
+            n_levels,
+            n_points
         )
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.out_proj_drop = nn.Dropout(dropout)
 
     def forward(
         self,
-        queries: Tensor,
-        query_pos_encoding: Tensor,
-        query_normalized_xy_positions: Tensor,
-        batch_offsets: Tensor,
+        query: Tensor,
+        query_spatial_positions: Tensor,
+        query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
-        spatial_shapes: Tensor,
-    ):
+        level_spatial_shapes: Tensor,
+        query_level_indices: Optional[Tensor] = None,
+        background_embedding: Optional[Tensor] = None,
+    ) -> Tensor:
+        residual = query
         if self.norm_first:
-            residual = queries
-            queries = queries + query_pos_encoding
-            queries = self.norm(queries)
-            queries = self.attn(
-                queries,
-                batch_offsets,
-                query_normalized_xy_positions,
-                stacked_feature_maps,
-                spatial_shapes,
+            query = self.norm(query)
+
+        x = self.q_in_proj(query)
+
+        x = self.msdeform_attn(
+            x,
+            query_spatial_positions,
+            query_batch_offsets,
+            stacked_feature_maps,
+            level_spatial_shapes,
+            query_level_indices,
+            background_embedding
             )
-            queries = self.dropout(queries)
-            queries = queries + residual
-        else:
-            queries = queries + self.dropout(
-                self.attn(
-                    queries + query_pos_encoding,
-                    batch_offsets,
-                    query_normalized_xy_positions,
-                    stacked_feature_maps,
-                    spatial_shapes,
-                )
-            )
-            queries = self.norm(queries)
-        return queries
+
+        x = self.out_proj(x)
+        x = self.out_proj_drop(x)
+
+        x = x + residual
+
+        if not self.norm_first:
+            x = self.norm(x)
+        return x
 
     def reset_parameters(self):
-        self.attn.reset_parameters()
         self.norm.reset_parameters()
-
-
-class SparseDeformableAttentionBlockWithRoPE(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        n_levels: int,
-        n_points_per_level_per_head: int,
-        dropout: float = 0.1,
-        norm_first: bool = True,
-    ):
-        super().__init__()
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.norm_first = norm_first
-
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
+        self.q_in_proj.reset_parameters()
+        self.msdeform_attn.reset_parameters()
+        self.out_proj.reset_parameters()

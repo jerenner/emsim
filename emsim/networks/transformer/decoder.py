@@ -13,7 +13,7 @@ from .blocks import (
     MultilevelCrossAttentionBlockWithRoPE,
     MultilevelSelfAttentionBlockWithRoPE,
     SelfAttentionBlock,
-    SparseDeformableAttentionBlock,
+    SparseMSDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
 from .position_head import PositionOffsetHead
@@ -77,7 +77,7 @@ class TransformerDecoderLayer(nn.Module):
                 d_model, n_heads, dropout, attn_proj_bias, norm_first=norm_first
             )
         if use_ms_deform_attn:
-            self.ms_deform_attn = SparseDeformableAttentionBlock(
+            self.ms_deform_attn = SparseMSDeformableAttentionBlock(
                 d_model,
                 n_heads,
                 n_feature_levels,

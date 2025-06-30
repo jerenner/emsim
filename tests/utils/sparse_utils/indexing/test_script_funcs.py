@@ -1,10 +1,14 @@
 import pytest
 import torch
+from torch import Tensor
+
+from hypothesis import strategies as st
+from hypothesis import given, settings, assume, HealthCheck
 
 # Import the functions to test
 from emsim.utils.sparse_utils.indexing.script_funcs import (
     flatten_sparse_indices,
-    gather_and_mask,
+    gather_mask_and_fill,
     get_sparse_index_mapping,
     linearize_sparse_and_index_tensors,
 )
@@ -155,9 +159,9 @@ class TestGetSparseIndexMapping:
 
 
 @pytest.mark.cpu_and_cuda
-class TestGatherAndMask:
-    def test_gather_and_mask_basic(self, device):
-        """Test basic functionality of gather_and_mask."""
+class TestGatherMaskAndFill:
+    def test_basic_functionality(self, device):
+        """Test basic functionality with 2D values, including fill_values."""
         # Create source values
         values = torch.tensor(
             [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
@@ -168,10 +172,8 @@ class TestGatherAndMask:
         indices = torch.tensor([[0, 2, 1], [3, 1, 0]], device=device)
         mask = torch.tensor([[True, False, True], [True, True, False]], device=device)
 
-        # Gather and mask
-        result = gather_and_mask(values, indices, mask)
-
-        # Expected result: only masked entries should be preserved
+        # Test default behavior (fill with zeros)
+        result = gather_mask_and_fill(values, indices, mask)
         expected = torch.tensor(
             [
                 [[1.0, 2.0, 3.0], [0.0, 0.0, 0.0], [4.0, 5.0, 6.0]],
@@ -179,184 +181,19 @@ class TestGatherAndMask:
             ],
             device=device,
         )
-
         assert torch.allclose(result, expected)
 
-    def test_gather_and_mask_1d_input(self, device):
-        """Test gather_and_mask with 1D input values."""
-        # Create 1D source values
-        values = torch.tensor([1.0, 2.0, 3.0, 4.0], device=device)
-
-        # Create indices and mask
-        indices = torch.tensor([[0, 2], [3, 1]], device=device)
-        mask = torch.tensor([[True, False], [True, True]], device=device)
-
-        # Gather and mask
-        result = gather_and_mask(values, indices, mask)
-
-        # Expected result: only masked entries should be preserved
-        expected = torch.tensor(
+        # Test with custom fill_values
+        fill_values = torch.tensor([[-1.0, -2.0, -3.0]], device=device)
+        result_filled = gather_mask_and_fill(values, indices, mask, fill_values)
+        expected_filled = torch.tensor(
             [
-                [1.0, 0.0],
-                [4.0, 2.0],
+                [[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0], [4.0, 5.0, 6.0]],
+                [[10.0, 11.0, 12.0], [4.0, 5.0, 6.0], [-1.0, -2.0, -3.0]],
             ],
             device=device,
         )
-
-        assert torch.allclose(result, expected)
-
-    def test_gather_and_mask_3d_input(self, device):
-        """Test gather_and_mask with 3D input values."""
-        # Create 3D source values
-        values = torch.tensor(
-            [
-                [[1.0, 2.0], [3.0, 4.0]],
-                [[5.0, 6.0], [7.0, 8.0]],
-                [[9.0, 10.0], [11.0, 12.0]],
-            ],
-            device=device,
-        )
-
-        # Create indices and mask
-        indices = torch.tensor([0, 2, 1], device=device)
-        mask = torch.tensor([True, False, True], device=device)
-
-        # Gather and mask
-        result = gather_and_mask(values, indices, mask)
-
-        # Expected result: only masked entries should be preserved
-        expected = torch.tensor(
-            [
-                [[1.0, 2.0], [3.0, 4.0]],
-                [[0.0, 0.0], [0.0, 0.0]],
-                [[5.0, 6.0], [7.0, 8.0]],
-            ],
-            device=device,
-        )
-
-        assert torch.allclose(result, expected)
-
-    def test_gather_and_mask_complex_shapes(self, device):
-        """Test gather_and_mask with complex shapes (2D indices, 3D values)."""
-        # Create source values with 3 dimensions
-        values = torch.tensor(
-            [
-                [[1.0, 2.0], [3.0, 4.0]],
-                [[5.0, 6.0], [7.0, 8.0]],
-                [[9.0, 10.0], [11.0, 12.0]],
-                [[13.0, 14.0], [15.0, 16.0]],
-            ],
-            device=device,
-        )
-
-        # Create 2D indices and mask
-        indices = torch.tensor([[0, 2], [3, 1]], device=device)
-        mask = torch.tensor([[True, False], [True, True]], device=device)
-
-        # Gather and mask
-        result = gather_and_mask(values, indices, mask)
-
-        # Expected result: should have shape (2, 2, 2, 2)
-        expected = torch.tensor(
-            [
-                [
-                    [[1.0, 2.0], [3.0, 4.0]],
-                    [[0.0, 0.0], [0.0, 0.0]],
-                ],
-                [
-                    [[13.0, 14.0], [15.0, 16.0]],
-                    [[5.0, 6.0], [7.0, 8.0]],
-                ],
-            ],
-            device=device,
-        )
-
-        assert torch.allclose(result, expected)
-
-    def test_gather_and_mask_4d_input(self, device):
-        """Test gather_and_mask with 4D input values."""
-        # Create 4D source values
-        values = torch.zeros((3, 2, 2, 2), device=device)
-        values[0] = 1.0
-        values[1] = 2.0
-        values[2] = 3.0
-
-        # Create indices and mask
-        indices = torch.tensor([0, 2, 1], device=device)
-        mask = torch.tensor([True, False, True], device=device)
-
-        # Gather and mask
-        result = gather_and_mask(values, indices, mask)
-
-        # Expected result
-        expected = torch.zeros((3, 2, 2, 2), device=device)
-        expected[0] = 1.0  # From values[0], mask is True
-        # expected[1] remains zeros (from values[2], mask is False)
-        expected[2] = 2.0  # From values[1], mask is True
-
-        assert torch.allclose(result, expected)
-
-    def test_gather_and_mask_1d_gradient(self, device):
-        """Test that gradients flow correctly through gather_and_mask with 1D input."""
-        # Create 1D source values with gradients
-        values = torch.tensor(
-            [1.0, 2.0, 3.0, 4.0],
-            device=device,
-            requires_grad=True,
-        )
-
-        # Create indices and mask
-        indices = torch.tensor([0, 2, 1], device=device)
-        mask = torch.tensor([True, False, True], device=device)
-
-        result = gather_and_mask(values, indices, mask)
-
-        # Compute loss and check gradients
-        loss = result.sum()
-        loss.backward()
-
-        # Expected gradients
-        expected_grad = torch.tensor(
-            [1.0, 1.0, 0.0, 0.0],  # 0 and 1 are used and not masked
-            device=device,
-        )
-
-        assert values.grad is not None
-        assert torch.allclose(values.grad, expected_grad)
-
-    def test_gather_and_mask_gradient(self, device):
-        """Test that gradients flow correctly through gather_and_mask."""
-        # Create source values with gradients
-        values = torch.tensor(
-            [
-                [1.0, 2.0, 3.0],
-                [4.0, 5.0, 6.0],
-            ],
-            device=device,
-            requires_grad=True,
-        )
-
-        # Create indices and mask
-        indices = torch.tensor([0, 1, 0], device=device)
-        mask = torch.tensor([True, False, True], device=device)
-
-        result = gather_and_mask(values, indices, mask)
-
-        # Compute loss and check gradients
-        loss = result.sum()
-        loss.backward()
-
-        # First row gets gradient 2.0 (used twice), second row gets no gradient (masked)
-        expected_grad = torch.tensor(
-            [
-                [2.0, 2.0, 2.0],  # Used at positions 0 and 2, both masked True
-                [0.0, 0.0, 0.0],  # Used at position 1, but masked False
-            ],
-            device=device,
-        )
-
-        assert values.grad is not None
-        assert torch.allclose(values.grad, expected_grad)
+        assert torch.allclose(result_filled, expected_filled)
 
     def test_gather_and_mask_errors(self, device):
         """Test error handling in gather_and_mask."""
@@ -369,4 +206,90 @@ class TestGatherAndMask:
             (ValueError, torch.jit.Error),  # type: ignore
             match="Expected indices and mask to have same shape",
         ):
-            gather_and_mask(values_2d, indices_2, mask_3)
+            gather_mask_and_fill(values_2d, indices_2, mask_3)
+
+    @settings(deadline=None, suppress_health_check=[HealthCheck.differing_executors])
+    @given(
+        n_values=st.integers(1, 20),
+        values_feature_dims=st.lists(st.integers(0, 20), min_size=1, max_size=3),
+        indices_shape=st.lists(st.integers(0, 20), min_size=0, max_size=3),
+        # Portion of False values in mask
+        mask_sparsity=st.floats(min_value=0.0, max_value=1.0),
+        # Fill strategy
+        fill_type=st.sampled_from(["none", "scalar", "vector", "full"]),
+        test_grads=st.booleans(),
+    )
+    def test_hypothesis(
+        self,
+        n_values: int,
+        values_feature_dims: list[int],
+        indices_shape: list[int],
+        mask_sparsity: float,
+        fill_type: str,
+        test_grads: bool,
+        device,
+    ):
+        """Property-based test."""
+        # Create values tensor
+        values = torch.randn(
+            [n_values] + values_feature_dims, device=device, requires_grad=test_grads
+        )
+
+        # Create indices and mask
+        if n_values > 0:
+            indices = torch.randint(0, n_values, indices_shape, device=device)
+        else:
+            indices = torch.zeros(indices_shape, device=device, dtype=torch.long)
+        mask = torch.rand(indices_shape, device=device) > mask_sparsity
+
+        # Determine expected output shape
+        if values.ndim == 1:
+            expected_output_shape = indices_shape
+        else:
+            expected_output_shape = indices_shape + values_feature_dims
+
+        # Create fill values based on broadcast type
+        if fill_type == "none":
+            fill = None
+        elif fill_type == "scalar":
+            fill = torch.randn([], device=device, requires_grad=test_grads)
+        elif fill_type == "vector":
+            assume(values_feature_dims[-1] > 0)
+            fill = torch.randn(
+                values_feature_dims[-1], device=device, requires_grad=test_grads
+            )
+        else:
+            fill = torch.randn(
+                expected_output_shape, device=device, requires_grad=test_grads
+            )
+
+        # Execute function
+        result = gather_mask_and_fill(values, indices, mask, fill=fill)
+
+        # Check result of correct type
+        assert isinstance(result, Tensor)
+        assert list(result.shape) == expected_output_shape
+
+        # Get values with equivalent method
+        values_copy = values.detach().clone().requires_grad_(test_grads)
+        expected = values_copy[indices].clone()
+        if fill is None:
+            expected[~mask] = 0.0
+        else:
+            fill_copy = fill.detach().clone().requires_grad_(test_grads)
+            expected[~mask] = fill_copy.expand_as(result)[~mask]
+
+        assert torch.equal(result, expected)
+
+        if test_grads:
+            result.sum().backward()
+            expected.sum().backward()
+
+            assert values.grad is not None
+            assert values_copy.grad is not None
+            assert torch.equal(values.grad, values_copy.grad)
+
+            if fill is not None:
+                assert fill.grad is not None
+                assert fill_copy.grad is not None
+                assert torch.equal(fill.grad, fill_copy.grad)

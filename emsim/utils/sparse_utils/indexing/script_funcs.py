@@ -302,12 +302,19 @@ def get_sparse_index_mapping(
 
 
 @torch.jit.script
-def gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
-    """Efficiently gathers elements from a 2D tensor and applies a mask.
+def gather_mask_and_fill(
+    values: Tensor, indices: Tensor, mask: Tensor, fill: Optional[Tensor] = None
+) -> Tensor:
+    """Efficiently gathers elements from an ND tensor, applies a mask, and fills masked
+    positions.
 
-    This function performs the equivalent of `values[indices].masked_fill(~mask, 0)`
+    This function performs the equivalent of
+    `out = values[indices]
+    out[~mask] = fill.expand_as(out)[~mask]  # or 0
+    `
     but uses torch.index_select for better performance. It retrieves values at the
-    specified indices and zeros out values where the mask is False.
+    specified indices and fills positions where the mask is False with either zeros
+    (default) or the provided fill values.
 
     Args:
         values (Tensor): Source tensor to gather from, may be 1D with shape (N)
@@ -317,11 +324,15 @@ def gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
             Can be of any shape.
         mask (Tensor): Boolean tensor with the same shape as indices. True indicates
             positions to keep, False indicates positions to zero out.
+        fill (Optional[Tensor]): A tensor that must be broadcast-compatible with the
+            final output shape. It is inserted at positions where `mask` is False.
+            When None (default), a zero tensor is used.
 
     Returns:
         Tensor: The gathered and masked values with shape
-            (*indices.shape, values.shape[-1]). Contains values from the source tensor
-            at the specified indices, with masked positions filled with zeros.
+            (*indices.shape, *values.shape[-1]). Contains values from the source tensor
+            at the specified indices, with masked positions filled with zeros or from
+            `fill`.
 
     Raises:
         ValueError: If indices and mask have different shapes.
@@ -344,6 +355,10 @@ def gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
     value_dims = values.shape[1:]
     n_value_dims = values.ndim - 1
 
+    new_shape = indices.shape
+    if not input_values_1d:
+        new_shape += value_dims
+
     # pre-mask the indices to guard against unsafe indices in the masked portion
     indices_flat = torch.where(mask_flat, indices_flat, torch.zeros_like(indices_flat))
 
@@ -352,10 +367,11 @@ def gather_and_mask(values: Tensor, indices: Tensor, mask: Tensor) -> Tensor:
     # unsqueeze mask
     mask_flat = mask_flat.view((mask_flat.size(0),) + (1,) * n_value_dims)
 
-    selected.masked_fill_(~mask_flat, 0)
+    if fill is None:
+        selected.masked_fill_(~mask_flat, 0)
+    else:
+        fill_broadcast = fill.expand(new_shape).reshape(selected.shape)
+        selected = torch.where(mask_flat, selected, fill_broadcast)
 
-    new_shape = indices.shape
-    if not input_values_1d:
-        new_shape += value_dims
     selected = selected.reshape(new_shape)
     return selected

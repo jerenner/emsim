@@ -1,5 +1,5 @@
 from typing import Optional
-from emsim.utils.sparse_utils.indexing.script_funcs import gather_and_mask
+from emsim.utils.sparse_utils.indexing.script_funcs import gather_mask_and_fill
 
 
 import torch
@@ -23,7 +23,7 @@ class GatherAndLinearFunction(torch.autograd.Function):
         """
         ctx.set_materialize_grads(False)
 
-        selected = gather_and_mask(
+        selected = gather_mask_and_fill(
             sparse_tensor_values, index_search, is_specified_mask
         )
         out = F.linear(selected, weight, bias)
@@ -52,7 +52,7 @@ class GatherAndLinearFunction(torch.autograd.Function):
                 grad_bias = grad_output.sum(0)
 
             if ctx.needs_input_grad[3]:
-                selected = gather_and_mask(
+                selected = gather_mask_and_fill(
                     sparse_tensor_values, index_search, is_specified_mask
                 )
                 grad_weight = torch.mm(grad_output.t(), selected)

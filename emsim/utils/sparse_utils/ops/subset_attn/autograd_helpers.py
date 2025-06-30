@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from emsim.utils.sparse_utils.indexing.script_funcs import gather_and_mask
+from emsim.utils.sparse_utils.indexing.script_funcs import gather_mask_and_fill
 
 
 @torch.jit.script
@@ -180,7 +180,7 @@ def select_values_and_project_kv(
     assert linear_index_tensor.ndim == 2
     assert sparse_tensor_values.ndim == 2
 
-    selected = gather_and_mask(sparse_tensor_values, linear_index_tensor, is_specified_mask)
+    selected = gather_mask_and_fill(sparse_tensor_values, linear_index_tensor, is_specified_mask)
 
     keys, values = project_kv(selected, key_weight, value_weight, key_bias, value_bias)
     return keys, values, selected

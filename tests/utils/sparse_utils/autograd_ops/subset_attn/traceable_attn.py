@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from emsim.utils.sparse_utils.indexing.script_funcs import gather_and_mask
+from emsim.utils.sparse_utils.indexing.script_funcs import gather_mask_and_fill
 from emsim.utils.sparse_utils.misc import sparse_tensor_to_dense_with_mask
 from emsim.utils.sparse_utils.ops.subset_attn.autograd_helpers import (
     project_kv,
@@ -50,7 +50,7 @@ def traceable_subset_attention(
         scale_factor = head_dim ** (-1 / 2)
 
     # Gather values using the same helper as the custom op
-    selected = gather_and_mask(
+    selected = gather_mask_and_fill(
         sparse_tensor_values, linear_index_tensor, is_specified_mask
     )
 

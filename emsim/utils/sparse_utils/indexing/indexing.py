@@ -2,7 +2,7 @@ import torch
 from torch import Tensor
 
 from emsim.utils.sparse_utils.indexing.script_funcs import (
-    gather_and_mask,
+    gather_mask_and_fill,
     get_sparse_index_mapping,
 )
 
@@ -154,7 +154,7 @@ def batch_sparse_index(
             "were specified"
         )
 
-    selected: Tensor = gather_and_mask(
+    selected: Tensor = gather_mask_and_fill(
         sparse_tensor_values, index_search, is_specified_mask
     )
 

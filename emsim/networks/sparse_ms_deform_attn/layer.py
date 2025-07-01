@@ -5,7 +5,6 @@ from torch import nn, Tensor
 import math
 from torch.nn.init import constant_, xavier_uniform_
 
-from ...utils.misc_utils import inverse_sigmoid
 from .utils import sparse_split_heads, multilevel_sparse_bilinear_grid_sample
 from emsim.utils.sparse_utils.batching.batch_utils import batch_offsets_to_indices
 
@@ -51,7 +50,7 @@ class SparseMSDeformableAttention(nn.Module):
             grid_init[:, :, i, :] *= i + 1
         with torch.no_grad():
             self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
-        constant_(self.attention_weights.weight.data, 0.0)
+        xavier_uniform_(self.attention_weights.weight.data)
         constant_(self.attention_weights.bias.data, 0.0)
         xavier_uniform_(self.value_proj.weight.data)
         constant_(self.value_proj.bias.data, 0.0)
@@ -92,6 +91,10 @@ class SparseMSDeformableAttention(nn.Module):
                 encoder, where queries are tokens at various levels, but may be
                 unspecified in the decoder, where queries are the object queries that
                 are given as being at the full-scale level.
+            background_embedding (Optional[Tensor]): Tensor of shape
+                (batch, n_levels, embed_dim) that should be used as an interpolant
+                for points that are not specified in stacked_feature_maps. If not given,
+                a 0 vector will be used instead.
 
         Returns:
             Tensor: Output embeddings after sparse deformable attention,
@@ -193,6 +196,12 @@ class SparseMSDeformableAttention(nn.Module):
 
         stacked_value_tensors = sparse_split_heads(stacked_value_tensors, n_heads)
         # now (batch, height, width, level, heads, head_dim)
+
+        if background_embedding is not None:
+            bsz = background_embedding.size(0)
+            background_embedding = background_embedding.reshape(
+                bsz, n_levels, n_heads, head_dim
+            )
 
         batch_indices: Tensor = batch_offsets_to_indices(query_batch_offsets)
         batch_indices = batch_indices.unsqueeze(-1).expand(-1, self.n_points)

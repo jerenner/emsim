@@ -1,31 +1,28 @@
-from typing import Optional, Union, Any
-
 import random
-import torch
-from torch import Tensor, nn
-import torch.nn.functional as F
+from typing import Any, Optional, Union
+
 import numpy as np
 import pytest
+import torch
+import torch.nn.functional as F
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
-from hypothesis import given, settings, example, HealthCheck
+from torch import Tensor, nn
 
-from emsim.networks.sparse_ms_deform_attn.utils import (
-    sparse_split_heads,
-    multilevel_sparse_bilinear_grid_sample,
-    _make_index_and_weight_tensors,
-)
 from emsim.networks.sparse_ms_deform_attn.layer import SparseMSDeformableAttention
-
+from emsim.networks.sparse_ms_deform_attn.utils import (
+    _make_index_and_weight_tensors,
+    multilevel_sparse_bilinear_grid_sample,
+    sparse_split_heads,
+)
 from emsim.utils.sparse_utils.batching.batch_utils import (
-    batch_offsets_to_indices,
     seq_lengths_to_indices,
 )
 from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index
 
-
-from .conftest import (
-    simple_sparse_input_tensors,
+from ..conftest import (
     random_multilevel_sparse_tensor_indices,
+    simple_sparse_input_tensors,
 )
 
 
@@ -149,7 +146,12 @@ def grid_sample_tensors(
 
     if make_background_embedding:
         background_embedding = torch.randn(
-            batch_size, n_levels, n_heads, head_dim, device=device
+            batch_size,
+            n_levels,
+            n_heads,
+            head_dim,
+            device=device,
+            requires_grad=require_grads,
         )
     else:
         background_embedding = None
@@ -200,38 +202,169 @@ def grid_sample_tensors(
     }
 
 
-@pytest.mark.cuda_if_available
-class TestSparseMSDeformAttention:
-    def test_basics(self, base_config, device: str):
-        msdeform_attn = SparseMSDeformableAttention(**base_config).to(device)
+def make_random_sampling_points(
+    sparse_tensor: Tensor,
+    level_spatial_shapes: Tensor,
+    n_pts: int,
+    level_indices: Optional[Tensor] = None,
+    head_indices: Optional[Tensor] = None,
+):
+    """Create a random batch of sampling positions for multilevel_sparse_bilinear_grid_sample."""
+    device = sparse_tensor.device
 
-        data = simple_sparse_input_tensors(
-            device=device, embed_dim=base_config["embed_dim"]
-        )
+    batch_size, _, _, n_levels, n_heads, _ = sparse_tensor.shape
 
-        out = msdeform_attn(**data)
+    if level_indices is None:
+        level_indices = torch.arange(n_levels, device=device)
+    if head_indices is None:
+        head_indices = torch.arange(n_heads, device=device)
 
-        assert out is not None
-        assert isinstance(out, Tensor)
+    assert level_indices.ndim == 1
+    assert head_indices.ndim == 1
+
+    L = level_indices.numel()
+    H = head_indices.numel()
+
+    # random batch indices for every point
+    batch_indices = torch.randint(0, batch_size, (n_pts,), device=device)
+
+    level_shapes = level_spatial_shapes[level_indices]
+    normalized_rand_pos = torch.rand(n_pts, L, H, 2, device=device)
+    spatial_positions = normalized_rand_pos * level_shapes[:, None, :]
+
+    return spatial_positions, batch_indices, level_indices, head_indices
 
 
 @pytest.mark.cpu_and_cuda
 class TestMultilevelSparseBilinearGridSample:
     @given(inputs=grid_sample_strategy())
     @settings(suppress_health_check=[HealthCheck.differing_executors], deadline=None)
-    def test_hypothesis(self, inputs, device: Union[str, torch.device]):
+    def test_basics(self, inputs, device: Union[str, torch.device]):
         data = grid_sample_tensors(**inputs, device=device)
         assert data["sparse_tensor"] is not None
+        assert data["spatial_positions"] is not None
 
         out = multilevel_sparse_bilinear_grid_sample(
             **data  #  pyright: ignore[reportArgumentType]
         )
 
         assert out is not None
+        assert out.dtype == data["sparse_tensor"].dtype
+
+        if data["level_indices"] is not None:
+            L = data["level_indices"].shape[0]
+        else:
+            L = data["spatial_positions"].shape[-3]
+
+        if data["head_indices"] is not None:
+            H = data["head_indices"].shape[0]
+        else:
+            H = data["spatial_positions"].shape[-2]
+
+        expected_shape = (
+            sum(inputs["seq_lengths"]),
+            *inputs["extra_batch_dims"],
+            L,
+            H,
+            inputs["head_dim"],
+        )
+        assert out.shape == expected_shape
 
         if data["sparse_tensor"].requires_grad:
             out.sum().backward()
             assert data["sparse_tensor"].grad is not None
+            if data["background_embedding"] is not None:
+                assert data["background_embedding"].grad is not None
+
+    @example(
+        inputs={
+            "n_heads": 1,
+            "head_dim": 2,
+            "embed_dim": 2,
+            "n_levels": 1,
+            "extra_batch_dims": [],
+            "seq_lengths": [0],
+            "level_spatial_shapes": np.array([[1, 1]]),
+            "sparsity": 0.5,
+            "require_grads": False,
+            "make_level_indices": False,
+            "make_head_indices": False,
+            "make_background_embedding": False,
+            "seed": 0,
+        },
+        n_pts=1,
+    )
+    @given(inputs=grid_sample_strategy(), n_pts=st.integers(0, 1000))
+    @settings(suppress_health_check=[HealthCheck.differing_executors], deadline=None)
+    def test_pixel_centers(self, inputs, n_pts: int, device: Union[str, torch.device]):
+        data = grid_sample_tensors(**inputs, device=device)
+        assert data["sparse_tensor"] is not None
+        assert data["level_spatial_shapes"] is not None
+        sparse_tensor = data["sparse_tensor"]
+        level_spatial_shapes = data["level_spatial_shapes"]
+
+        spatial_positions, batch_indices, level_indices, head_indices = (
+            make_random_sampling_points(
+                sparse_tensor,
+                level_spatial_shapes,
+                n_pts,
+                level_indices=data["level_indices"],
+                head_indices=data["head_indices"],
+            )
+        )
+
+        batch_size, _, _, n_levels, n_heads, head_dim = sparse_tensor.shape
+        background_embedding = torch.randn(
+            batch_size, n_levels, n_heads, head_dim, device=device
+        )
+
+        # enforce spatial positions at pixel centers
+        spatial_positions = spatial_positions.floor() + 0.5
+
+        out = multilevel_sparse_bilinear_grid_sample(
+            sparse_tensor,
+            spatial_positions,
+            batch_indices,
+            level_spatial_shapes,
+            level_indices,
+            head_indices,
+            background_embedding,
+        )
+
+        if n_pts == 0:
+            assert out.numel() == 0
+            return
+
+        # obtain expected pixel values from integer indexing
+        i_idx, j_idx = spatial_positions.floor().long().unbind(-1)
+
+        # broadcast batch, level, head indices to (n_pts, L, H)
+        n_pts_, L, H = i_idx.shape
+        batch_indices_exp = batch_indices.view(n_pts_, 1, 1).expand(n_pts_, L, H)
+        level_indices_exp = level_indices.view(1, L, 1).expand_as(batch_indices_exp)
+        head_indices_exp = head_indices.view(1, 1, H).expand_as(batch_indices_exp)
+
+        int_indices = torch.stack(
+            (batch_indices_exp, i_idx, j_idx, level_indices_exp, head_indices_exp), -1
+        )
+        int_indices_2d = int_indices.view(-1, 5)
+
+        int_values_2d, is_specified = batch_sparse_index(sparse_tensor, int_indices_2d)
+
+        # fill in background embedding where the sparse tensor has no specified value
+        if background_embedding is not None:
+            not_specified = ~is_specified
+            bg_val = background_embedding[
+                int_indices_2d[not_specified, 0],  # batch
+                int_indices_2d[not_specified, 3],  # level
+                int_indices_2d[not_specified, 4],  # head
+            ]
+            int_values_2d[not_specified] = bg_val
+
+        expected = int_values_2d.view(n_pts_, L, H, -1)
+
+        assert out.shape == expected.shape
+        assert torch.allclose(out, expected)
 
     def test_2x2_grid_unit(self, device: Union[str, torch.device]):
         """Tests interpolation on a simple 2x2 image"""
@@ -258,14 +391,6 @@ class TestMultilevelSparseBilinearGridSample:
         expected = out.new_tensor([0.0, 1.5], device=device)
         assert torch.allclose(out, expected)
 
-    @example(
-        batch_size=1,
-        height=2,
-        width=3,
-        head_dim=1,
-        n_points_per_batch=1,
-        seed=0,
-    )
     @settings(suppress_health_check=[HealthCheck.differing_executors], deadline=None)
     @given(
         batch_size=st.integers(1, 3),

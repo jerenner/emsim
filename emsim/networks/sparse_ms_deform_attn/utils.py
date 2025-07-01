@@ -94,7 +94,7 @@ def _make_index_and_weight_tensors(
     return index_tensor, weights
 
 
-# @torch.jit.script
+@torch.jit.script
 def multilevel_sparse_bilinear_grid_sample(
     sparse_tensor: Tensor,
     spatial_positions: Tensor,

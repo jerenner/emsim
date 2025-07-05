@@ -154,6 +154,15 @@ class EMTransformer(nn.Module):
         )
         self.mask_main_queries_from_denoising = config.mask_main_queries_from_denoising
 
+        if config.use_background_embedding:
+            self.background_embedding = nn.Embedding(
+                config.n_feature_levels, config.d_model
+            )
+        else:
+            self.background_embedding = self.register_module(
+                "background_embedding", None
+            )
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -172,6 +181,8 @@ class EMTransformer(nn.Module):
         self.decoder.reset_parameters()
         if self.segmentation_head is not None:
             self.segmentation_head.reset_parameters()
+        if self.background_embedding is not None:
+            self.background_embedding.reset_parameters()
 
     def forward(
         self,
@@ -207,14 +218,24 @@ class EMTransformer(nn.Module):
             backbone_features_pos_encoded, image_size
         )
 
-        encoder_out: Tensor = self.encoder(
+        if self.background_embedding is not None:
+            batch_size = len(backbone_features[0].decomposition_permutations)
+            bg_embed = self.background_embedding.weight.unsqueeze(0).expand(
+                batch_size, -1, -1
+            )
+        else:
+            bg_embed = None
+
+        encoder_out, bg_embed = self.encoder(
             backbone_features,
             score_dict["spatial_shapes"],
             score_dict["selected_token_scores"],
             score_dict["selected_token_spatial_indices"],
             score_dict["selected_token_level_indices"],
+            bg_embed,
             pos_embed,
         )
+        assert isinstance(encoder_out, Tensor)
         encoder_out_batch_offsets: Tensor = batch_offsets_from_sparse_tensor_indices(
             encoder_out.indices()
         )

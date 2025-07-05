@@ -18,6 +18,9 @@ from emsim.networks.transformer.blocks import (
     SparseMSDeformableAttentionBlock,
     SparseNeighborhoodAttentionBlock,
 )
+from emsim.networks.transformer.blocks.background_transformer import (
+    BackgroundEmbeddingTransformerLayer,
+)
 from emsim.utils.sparse_utils.batching import (
     seq_lengths_to_batch_offsets,
     batch_topk,
@@ -44,7 +47,7 @@ class TransformerEncoderLayer(nn.Module):
         dim_feedforward: int,
         n_feature_levels: int = 4,
         use_msdeform_attn: bool = True,
-        n_deformable_points: Optional[int] = 4,
+        n_deformable_points: int = 4,
         use_neighborhood_attn: bool = True,
         neighborhood_sizes: Optional[list[int]] = None,
         use_rope: bool = True,
@@ -84,14 +87,15 @@ class TransformerEncoderLayer(nn.Module):
                 rope_enforce_freq_groups_equal=rope_config.enforce_freq_groups_equal,
             )
         if use_msdeform_attn:
-            raise ValueError("Sparse MSDeformAttention not updated yet")
+            assert n_deformable_points is not None
             self.msdeform_attn = SparseMSDeformableAttentionBlock(
                 d_model,
                 n_heads,
                 n_feature_levels,
                 n_deformable_points,
                 dropout,
-                norm_first,
+                bias=attn_proj_bias,
+                norm_first=norm_first,
             )
         else:
             self.msdeform_attn = None
@@ -121,14 +125,14 @@ class TransformerEncoderLayer(nn.Module):
 
     def forward(
         self,
-        queries: Tensor,  # shape: [query_batch_offsets[-1]]
+        queries: Tensor,  # shape: [n_queries]
         query_batch_offsets: Tensor,  # [bsz+1]
-        token_predicted_salience_score: Tensor,  # [query_batch_offsets[-1]]
-        query_spatial_indices: Tensor,  # [spatial_dim+2, query_batch_offsets[-1]]
+        token_predicted_salience_score: Tensor,  # [n_queries]
+        query_spatial_indices: Tensor,  # [spatial_dim+2, n_queries]
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
         token_electron_scores: Tensor,
-        query_pos_encoding: Optional[Tensor] = None,
+        background_embedding: Optional[Tensor] = None,  # [bsz, n_levels, embed_dim]
     ):
         token_scores = token_electron_scores + token_predicted_salience_score
 
@@ -152,16 +156,18 @@ class TransformerEncoderLayer(nn.Module):
             )
         queries = queries.index_copy(0, topk_indices, self_attn_out)
 
-        if self.use_msdeform_attn:
-            raise NotImplementedError("SparseMSDeformAttention not updated yet")
-            # queries = self.msdeform_attn(
-            #     queries,
-            #     query_pos_encoding,
-            #     query_normalized_xy_positions,
-            #     query_batch_offsets,
-            #     stacked_feature_maps,
-            #     level_spatial_shapes,
-            # )
+        if self.msdeform_attn is not None:
+            query_level_spatial_positions = query_spatial_indices[1:-1].T + 0.5
+            queries = self.msdeform_attn(
+                queries,
+                query_level_spatial_positions,
+                query_batch_offsets,
+                stacked_feature_maps,
+                level_spatial_shapes=level_spatial_shapes,
+                background_embedding=background_embedding,
+                query_level_indices=query_spatial_indices[-1],
+            )
+
         if self.neighborhood_attn is not None:
             query_positions = prep_multilevel_positions(
                 query_spatial_indices[1:-1].T,
@@ -178,6 +184,7 @@ class TransformerEncoderLayer(nn.Module):
                 query_level_indices=query_spatial_indices[-1],
             )
         queries = self.ffn(queries)
+
         return queries
 
     def reset_parameters(self):
@@ -205,6 +212,26 @@ class EMTransformerEncoder(nn.Module):
         self.use_rope = config.use_rope
         self.max_tokens_sa = config.max_tokens_sa
         self.max_tokens_non_sa = config.max_tokens_non_sa
+        self.use_background_embedding = config.use_background_embedding
+
+        if self.use_background_embedding:
+            self.background_transformer_layers = nn.ModuleList(
+                [
+                    BackgroundEmbeddingTransformerLayer(
+                        config.background_transformer.embed_dim,
+                        config.background_transformer.n_heads,
+                        config.background_transformer.dim_feedforward,
+                        config.background_transformer.dropout,
+                        config.background_transformer.attn_proj_bias,
+                        config.background_transformer.norm_first,
+                        config.background_transformer.rope_base_theta,
+                        config.background_transformer.rope_share_heads,
+                    )
+                    for _ in range(self.n_layers)
+                ]
+            )
+        else:
+            self.register_module("background_transformer_layers", None)
 
         self.register_buffer(
             "layer_filter_ratio", torch.as_tensor(config.layer_filter_ratio)
@@ -221,8 +248,9 @@ class EMTransformerEncoder(nn.Module):
         token_salience_scores: list[Tensor],  # foreground scores
         token_spatial_indices: list[Tensor],
         token_level_indices: list[Tensor],
+        background_embedding: Optional[Tensor] = None,
         position_encoding: Optional[list[ME.SparseTensor]] = None,
-    ):
+    ) -> tuple[Tensor, Optional[Tensor]]:
         # stack the MinkowskiEngine tensors over the batch dimension for faster indexing
         stacked_feature_maps = self.stack_sparse_tensors(
             sparse_feature_maps, level_spatial_shapes[-1]
@@ -306,16 +334,20 @@ class EMTransformerEncoder(nn.Module):
                 stacked_feature_maps,
                 level_spatial_shapes,
                 electron_score,  # score_tgt
-                pos_encoding_for_layer,
+                background_embedding,
             )
 
             stacked_feature_maps = scatter_to_sparse_tensor(
                 stacked_feature_maps, batch_topk_spatial_indices, query_for_layer
             )
 
-        # stacked_feature_maps = self.update_background_embedding(stacked_feature_maps)
+            # Update background embedding
+            if self.background_transformer_layers is not None:
+                background_embedding = self.background_transformer_layers[layer_idx](
+                    background_embedding, stacked_feature_maps
+                )
 
-        return stacked_feature_maps
+        return stacked_feature_maps, background_embedding
 
     @staticmethod
     def stack_sparse_tensors(
@@ -482,39 +514,6 @@ class EMTransformerEncoder(nn.Module):
             final_shape,
             is_coalesced=all_coalesced,
         ).coalesce()  # coalesce is no-op if already coalesced
-
-    def update_background_embedding(
-        self,
-        stacked_feature_maps: Tensor,
-        level_spatial_shapes: Tensor,
-        sparse_feature_maps: Tensor,
-        stacked_ij_indices_for_layer: Tensor,
-    ):
-        raise NotImplementedError("Not updated or used currently")
-        # learned background embedding
-        background_indices = self.get_background_indices(
-            stacked_feature_maps, stacked_ij_indices_for_layer
-        )
-
-        background_ij = background_indices[:, 1:3]
-        background_level = background_indices[:, 3]
-        background_xy = ij_indices_to_normalized_xy(
-            background_ij, level_spatial_shapes[background_level]
-        )
-        background_xy_level = torch.cat(
-            [
-                background_xy,
-                background_level.unsqueeze(-1).to(background_xy)
-                / (len(sparse_feature_maps) - 1),
-            ],
-            -1,
-        )
-
-        background_pos_encoding = self.background_embedding(background_xy_level)
-        background_pos_encoding = background_pos_encoding.float()
-        stacked_feature_maps = scatter_to_sparse_tensor(
-            stacked_feature_maps, background_indices, background_pos_encoding
-        )
 
     @staticmethod
     def get_background_indices(stacked_feature_maps, foreground_indices):

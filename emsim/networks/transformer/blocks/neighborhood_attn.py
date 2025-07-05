@@ -127,6 +127,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
+        background_embedding: Optional[Tensor] = None,
         query_level_indices: Optional[Tensor] = None,
     ) -> Tensor:
         """Forward pass of sparse neighborhood attention.
@@ -152,6 +153,12 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             level_spatial_shapes (Tensor): Spatial dimensions of each level,
                 shape [n_levels, position_dim]. Contains the height, width, etc.
                 of feature maps at each resolution level.
+            background_embedding (Optional[Tensor]): Optional tensor of shape
+                [batch_size, n_levels, embed_dim] to serve as a background embedding.
+                If given, then neighborhood indices that are not specified in
+                stacked_feature_maps will be given the corresponding background
+                embedding for that batch and level. If not given, then these keys will
+                be masked out from the queries.
             query_level_indices (Optional[Tensor]): Level indices of each query, shape
                 [n_queries]. If None, it defaults to every query being from the level
                 of the maximum spatial shape. This value should be specified in the
@@ -209,6 +216,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             query_spatial_level_positions[:, -1] = max_spatial_level
 
         # Position encode queries
+        # (key embeddings are rotated inside the custom autograd op)
         query_rotated = self.pos_encoding(q, query_spatial_level_positions)
 
         # Prepare key data:
@@ -257,6 +265,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             self.n_heads,
             key_positions=key_positions,
             rope_freqs=key_rope_freqs,
+            background_embedding=background_embedding,
         )
 
         # sanity check that the out of bounds indices were correctly identified as

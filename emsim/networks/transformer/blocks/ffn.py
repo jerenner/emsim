@@ -15,6 +15,8 @@ class FFNBlock(nn.Module):
         norm_first: bool = True,
     ):
         super().__init__()
+        self.d_model = d_model
+        self.hidden_dim = hidden_dim
         self.norm_first = norm_first
         if isinstance(activation_fn, str):
             activation_fn = get_layer(activation_fn)

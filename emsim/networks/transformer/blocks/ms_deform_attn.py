@@ -42,8 +42,8 @@ class SparseMSDeformableAttentionBlock(nn.Module):
         query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
-        query_level_indices: Optional[Tensor] = None,
         background_embedding: Optional[Tensor] = None,
+        query_level_indices: Optional[Tensor] = None,
     ) -> Tensor:
         residual = query
         if self.norm_first:

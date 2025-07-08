@@ -181,6 +181,7 @@ class TransformerEncoderLayer(nn.Module):
                 query_batch_offsets=query_batch_offsets,
                 stacked_feature_maps=stacked_feature_maps,
                 level_spatial_shapes=level_spatial_shapes,
+                background_embedding=background_embedding,
                 query_level_indices=query_spatial_indices[-1],
             )
         queries = self.ffn(queries)
@@ -199,7 +200,7 @@ class TransformerEncoderLayer(nn.Module):
 class EMTransformerEncoder(nn.Module):
     def __init__(
         self,
-        encoder_layer: nn.Module,
+        encoder_layer: TransformerEncoderLayer,
         config: TransformerEncoderConfig,
         score_predictor: Optional[nn.Module] = None,
     ):

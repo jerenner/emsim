@@ -18,10 +18,29 @@ class RoPEConfig:
 
 
 @dataclass
+class BackgroundTransformerConfig:
+    """Configuration for the background transformer submodule."""
+
+    embed_dim: int = "${model.transformer.d_model}"
+    n_heads: int = "${model.transformer.n_heads}"
+    dim_feedforward: int = "${model.transformer.dim_feedforward}"
+    dropout: float = "${model.transformer.dropout}"
+    activation_fn: str = "${model.transformer.activation_fn}"
+    attn_proj_bias: bool = "${model.transformer.attn_proj_bias}"
+    norm_first: bool = "${model.transformer.norm_first}"
+
+    rope_base_theta: float = "${model.transformer.rope.level_base_theta}"
+    rope_share_heads: bool = "${model.transformer.rope.share_heads}"
+
+
+@dataclass
 class TransformerEncoderConfig:
     """Configuration for the transformer encoder."""
 
     n_layers: int = 6
+
+    use_background_embedding: bool = "${model.transformer.use_background_embedding}"
+    background_transformer: BackgroundTransformerConfig = "${model.transformer.background_transformer}"
 
     use_ms_deform_attn: bool = False
     use_neighborhood_attn: bool = True
@@ -70,7 +89,7 @@ class SegmentationHeadConfig:
     """Configuration for the segmentation head."""
 
     # Inherited main transformer config values
-    d_model: int = "${model.transformer.d_model}"
+    embed_dim: int = "${model.transformer.d_model}"
     n_heads: int = "${model.transformer.n_heads}"
     dim_feedforward: int = "${model.transformer.dim_feedforward}"
     dropout: float = "${model.transformer.dropout}"
@@ -117,7 +136,7 @@ class TransformerDecoderConfig:
 class TransformerConfig:
     """Configuration for the transformer model."""
 
-    # Architecture parameters
+    # Base architecture parameters
     spatial_dimension: int = "${spatial_dimension}"
     d_model: int = 256
     n_heads: int = 8
@@ -126,6 +145,12 @@ class TransformerConfig:
     activation_fn: str = "gelu"
     attn_proj_bias: bool = False
     norm_first: bool = True
+
+    # New architecture features
+    use_background_embedding: bool = True
+    background_transformer: BackgroundTransformerConfig = field(
+        default_factory=lambda: BackgroundTransformerConfig()
+    )
 
     # MS Deform Attention parameters
     backbone_decoder_layers: list[int] = "${model.backbone.decoder.layers}"

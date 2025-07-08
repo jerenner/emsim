@@ -83,7 +83,8 @@ class TransformerDecoderLayer(nn.Module):
                 n_feature_levels,
                 n_deformable_points,
                 dropout,
-                norm_first,
+                bias=attn_proj_bias,
+                norm_first=norm_first,
             )
         else:
             self.ms_deform_attn = None
@@ -130,7 +131,7 @@ class TransformerDecoderLayer(nn.Module):
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
         attn_mask: Optional[Tensor] = None,
-        query_pos_encoding: Optional[Tensor] = None,
+        background_embedding: Optional[Tensor] = None,
     ):
         max_level_index = level_spatial_shapes.argmax(dim=0)
         max_level_index = torch.unique(max_level_index)
@@ -148,21 +149,16 @@ class TransformerDecoderLayer(nn.Module):
                 attn_mask=attn_mask,
             )
         else:
-            x = self.self_attn(
-                queries,
-                query_pos_encoding,
-                attn_mask=attn_mask,
-                batch_offsets=query_batch_offsets,
-            )
-        if self.use_ms_deform_attn:
-            raise ValueError("MSDeformAttn not updated yet")
+            raise ValueError("Non-RoPE not supported.")
+        if self.ms_deform_attn is not None:
             x = self.ms_deform_attn(
                 x,
-                query_pos_encoding,
                 query_spatial_positions,
                 query_batch_offsets,
                 stacked_feature_maps,
                 level_spatial_shapes,
+                background_embedding=background_embedding,
+                query_level_indices=query_level_indices,
             )
         if self.neighborhood_attn is not None:
             x = self.neighborhood_attn(
@@ -171,6 +167,7 @@ class TransformerDecoderLayer(nn.Module):
                 query_batch_offsets=query_batch_offsets,
                 stacked_feature_maps=stacked_feature_maps,
                 level_spatial_shapes=level_spatial_shapes,
+                background_embedding=background_embedding,
                 query_level_indices=query_level_indices,
             )
         if self.use_full_cross_attn:
@@ -199,7 +196,7 @@ class TransformerDecoderLayer(nn.Module):
 class EMTransformerDecoder(nn.Module):
     def __init__(
         self,
-        decoder_layer: nn.Module,
+        decoder_layer: TransformerDecoderLayer,
         config: TransformerDecoderConfig,
         class_head: Optional[nn.Module] = None,
         position_offset_head: Optional[nn.Module] = None,
@@ -285,7 +282,9 @@ class EMTransformerDecoder(nn.Module):
         query_batch_offsets: Tensor,
         stacked_feature_maps: Tensor,
         level_spatial_shapes: Tensor,
+        background_embedding: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
+        dn_info_dict: Optional[dict] = None,
     ):
         layer_output_logits = []
         layer_output_positions = []
@@ -305,19 +304,21 @@ class EMTransformerDecoder(nn.Module):
                 stacked_feature_maps=stacked_feature_maps,
                 level_spatial_shapes=level_spatial_shapes,
                 attn_mask=attn_mask,
-                query_pos_encoding=query_pos_encoding,
+                background_embedding=background_embedding,
             )
 
-            queries_normed = self.norms[i](queries)
+            queries_normed: Tensor = self.norms[i](queries)
 
             class_head = self._get_class_head(i)
             delta_pos_head = self._get_position_head(i)
             std_head = self._get_std_head(i)
             segmentation_head = self._get_segmentation_head(i)
 
-            query_logits = class_head(queries_normed)
-            query_delta_pos = delta_pos_head(queries_normed.to(delta_pos_head.dtype))
-            query_std = std_head(queries_normed)
+            query_logits: Tensor = class_head(queries_normed)
+            query_delta_pos: Tensor = delta_pos_head(
+                queries_normed.to(delta_pos_head.dtype)
+            )
+            query_std: Tensor = std_head(queries_normed)
 
             new_reference_points = query_reference_points + query_delta_pos
 
@@ -327,6 +328,9 @@ class EMTransformerDecoder(nn.Module):
                 new_reference_points,
                 stacked_feature_maps,
                 level_spatial_shapes,
+                background_embedding=background_embedding,
+                attn_mask=attn_mask,
+                dn_info_dict=dn_info_dict,
             )
 
             layer_output_logits.append(query_logits)

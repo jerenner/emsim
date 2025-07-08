@@ -6,6 +6,7 @@ from emsim.utils.sparse_utils.batching.batch_utils import (
     normalize_batch_offsets,
     batch_offsets_to_seq_lengths,
     seq_lengths_to_batch_offsets,
+    batch_offsets_to_indices,
 )
 from emsim.config.denoising import DenoisingConfig
 
@@ -174,7 +175,7 @@ class DenoisingGenerator(nn.Module):
             n_obj * n_dn_groups * 2 for n_obj in n_objects_per_image
         ]
 
-        n_main_queries_per_image = batch_offsets_to_seq_lengths(
+        n_main_queries_per_image: list[int] = batch_offsets_to_seq_lengths(
             query_batch_offsets
         ).tolist()
 
@@ -217,6 +218,7 @@ class DenoisingGenerator(nn.Module):
             n_main_queries_b = int(n_main_queries_per_image[b])
             n_objects_b = int(n_objects_per_image[b])
             n_dn_b = n_objects_b * n_dn_groups * 2
+            n_total_queries_b = n_main_queries_b + n_dn_b
 
             ### main queries and reference points ###
             # start and end position of this image in input tensor
@@ -257,11 +259,12 @@ class DenoisingGenerator(nn.Module):
 
             ### attention mask to separate denoising groups ###
             submask_b = stacked_attn_mask[b]
+            # submask_b shape: [target_len, source_len] ([attending, attended])
             # mask out denoising queries from main queries
-            submask_b[:n_main_queries_b, n_main_queries_b:] = True
+            submask_b[:n_main_queries_b, n_main_queries_b:n_total_queries_b] = True
 
             if mask_main_queries_from_denoising:
-                submask_b[n_main_queries_b:, :n_main_queries_b] = True
+                submask_b[n_main_queries_b:n_total_queries_b, :n_main_queries_b] = True
 
             dn_group_size = n_objects_b * 2
             assert dn_group_size == n_objects_per_image[b] * 2
@@ -274,7 +277,8 @@ class DenoisingGenerator(nn.Module):
                 submask_b[dn_start_row:dn_end_row, dn_end_col:] = True
 
             # mask out the padding queries just for completeness
-            submask_b[n_main_queries_b + n_dn_b :] = True
+            submask_b[n_total_queries_b:, :] = True
+            submask_b[:, n_total_queries_b:] = True
 
             assert torch.equal(stacked_attn_mask[b], submask_b)  # sanity check
 

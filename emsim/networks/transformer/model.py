@@ -315,6 +315,7 @@ class EMTransformer(nn.Module):
             nms_encoder_out_positions,
             encoder_out_normalized,
             score_dict["spatial_shapes"],
+            background_embedding=bg_embed,
         )
 
         nms_encoder_output = {
@@ -356,8 +357,9 @@ class EMTransformer(nn.Module):
             denoising = True
             query_batch_offsets = dn_info_dict["stacked_batch_offsets"]
         else:
-            attn_mask = None
             denoising = False
+            attn_mask = None
+            dn_info_dict = None
             query_batch_offsets = nms_query_batch_offsets
 
         decoder_out = self.decoder(
@@ -366,10 +368,13 @@ class EMTransformer(nn.Module):
             query_batch_offsets=query_batch_offsets,
             stacked_feature_maps=encoder_out_normalized,
             level_spatial_shapes=score_dict["spatial_shapes"],
+            background_embedding=bg_embed,
             attn_mask=attn_mask,
+            dn_info_dict=dn_info_dict,
         )
 
         if denoising:
+            assert dn_info_dict is not None
             decoder_out, denoising_out = self.unstack_main_denoising_outputs(
                 decoder_out, dn_info_dict
             )

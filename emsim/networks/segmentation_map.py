@@ -426,17 +426,14 @@ def unstack_bg_from_queries(
     batch_size = len(batch_offsets) - 1
     embed_dim = queries_with_bg.shape[-1]
 
-    batch_split_queries: list[Tensor] = split_batch_concatted_tensor(
-        queries_with_bg, batch_offsets
-    )
-    foreground_q_list = []
-    background_q_list = []
-
     if dn_info_dict is None:
         # no denoising queries: just split off the last query from each image
-        for b, queries_b in enumerate(batch_split_queries):
-            foreground_q_list.append(queries_b[:-1])
-            background_q_list.append(queries_b[-1:])
+        foreground_q_list: list[Tensor] = []
+        background_q_list: list[Tensor] = []
+        for b in range(batch_size):
+            batch_start, batch_end = int(batch_offsets[b]), int(batch_offsets[b + 1])
+            foreground_q_list.append(queries_with_bg[batch_start : batch_end - 1])
+            background_q_list.append(queries_with_bg[batch_end - 1 : batch_end])
 
         foreground_queries = torch.cat(foreground_q_list)
         background_queries = torch.cat(background_q_list).view(batch_size, 1, embed_dim)
@@ -444,35 +441,39 @@ def unstack_bg_from_queries(
         return foreground_queries, background_queries
 
     ### with denoising queries ###
+    device = queries_with_bg.device
     n_obj_per_image: list[int] = dn_info_dict["n_objects_per_image"]
     n_dn_groups: int = dn_info_dict["n_denoising_groups"]
     n_main_q_per_image: list[int] = dn_info_dict["n_main_queries_per_image"]
 
-    for b, (queries_b, n_main_b, n_obj_b) in enumerate(
-        zip(batch_split_queries, n_main_q_per_image, n_obj_per_image)
-    ):
-        # split main and denoising queries
-        main_q_b, dn_q_b = queries_b.tensor_split([n_main_b + 1])
+    # get indices of every background query (main plus all dn groups for each image)
+    bg_indices_list: list[Tensor] = []
+    for b in range(batch_size):
+        batch_start = batch_offsets[b]
+        n_main_b = n_main_q_per_image[b]
+        dn_group_size = n_obj_per_image[b] * 2
 
-        # bg query is the last from the main query tensor
-        foreground_q_list.append(main_q_b[:-1])
-        background_q_list.append(main_q_b[-1:])
+        # background query for main queries
+        bg_indices_list.append((batch_start + n_main_b).unsqueeze(0))
 
-        # pull out the last query (bg query) from each dn group
-        dn_group_size = n_obj_b * 2
-        assert len(dn_q_b) == (dn_group_size + 1) * n_dn_groups
+        if n_dn_groups > 0:
+            # background query for all denoising groups˝
+            start_dn = batch_start + n_main_b + 1
+            bg_dn = (start_dn + dn_group_size) + torch.arange(
+                n_dn_groups, device=device
+            ) * (dn_group_size + 1)
 
-        dn_q_b = dn_q_b.view(n_dn_groups, dn_group_size + 1, embed_dim)
+            bg_indices_list.append(bg_dn)
 
-        dn_q_b_groups = dn_q_b.split(dn_group_size + 1)
-        for dn_g in dn_q_b_groups:
-            foreground_q_list.append(dn_g[:-1])
-            background_q_list.append(dn_g[-1:])
+    bg_indices = torch.cat(bg_indices_list)
 
-    foreground_queries = torch.cat(foreground_q_list)
-    background_queries = torch.cat(background_q_list).view(
-        batch_size, n_dn_groups + 1, embed_dim
-    )
+    background_queries = queries_with_bg[bg_indices]
+    background_queries = background_queries.view(batch_size, n_dn_groups + 1, embed_dim)
+
+    is_fg = torch.ones(queries_with_bg.size(0), dtype=torch.bool, device=device)
+    is_fg[bg_indices] = False
+
+    foreground_queries = queries_with_bg[is_fg]
 
     return foreground_queries, background_queries
 

@@ -4,6 +4,7 @@ from typing import Optional, Union
 import torch
 from torch import Tensor, nn
 from typing_extensions import Self
+from itertools import chain, repeat
 
 from emsim.config.transformer import SegmentationHeadConfig
 from emsim.networks.positional_encoding.rope import FreqGroupPattern
@@ -24,6 +25,7 @@ from emsim.utils.sparse_utils.batching import (
     split_batch_concatted_tensor,
 )
 from emsim.utils.sparse_utils.indexing.indexing import batch_sparse_index, sparse_select
+from emsim.utils.sparse_utils.indexing.script_funcs import flatten_nd_indices
 
 
 class SegmentationMapPredictor(nn.Module):
@@ -153,7 +155,6 @@ class SegmentationMapLayer(nn.Module):
         max_level_index = torch.unique(max_level_index)
         assert len(max_level_index) == 1
         query_level_indices = max_level_index.expand(query_positions.shape[0])
-        t_start = time.time()
         queries = self.nhood_attn(
             queries,
             query_positions,
@@ -163,11 +164,8 @@ class SegmentationMapLayer(nn.Module):
             background_embedding=background_embedding,
             query_level_indices=query_level_indices,
         )
-        torch.cuda.synchronize()
-        print(f"nhood attn time: {time.time() - t_start}")
 
         if background_queries is not None:
-            t_start = time.time()
             stacked = stack_bg_onto_queries(
                 queries,
                 query_positions,
@@ -176,12 +174,9 @@ class SegmentationMapLayer(nn.Module):
                 attn_mask,
                 dn_info_dict,
             )
-            torch.cuda.synchronize()
-            print(f"stack time: {time.time() - t_start}")
             queries, query_positions, query_batch_offsets, attn_mask = stacked
             query_level_indices = max_level_index.expand(query_positions.shape[0])
 
-        t_start = time.time()
         queries = self.self_attn(
             queries,
             spatial_positions=query_positions,
@@ -191,17 +186,12 @@ class SegmentationMapLayer(nn.Module):
             attn_mask=attn_mask,
         )
         queries = self.ffn(queries)
-        torch.cuda.synchronize()
-        print(f"self attn + ffn time: {time.time() - t_start}")
 
         # unstack background queries if needed
         if background_queries is not None:
-            t_start = time.time()
             queries, background_queries = unstack_bg_from_queries(
                 queries, query_batch_offsets, dn_info_dict
             )
-            torch.cuda.synchronize()
-            print(f"unstack time: {time.time() - t_start}")
 
         return queries, background_queries
 
@@ -275,20 +265,20 @@ def stack_bg_onto_queries(
     queries_split: list[Tensor] = split_batch_concatted_tensor(
         queries, query_batch_offsets
     )
-    query_pos_split: list[Tensor] = split_batch_concatted_tensor(
+    pos_split: list[Tensor] = split_batch_concatted_tensor(
         query_positions, query_batch_offsets
     )
     # bg_query_split = background_queries.split(1, dim=0)
-    bg_query_split = background_queries.unbind(0)
+    bg_split = background_queries.unbind(0)  # list[B] (G+1, D)
     zero_pos = query_positions.new_zeros(1, query_positions.size(-1))
 
     if dn_info_dict is None:  # not denoising
         assert attn_mask is None  # assume attn_mask only for masking dn groups
         # stack background query onto object queries
         queries_with_bg = torch.cat(
-            [x for pair in zip(queries_split, bg_query_split) for x in pair]
+            [x for pair in zip(queries_split, bg_split) for x in pair]
         )
-        pos_with_bg = torch.cat([x for pos in query_pos_split for x in (pos, zero_pos)])
+        pos_with_bg = torch.cat([x for pos in pos_split for x in (pos, zero_pos)])
 
         new_offsets = query_batch_offsets + torch.arange(
             len(query_batch_offsets), device=query_batch_offsets.device
@@ -313,7 +303,7 @@ def stack_bg_onto_queries(
     new_lens: list[int] = []
 
     for b, (queries_b, pos_b, bg_b) in enumerate(
-        zip(queries_split, query_pos_split, bg_query_split)
+        zip(queries_split, pos_split, bg_split)
     ):
         n_q_main_b = n_main_q_per_image[b]
         dn_group_size_b = n_obj_per_image[b] * 2  # (pos + neg)
@@ -322,7 +312,7 @@ def stack_bg_onto_queries(
         bg_main, bg_dn = bg_b.tensor_split([1])
 
         # Add background query to main queries
-        queries_with_bg_list.extend([q_main, bg_main.view(1, -1)])
+        queries_with_bg_list.extend([q_main, bg_main])
         pos_with_bg_list.extend([p_main, zero_pos])
 
         # Add background query to each denoising group
@@ -330,9 +320,12 @@ def stack_bg_onto_queries(
         p_dn_groups = p_dn.split(dn_group_size_b)
         bg_dn_groups = bg_dn.split(1)
         assert len(q_dn_groups) == len(p_dn_groups) == len(bg_dn_groups) == n_dn_groups
-        for q_group, p_group, bg_group in zip(q_dn_groups, p_dn_groups, bg_dn_groups):
-            queries_with_bg_list.extend([q_group, bg_group])
-            pos_with_bg_list.extend([p_group, zero_pos])
+        queries_with_bg_list.extend(
+            list(chain.from_iterable(zip(q_dn_groups, bg_dn_groups)))
+        )
+        pos_with_bg_list.extend(
+            list(chain.from_iterable(zip(p_dn_groups, repeat(zero_pos))))
+        )
 
         new_len_b = n_q_main_b + 1 + n_dn_groups * (dn_group_size_b + 1)
         new_lens.append(new_len_b)
@@ -425,39 +418,28 @@ def unstack_bg_from_queries(
     """
     batch_size = len(batch_offsets) - 1
     embed_dim = queries_with_bg.shape[-1]
-
-    if dn_info_dict is None:
-        # no denoising queries: just split off the last query from each image
-        foreground_q_list: list[Tensor] = []
-        background_q_list: list[Tensor] = []
-        for b in range(batch_size):
-            batch_start, batch_end = int(batch_offsets[b]), int(batch_offsets[b + 1])
-            foreground_q_list.append(queries_with_bg[batch_start : batch_end - 1])
-            background_q_list.append(queries_with_bg[batch_end - 1 : batch_end])
-
-        foreground_queries = torch.cat(foreground_q_list)
-        background_queries = torch.cat(background_q_list).view(batch_size, 1, embed_dim)
-
-        return foreground_queries, background_queries
-
-    ### with denoising queries ###
     device = queries_with_bg.device
-    n_obj_per_image: list[int] = dn_info_dict["n_objects_per_image"]
-    n_dn_groups: int = dn_info_dict["n_denoising_groups"]
-    n_main_q_per_image: list[int] = dn_info_dict["n_main_queries_per_image"]
+
+    if dn_info_dict is not None:
+        n_obj_per_image: list[int] = dn_info_dict["n_objects_per_image"]
+        n_dn_groups: int = dn_info_dict["n_denoising_groups"]
+        n_main_q_per_image: list[int] = dn_info_dict["n_main_queries_per_image"]
+    else:
+        n_dn_groups = 0
+        n_main_q_per_image: list[int] = (batch_offsets.diff() - 1).tolist()
 
     # get indices of every background query (main plus all dn groups for each image)
     bg_indices_list: list[Tensor] = []
     for b in range(batch_size):
         batch_start = batch_offsets[b]
         n_main_b = n_main_q_per_image[b]
-        dn_group_size = n_obj_per_image[b] * 2
 
         # background query for main queries
         bg_indices_list.append((batch_start + n_main_b).unsqueeze(0))
 
         if n_dn_groups > 0:
-            # background query for all denoising groups˝
+            # compute background query index for all denoising groups
+            dn_group_size = n_obj_per_image[b] * 2
             start_dn = batch_start + n_main_b + 1
             bg_dn = (start_dn + dn_group_size) + torch.arange(
                 n_dn_groups, device=device
@@ -529,7 +511,7 @@ class PatchedSegmentationMapPredictor(nn.Module):
         background_embedding: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
         dn_info_dict: Optional[dict] = None,
-    ) -> Tensor:
+    ) -> tuple[Tensor, Optional[Tensor]]:
         batch_size = len(query_batch_offsets) - 1
         # Stack the background embeddings onto the queries
         if background_embedding is not None:
@@ -555,6 +537,8 @@ class PatchedSegmentationMapPredictor(nn.Module):
                 dn_info_dict=dn_info_dict,
             )
 
+        ##### build output segmentation tensors #####
+        # 1. find feature level corresponding to full-scale pixels
         max_level_index = level_spatial_shapes.argmax(dim=0)
         max_level_index = torch.unique(max_level_index)
         assert len(max_level_index) == 1  # same level for all batches
@@ -565,16 +549,12 @@ class PatchedSegmentationMapPredictor(nn.Module):
             level_spatial_shapes[max_level_index],
         ), print(f"{stacked_feature_map.shape=}")
 
-        # get the full-scale feature map level
+        # 2. get the full-scale feature map
         fullscale_feature_map = sparse_select(stacked_feature_map, 3, max_level_index)
         assert isinstance(fullscale_feature_map, Tensor)
         assert fullscale_feature_map.ndim == 4  # (batch, height, width, feature)
-        assert torch.equal(
-            level_spatial_shapes.new_tensor(fullscale_feature_map.shape[1:3]),
-            level_spatial_shapes[max_level_index],
-        ), print(f"{fullscale_feature_map.shape=}")
 
-        # Get the patch indices
+        # 3. Get indices of n x n patches around each query location
         if level_spatial_shapes.ndim == 3:
             max_level_shape = level_spatial_shapes[0, max_level_index].view(1, 2)
         else:
@@ -599,15 +579,14 @@ class PatchedSegmentationMapPredictor(nn.Module):
         query_seq_lengths: Tensor = batch_offsets_to_seq_lengths(query_batch_offsets)
         indices[..., 0] = seq_lengths_to_indices(query_seq_lengths).unsqueeze(-1)
         indices[..., 1:-1] = patch_indices
-        for i in range(query_batch_offsets.size(0) - 1):
-            batch_start, batch_end = int(query_batch_offsets[i]), int(
-                query_batch_offsets[i + 1]
-            )
+        for b in range(query_batch_offsets.size(0) - 1):
+            batch_start = int(query_batch_offsets[b])
+            batch_end = int(query_batch_offsets[b + 1])
             indices[batch_start:batch_end, :, -1] = torch.arange(
                 batch_end - batch_start, device=indices.device
             ).unsqueeze(-1)
 
-        # Extract the patches
+        # 4. Extract the patches from the full-scale pixel feature map (foreground pixels)
         patch_embeddings, patch_is_specified_mask = batch_sparse_index(
             fullscale_feature_map, indices[..., :-1]  # index (batch, i, j)
         )
@@ -621,25 +600,202 @@ class PatchedSegmentationMapPredictor(nn.Module):
                 f"Specified oob indices: {patch_indices[specified_oob_mask]}"
             )
 
-        # dot product each query vector with its patch's embeddings
-        # [n_total_query x embed_dim] @ [n_total_query x patch_pixels x embed_dim] -> [n_total_query x patch_pixels]
+        # 5. compute segmentation logits of each query within its patch of pixels
+        # dot product each query vector with all of its patch's embeddings
+        # [n_total_query x embed_dim] @ [n_total_query x patch_pixels x embed_dim]
+        # -> [n_total_query x patch_pixels]
         patch_segmentation_logits = torch.bmm(
             queries.unsqueeze(1), patch_embeddings.transpose(-1, -2)
         ).squeeze(1)
 
-        # now put the segmentation logits into a sparse tensor
-        nonzero_mask = patch_segmentation_logits != 0.0
-        nonzero_indices = indices[nonzero_mask].T
+        #### 6. now need to potentially split foreground pixel logits into main queries and
+        # dn groups
+        batch_indices = batch_offsets_to_indices(query_batch_offsets)
+        dn_group_indices = indices.new_zeros(
+            queries.size(0),  # will be filled in if dn groups are present
+        )
 
-        max_query_index = int(query_seq_lengths.amax().item())
+        if dn_info_dict is not None:
+            # dn group indices with convention that 0th group is main queries
+            # and 1-N are dn groups
+            # need to separate denoising queries into their own sparse tensor
+            # get tensor of shape [n_total_queries] that has the index
+            # of each query's denoising group (with dn group 0 being main (non-dn)
+            # queries)
+            n_dn_groups = dn_info_dict["n_denoising_groups"]
+            for b in range(batch_size):
+                batch_start = int(query_batch_offsets[b])
+                batch_end = int(query_batch_offsets[b + 1])
+                dn_group_sizes = (
+                    dn_group_indices.new_tensor(dn_info_dict["n_objects_per_image"]) * 2
+                )
+                n_main_queries = dn_group_indices.new_tensor(
+                    dn_info_dict["n_main_queries_per_image"]
+                )
 
-        patch_segmap = torch.sparse_coo_tensor(
-            nonzero_indices,
-            patch_segmentation_logits[nonzero_mask],
-            size=fullscale_feature_map.shape[:-1] + (max_query_index,),
+                dn_group_indices[batch_start + int(n_main_queries[b]) : batch_end] = (
+                    torch.repeat_interleave(
+                        torch.arange(n_dn_groups, device=dn_group_indices.device)
+                        + 1,  # +1 to make main queries index 0
+                        int(dn_group_sizes[b]),
+                    )
+                )
+
+            # verify (n_dn_groups + 1) unique indices
+            assert dn_group_indices.amax() == n_dn_groups
+
+            # use dn group indices to separate out main and dn
+
+            # boolean masks of indices that are in main queries (non-denoising)
+            indices_w_dn_group = torch.cat(  # add dn group index to fg indices
+                [
+                    indices[:, :, :-1],
+                    dn_group_indices[:, None, None].expand(-1, indices.size(1), 1),
+                    indices[:, :, -1:],
+                ],
+                dim=-1,
+            )  # (batch, i, j, dn group, query index within image)
+            fg_indices = indices_w_dn_group[patch_is_specified_mask]
+            fg_is_main = fg_indices[:, -2] == 0
+
+            fg_logits = patch_segmentation_logits[patch_is_specified_mask]
+
+            # main foreground sparse tensor inputs
+            main_fg_indices = fg_indices[fg_is_main][
+                :, [0, 1, 2, 4]
+            ]  # drop dn group index
+            main_fg_logits = fg_logits[fg_is_main]
+
+            # denoising foreground sparse tensor inputs
+            dn_fg_indices = fg_indices[~fg_is_main]
+            dn_fg_indices[:, -2] -= 1  # reindex dn groups from 0 to N-1
+            dn_query_reindexing_offset = (  # reindex each dn group's dn queries from 0 to N-1
+                n_main_queries[dn_fg_indices[:, 0]]
+                + dn_group_sizes[dn_fg_indices[:, 0]] * dn_fg_indices[:, -2]
+            )
+            dn_fg_indices[:, -1] -= dn_query_reindexing_offset
+            dn_fg_logits = fg_logits[~fg_is_main]
+
+        else:  # no denoising, so all foreground logits are main
+            main_fg_indices = indices[patch_is_specified_mask]
+            main_fg_logits = patch_segmentation_logits[patch_is_specified_mask]
+            dn_fg_indices = None
+            dn_fg_logits = None
+            n_main_queries = batch_offsets_to_seq_lengths(query_batch_offsets)
+            n_dn_groups = 0
+
+        ###########
+        # 7. handle background logits if background queries present
+        ###########
+        if background_query is not None:
+            ### Need to compute background segmentation logits using bg queries
+            # go from [batch_size, (n_dn_groups + 1), embed_dim] to
+            # [n_total_queries, embed_dim]
+            broadcasted_bg_queries = background_query[batch_indices, dn_group_indices]
+
+            # [n_total_queries, patch_pixels]
+            bg_logits = torch.bmm(
+                broadcasted_bg_queries.unsqueeze(1),
+                patch_embeddings.transpose(-1, -2),
+            ).squeeze(1)
+
+            # since bg query is the same within a denoising group, filter down
+            # bg queries to unique (batch, i, j, dn group) indices
+            # bg_indices: [n_total_queries x patch_pixels x (batch, i, j, dn group)]
+            bg_indices = torch.cat(
+                [
+                    indices[..., :-1],
+                    dn_group_indices[:, None, None].expand(-1, indices.size(1), 1),
+                ],
+                dim=-1,
+            )
+
+            # find all unique (batch, i, j, dn group) indices among bg indices
+            # flatten to linear (raveled) indices to call torch.unique
+            bg_indices_2d = bg_indices[patch_is_specified_mask]
+            bg_indices_flat: Tensor = flatten_nd_indices(
+                bg_indices_2d.T,
+                bg_indices_2d.new_tensor(
+                    fullscale_feature_map.shape[:-1] + (n_dn_groups + 1,)
+                ),
+            )[0].squeeze(0)
+
+            unique_flat_indices, unique_inverse = torch.unique(
+                bg_indices_flat, return_inverse=True
+            )
+            unique_row_indices: Tensor = unique_inverse.new_full(
+                (unique_flat_indices.size(0),), bg_indices_flat.size(0)
+            )
+            unique_row_indices.scatter_reduce_(
+                0,
+                unique_inverse,
+                torch.arange(bg_indices_flat.size(0), device=bg_indices_flat.device),
+                "amin",
+            )
+            # unique_row_indices has all indices of unique bg queries
+            unique_bg_indices = bg_indices_2d[unique_row_indices]
+            unique_bg_logits = bg_logits[patch_is_specified_mask][unique_row_indices]
+
+            # bg logits for main and potentially dn now computed
+
+            if dn_info_dict is not None:
+                # need to split bg logits into main and dn, similar to fg logits
+                bg_is_main = unique_bg_indices[:, -1] == 0
+
+                main_bg_indices = unique_bg_indices[bg_is_main]
+                # make bg query the last in each image
+                main_bg_indices[:, -1] = n_main_queries[main_bg_indices[:, 0]]
+                main_bg_logits = unique_bg_logits[bg_is_main]
+
+                main_indices = torch.cat([main_fg_indices, main_bg_indices]).T
+                main_logits = torch.cat([main_fg_logits, main_bg_logits])
+
+                dn_bg_indices = unique_bg_indices[~bg_is_main]
+                dn_bg_indices[:, -1] -= 1  # reindex dn groups from 0 to N-1
+                # 5th index: dn query index within group (make bg index of dn group size)
+                dn_bg_indices = torch.cat(
+                    [dn_bg_indices, dn_group_sizes[dn_bg_indices[:, 0], None]], dim=1
+                )
+                dn_bg_logits = unique_bg_logits[~bg_is_main]
+
+                assert dn_fg_logits is not None and dn_fg_indices is not None
+                dn_logits = torch.cat([dn_fg_logits, dn_bg_logits])
+                dn_indices = torch.cat([dn_fg_indices, dn_bg_indices]).T
+
+            else:  # no denoising
+                # make dn query last index
+                unique_bg_indices[:, -1] = n_main_queries[unique_bg_indices[:, 0]]
+
+                main_indices = torch.cat([main_fg_indices, unique_bg_indices]).T
+                main_logits = torch.cat([main_fg_logits, unique_bg_logits])
+                dn_indices = None
+                dn_logits = None
+
+        else:  # no background queries
+            main_indices = main_fg_indices.T
+            main_logits = main_fg_logits
+            dn_indices = dn_fg_indices.T if dn_fg_indices is not None else None
+            dn_logits = dn_fg_logits
+
+        ### 8. now finally construct the segmentation sparse tensors
+        main_segmentation_logits = torch.sparse_coo_tensor(
+            main_indices,
+            main_logits,
+            size=fullscale_feature_map.shape[:-1] + (int(n_main_queries.amax() + 1),),
         ).coalesce()
 
-        return patch_segmap
+        if dn_indices is None:
+            return main_segmentation_logits, None
+
+        assert dn_logits is not None
+        dn_segmentation_logits = torch.sparse_coo_tensor(
+            dn_indices,
+            dn_logits,
+            size=fullscale_feature_map.shape[:-1]
+            + (n_dn_groups, int(dn_group_sizes.amax() + 1)),
+        ).coalesce()
+
+        return main_segmentation_logits, dn_segmentation_logits
 
     def reset_parameters(self):
         for layer in self.layers:

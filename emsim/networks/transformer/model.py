@@ -309,7 +309,7 @@ class EMTransformer(nn.Module):
         nms_encoder_out_positions = nms_proposal_positions
         nms_encoder_out_std_cholesky = self.std_dev_head(nms_encoder_out_normalized)
 
-        nms_encoder_out_segmentation = self.segmentation_head(
+        nms_encoder_out_segmentation, _ = self.segmentation_head(
             nms_encoder_out_normalized,
             nms_query_batch_offsets,
             nms_encoder_out_positions,
@@ -380,14 +380,6 @@ class EMTransformer(nn.Module):
             )
         else:
             denoising_out = None
-        # denoising_out = None
-
-        # segmentation_logits = self.segmentation_head(
-        #     encoder_out,
-        #     decoder_out_queries[-1],
-        #     nms_topk_query_batch_offsets,
-        #     decoder_out_positions[-1],
-        # )
 
         return (
             decoder_out["logits"],
@@ -640,9 +632,6 @@ class EMTransformer(nn.Module):
             "object_batch_offsets": dn_info_dict["object_batch_offsets"],
             "dn_info_dict": dn_info_dict,
         }
-        assert isinstance(dn_info_dict["n_main_queries_per_image"], list)
-        assert isinstance(dn_info_dict["n_objects_per_image"], list)
-        assert isinstance(dn_info_dict["n_denoising_groups"], int)
 
         for key, value in decoder_out.items():
             if isinstance(value, Tensor):
@@ -651,58 +640,14 @@ class EMTransformer(nn.Module):
                         value, dn_info_dict
                     )
                 )
+            elif key == "segmentation_logits":
+                main_out[key] = value
+            elif key == "dn_segmentation_logits":
+                denoising_out["segmentation_logits"] = value
             else:
-                assert key == "segmentation_logits"
-                # segmentation logits have decoder layer as outer loop and image as inner loop
-                main_out[key] = []
-                denoising_out[key] = []
-                for layer_seg_logits in value:
-                    main = []
-                    denoising = []
-                    for b, logits in enumerate(
-                        layer_seg_logits,
-                    ):
-                        n_main_b = dn_info_dict["n_main_queries_per_image"][b]
-                        n_elecs_b = dn_info_dict["n_objects_per_image"][b]
-                        logits = logits.coalesce()
-                        n_dn = n_elecs_b * dn_info_dict["n_denoising_groups"] * 2
-                        dn_end = n_main_b + n_dn
-
-                        main.append(
-                            sparse_index_select(
-                                logits,
-                                logits.ndim - 1,
-                                torch.arange(n_main_b, device=logits.device),
-                            )
-                        )
-                        denoising.append(
-                            sparse_index_select(
-                                logits,
-                                logits.ndim - 1,
-                                torch.arange(
-                                    n_main_b,
-                                    dn_end,
-                                    device=logits.device,
-                                ),
-                            )
-                        )
-
-                    main_out[key].append(self.__restack_sparse_segmaps(main))
-                    denoising_out[key].append(self.__restack_sparse_segmaps(denoising))
+                raise ValueError(f"Unrecognized key {key}")
 
         return main_out, denoising_out
-
-    @staticmethod
-    def __restack_sparse_segmaps(segmaps: list[Tensor]):
-        max_elecs = max([segmap.shape[-1] for segmap in segmaps])
-        segmaps = [
-            sparse_resize(
-                segmap,
-                [*segmap.shape[:-1], max_elecs],
-            )
-            for segmap in segmaps
-        ]
-        return torch.stack(segmaps, 0).coalesce()
 
     @torch.no_grad()
     def nms_on_topk_index(

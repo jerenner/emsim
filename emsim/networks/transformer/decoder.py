@@ -291,6 +291,7 @@ class EMTransformerDecoder(nn.Module):
         layer_output_queries = []
         layer_output_std = []
         layer_output_segmentation = []
+        denoising_segmentation = []
         for i, layer in enumerate(self.layers):
             if not self.use_rope:
                 query_pos_encoding = self.query_pos_encoding(query_reference_points)
@@ -322,7 +323,7 @@ class EMTransformerDecoder(nn.Module):
 
             new_reference_points = query_reference_points + query_delta_pos
 
-            query_segmentation = segmentation_head(
+            query_segmentation, dn_segmentation = segmentation_head(
                 queries_normed,
                 query_batch_offsets,
                 new_reference_points,
@@ -341,6 +342,7 @@ class EMTransformerDecoder(nn.Module):
                 layer_output_positions.append(new_reference_points.detach())
             layer_output_queries.append(queries)
             layer_output_segmentation.append(query_segmentation)
+            denoising_segmentation.append(dn_segmentation)
 
             if self.detach_updated_positions:
                 query_reference_points = new_reference_points.detach()
@@ -357,6 +359,7 @@ class EMTransformerDecoder(nn.Module):
             "queries": stacked_queries,
             "std": stacked_std,
             "segmentation_logits": layer_output_segmentation,
+            "dn_segmentation_logits": denoising_segmentation,
         }
 
     def _get_class_head(self, layer_index) -> nn.Module:

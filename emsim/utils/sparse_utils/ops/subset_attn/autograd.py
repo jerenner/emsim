@@ -3,6 +3,10 @@ from typing import Optional, Union
 
 import torch
 from torch import Tensor
+from torch.amp import (
+    custom_fwd,  # pyright: ignore[reportPrivateImportUsage]
+    custom_bwd,  # pyright: ignore[reportPrivateImportUsage]
+)
 
 from .autograd_helpers import (
     linear_grads,
@@ -69,6 +73,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         #### Forward step 4: RoPE encoding calculation
 
         if key_positions is not None and rope_freqs is not None:
+            assert key_rope_encoding is None
             key_rope_encoding = calculate_rope(key_positions, rope_freqs)
 
         #### Forward step 5: Rotate the keys by applying RoPE
@@ -102,6 +107,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             )
 
     @staticmethod
+    @custom_fwd(device_type="cuda")
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
         query_tensor: Tensor,
@@ -113,6 +119,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         value_weight: Tensor,
         key_bias: Optional[Tensor] = None,
         value_bias: Optional[Tensor] = None,
+        query_mask: Optional[Tensor] = None,
         selection_fill: Optional[Tensor] = None,
         key_rope_encoding: Optional[Tensor] = None,
         key_positions: Optional[Tensor] = None,
@@ -145,6 +152,14 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             value_weight (Tensor): Value projection matrix of shape [embed_dim, embed_dim]
             key_bias (Optional[Tensor]): Key projection bias of shape [embed_dim]
             value_bias (Optional[Tensor]): Value projection bias of shape [embed_dim]
+            query_mask: (Optional[Tensor]): Tensor of shape [n_queries] that
+                indicates queries that should not participate in this operation.
+                Specifically, if present, positions where this tensor is True will have
+                the corresponding query in query_tensor masked out from every key,
+                meaning that this operation's output tensor at those positions will be
+                equal to the input values. This is potentially useful for query tensors
+                where some queries represent "virtual" queries without a well-defined
+                neighborhood, such as <cls> tokens or similar.
             selection_fill (Optional[Tensor]): Tensor that will be used as a fill value
                 in the pre-projection key/value tensor at locations where is_specified_mask
                 is False. Must be broadcastable to [n_queries, n_keys_per_query, embed_dim].
@@ -247,6 +262,11 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # attn calculation
         assert key_weight.size(0) == query_tensor.size(1) == embed_dim
 
+        if query_mask is not None:
+            assert query_mask.ndim == 1
+            assert query_mask.shape[0] == n_queries
+            assert query_mask.dtype == torch.bool
+
         # rope validations
         if key_rope_encoding is not None and (
             key_positions is not None or rope_freqs is not None
@@ -309,6 +329,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             value_weight,
             key_bias,  # pyright: ignore[reportArgumentType]
             value_bias,  # pyright: ignore[reportArgumentType]
+            query_mask,  # pyright: ignore[reportArgumentType]
             selection_fill,  # pyright: ignore[reportArgumentType]
             (
                 key_rope_encoding
@@ -358,6 +379,12 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         #### Step 8: Masking and softmax
 
+        # Apply query padding mask if present
+        if query_mask is not None:
+            # Mask out rows from the attention scores for padded queries
+            # attn_scores: [n_heads, n_queries, n_keys_per_query]
+            attn_scores.masked_fill_(query_mask[None, :, None], -torch.inf)
+
         if selection_fill is None:
             attn_scores.masked_fill_(~is_specified_mask, -torch.inf)
         attn_weights = attn_scores.softmax(-1)
@@ -403,8 +430,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # fmt: off
         #  (return type hint matches lines of return)
         Tensor, Tensor, Tensor, Tensor, Tensor,
+        Tensor, Tensor, Tensor, Tensor,
         Tensor, Tensor, Tensor, Tensor, Tensor,
-        Tensor, Tensor, Tensor, int, int,
+        int, int,
         float, dict[str, bool], float, bool, Optional[Tensor]
         # fmt: on
     ]:
@@ -415,8 +443,8 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         # fmt: off
         (
             query_tensor, sparse_tensor_values, key_weight, value_weight,
-            key_bias, value_bias, selection_fill, key_rope_encoding, key_positions,
-            rope_freqs,
+            key_bias, value_bias, query_mask, selection_fill,
+            key_rope_encoding, key_positions, rope_freqs,
         ) = ctx.saved_tensors
         # fmt: on
         index_tensor: Tensor = ctx.index_tensor
@@ -444,19 +472,20 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             "value_weight": ctx.needs_input_grad[6],
             "key_bias": key_bias is not None and ctx.needs_input_grad[7],
             "value_bias": value_bias is not None and ctx.needs_input_grad[8],
-            "selection_fill": selection_fill is not None and ctx.needs_input_grad[9],
+            "selection_fill": selection_fill is not None and ctx.needs_input_grad[10],
             "key_rope_encoding": (
-                key_rope_encoding is not None and ctx.needs_input_grad[10]
+                key_rope_encoding is not None and ctx.needs_input_grad[11]
             ),
-            "key_positions": (key_positions is not None and ctx.needs_input_grad[11]),
-            "rope_freqs": rope_freqs is not None and ctx.needs_input_grad[12],
+            "key_positions": (key_positions is not None and ctx.needs_input_grad[12]),
+            "rope_freqs": rope_freqs is not None and ctx.needs_input_grad[13],
         }
 
         # fmt: off
         return (
             query_tensor, sparse_tensor_values, key_weight, value_weight, key_bias,
-            value_bias, selection_fill, key_rope_encoding, key_positions, rope_freqs,
-            index_tensor, is_specified_mask, attn_weights, embed_dim, n_heads,
+            value_bias, query_mask, selection_fill, key_rope_encoding,
+            key_positions, rope_freqs, index_tensor, is_specified_mask, attn_weights,
+            embed_dim, n_heads,
             scale_factor, needed_grads, dropout_p, training, attn_dropout_mask,
         )
         # fmt: on
@@ -533,7 +562,9 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
         )
 
         # sparse_tensor_values is upstream of everything so nothing depends on it
-        compute_grads_sparse_values = needed_grads["sparse_values"] or needed_grads["selection_fill"]
+        compute_grads_sparse_values = (
+            needed_grads["sparse_values"] or needed_grads["selection_fill"]
+        )
 
         return {
             "attn_scores": compute_grad_attn_scores,
@@ -548,6 +579,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
     @staticmethod
     @torch.autograd.function.once_differentiable
+    @custom_bwd(device_type="cuda")
     def backward(
         ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor
     ) -> tuple[Optional[Tensor], ...]:
@@ -574,6 +606,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 - grad_value_weight: [embed_dim, embed_dim] or None
                 - grad_key_bias: [embed_dim] or None
                 - grad_value_bias: [embed_dim] or None
+                - None (for query_mask)
                 - grad_selection_fill: Same dim as input `selection_fill`, or None
                 - grad_key_rope_encoding: [n_queries, n_keys_per_query, embed_dim] or None
                 - grad_key_positions: [n_queries, n_keys_per_query, position_dim] or None
@@ -624,15 +657,16 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
 
         # Early return for no gradients
         if grad_output is None:
-            return (None,) * 16
+            return (None,) * 17
 
         ##### Step 1: retrieve values and set up variables
 
         # fmt: off
         (
             query_tensor, sparse_tensor_values, key_weight, value_weight, key_bias,
-            value_bias, selection_fill, key_rope_encoding, key_positions, rope_freqs,
-            index_tensor, is_specified_mask, attn_weights, embed_dim, n_heads,
+            value_bias, query_mask, selection_fill, key_rope_encoding,
+            key_positions, rope_freqs, index_tensor, is_specified_mask, attn_weights,
+            embed_dim, n_heads,
             scale_factor, needed_grads, dropout_p, training, attn_dropout_mask,
         ) = GatherAndSubsetAttentionFunction._initialize_backward(ctx)
         # fmt: on
@@ -705,6 +739,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
                 training,
                 selection_fill,
                 attn_dropout_mask,
+                query_mask,
             )
         del values  # big tensor we no longer need
 
@@ -820,6 +855,7 @@ class GatherAndSubsetAttentionFunction(torch.autograd.Function):
             grad_value_weight,  # value_weight
             grad_key_bias,  # key_bias
             grad_value_bias,  # value_bias
+            None,  # query_mask
             grad_selection_fill,  # selection_fill
             grad_key_rope_encoding,  # key_rope_encoding
             grad_key_positions,  # key_positions
@@ -843,6 +879,7 @@ def _compute_grad_attn_scores(
     training: bool,
     selection_fill: Optional[Tensor],
     attn_dropout_mask: Optional[Tensor] = None,
+    query_mask: Optional[Tensor] = None,
 ) -> Tensor:
     """Computes gradients of attention scores with respect to softmax attention weights.
     Implements the softmax gradient.
@@ -868,7 +905,13 @@ def _compute_grad_attn_scores(
     )
 
     if selection_fill is None:
-        grad_attn_scores.masked_fill_(~is_specified_mask, 0)
+        grad_attn_scores.masked_fill_(~is_specified_mask, 0.0)
+
+    if query_mask is not None:
+        grad_attn_scores.masked_fill_(
+            query_mask[None, :, None],
+            0.0
+        )
 
     return grad_attn_scores
 
@@ -1077,15 +1120,20 @@ def _compute_grad_sparse_values(
     # Scatter grads back into the sparse values
     if need_grad_sparse_values:
         grad_sparse_values = torch.zeros_like(sparse_tensor_values)
-        grad_selected_specified = grad_selected.masked_fill(~is_specified_mask.unsqueeze(-1), 0.0)
+        grad_selected_specified = grad_selected.masked_fill(
+            ~is_specified_mask.unsqueeze(-1), 0.0
+        )
         grad_sparse_values.index_add_(
             0, index_tensor.view(-1), grad_selected_specified.view(-1, embed_dim)
         )
 
     if need_grad_selection_fill:
         assert selection_fill is not None
-        grad_selected_unspecified = grad_selected.masked_fill(is_specified_mask.unsqueeze(-1), 0.0)
-        grad_selection_fill = grad_selected_unspecified.sum_to_size(selection_fill.shape)
-
+        grad_selected_unspecified = grad_selected.masked_fill(
+            is_specified_mask.unsqueeze(-1), 0.0
+        )
+        grad_selection_fill = grad_selected_unspecified.sum_to_size(
+            selection_fill.shape
+        )
 
     return grad_sparse_values, grad_selection_fill

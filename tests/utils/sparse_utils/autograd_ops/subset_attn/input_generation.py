@@ -18,6 +18,7 @@ def attention_inputs(
         Literal["none"], Literal["precomputed", Literal["from_freqs"]]
     ] = "none",  # none, precomputed, from_freqs
     use_selection_fill: bool = False,
+    query_mask_rate: float = 0.0,
     position_dim: int = 2,
     n_freq_groups: int = 1,
     sparse_height: int = 8,
@@ -55,6 +56,10 @@ def attention_inputs(
             - "from_freqs": Generate RoPE from frequency components
         use_selection_fill (bool): Whether to create a `selection_fill` tensor to serve
             as a background embedding for selected keys corresponding to empty pixels
+        query_mask_rate (float): If greater than 0, a `query_mask` tensor is created
+            with True entries at a rate of query_mask_rate. This tensor is passed to
+            the autograd function to selectively turn the neighborhood attention
+            operation to a no-op on those queries.
         position_dim (int): Number of dimensions for positional encoding (when using RoPE).
         n_freq_groups (int): Number of frequency groups for RoPE.
         sparse_height (int): Height dimension of the sparse spatial grid.
@@ -266,6 +271,15 @@ def attention_inputs(
     else:
         selection_fill = None
 
+    # Query padding mask if used
+    if query_mask_rate is not None and query_mask_rate > 0.0:
+        query_mask = (
+            torch.rand(stacked_query_tensor.shape[:-1], device=device)
+            <= query_mask_rate
+        )
+    else:
+        query_mask = None
+
     # Random scale factor or None (defaults to 1/sqrt(embed_dim) in the function)
     scale_factor: Optional[float] = (
         torch.rand(1).item() if np.random.random() > 0.5 else None
@@ -295,6 +309,7 @@ def attention_inputs(
         "value_weight": value_weight,
         "key_bias": key_bias,
         "value_bias": value_bias,
+        "query_mask": query_mask,
         "key_rope_encoding": batched_key_rope_encoding,
         "key_positions": batched_key_positions,
         "rope_freqs": rope_freqs,

@@ -18,6 +18,7 @@ def batch_sparse_index_subset_attn(
     value_weight: Tensor,
     key_bias: Optional[Tensor] = None,
     value_bias: Optional[Tensor] = None,
+    query_mask: Optional[Tensor] = None,
     background_embedding: Optional[Tensor] = None,
     key_rope_encoding: Optional[Tensor] = None,
     key_positions: Optional[Tensor] = None,
@@ -65,31 +66,33 @@ def batch_sparse_index_subset_attn(
             rotated before giving it to this function.
 
     Args:
-        sparse_tensor (Tensor): Sparse tensor of dimension ..., M; where ... are
+        sparse_tensor (Tensor): Sparse tensor of dimension [..., M]; where ... are
             S leading sparse dimensions and M is the dense feature dimension.
-        index_tensor (Tensor): Long tensor of dimension ..., L, S; where ... are
-            leading batch dimensions, L is the number of keys per query, and S is
+        index_tensor (Tensor): Long tensor of dimension [N, L, S]; where N is the
+            number of queries, L is the number of keys per query, and S is
             the number of sparse dimensions. Negative indices and indices outside
             the spatial dimension of the sparse tensor are not supported and will
             be considered unspecified.
-        query_tensor (Tensor): Query features of shape ..., M; where ... matches
-            the batch dimensions from index_tensor, and M is the feature dimension.
+        query_tensor (Tensor): Query features of shape [N, M]; where N matches
+            the number of queries from index_tensor, and M is the feature dimension.
         n_heads (int): Number of attention heads to use.
         key_weight (Tensor): Key projection matrix of shape [M, M].
         value_weight (Tensor): Value projection matrix of shape [M, M].
         key_bias (Optional[Tensor]): Optional bias vector for key projection of shape [M].
         value_bias (Optional[Tensor]): Optional bias vector for value projection of shape [M].
+        query_mask (Optional[Tensor]): Optional boolean tensor of shape [N] that
+            indicates queries that should not participate in the subset attention
+            operation. Specifically, queries at positions where query_mask is True
+            will have their output masked out to 0.
         background_embedding (Optional[Tensor]): Optional tensor that will be used as a
             fill value for keys that are not specified in the sparse tensor. Must be
-            broadcastable to [..., L, M].
+            broadcastable to [N, L, M].
         key_rope_encoding (Optional[Tensor]): Optional positional encoding for keys
-            of shape [..., L, n_heads, head_dim], where ... matches the batch dimensions
-            from index_tensor. Used for rotary position embedding (RoPE). The n_heads
-            dimension may also be 1, which will broadcast the encoding across heads.
-            If key_rope_encoding is specified, head_dim must be divisible by 2. Cannot be
-            used together with key_positions and rope_freqs.
+            of shape [N, L, n_heads, head_dim]. Used for rotary position embedding (RoPE). The n_heads dimension may also be 1, which will broadcast the
+            encoding across heads. If key_rope_encoding is specified, head_dim must be
+            divisible by 2. Cannot be used together with key_positions and rope_freqs.
         key_positions (Optional[Tensor]): Position information for each key of shape
-            [..., L, P], where ... matches the batch dimensions from index_tensor
+            [N, L, P], where N and L match the dimensions from index_tensor
             and P is the dimensionality of the position representation. Used together
             with rope_freqs to compute rotary position embedding (RoPE) from frequencies.
             Cannot be used together with key_rope_encoding.
@@ -112,9 +115,9 @@ def batch_sparse_index_subset_attn(
             Incompatible with background_embedding. Defaults to False.
 
     Returns:
-        - Tensor: Output tensor after attention of shape [..., M], where ... are the
-            batch dimensions from index_tensor and query_tensor.
-        - Tensor: Boolean mask of shape [..., L], indicating which keys were actually
+        - Tensor: Output tensor after attention of shape [N, M], where N is the number
+            of queries are the and M is the query embedding dimension.
+        - Tensor: Boolean mask of shape [N, L], indicating which keys were actually
             specified in the sparse tensor.
     """
     if index_tensor.is_nested:
@@ -151,6 +154,7 @@ def batch_sparse_index_subset_attn(
         value_weight,
         key_bias,
         value_bias,
+        query_mask,
         background_embedding,
         key_rope_encoding,
         key_positions,
@@ -182,6 +186,7 @@ class BatchSparseIndexSubsetAttention(nn.Module):
         index_tensor: Tensor,
         query_tensor: Tensor,
         n_heads: int,
+        query_mask: Optional[Tensor] = None,
         key_rope_encoding: Optional[Tensor] = None,
         key_positions: Optional[Tensor] = None,
         rope_freqs: Optional[Tensor] = None,
@@ -200,6 +205,7 @@ class BatchSparseIndexSubsetAttention(nn.Module):
             value_weight=kv_params["value_weight"],
             key_bias=kv_params["key_bias"],
             value_bias=kv_params["value_bias"],
+            query_mask=query_mask,
             background_embedding=background_embedding,
             key_rope_encoding=key_rope_encoding,
             key_positions=key_positions,

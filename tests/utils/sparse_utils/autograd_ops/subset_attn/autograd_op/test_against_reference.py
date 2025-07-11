@@ -2,7 +2,7 @@ from typing import Any, cast, Optional
 
 import pytest
 import torch
-from hypothesis import given, settings, assume
+from hypothesis import given, settings, assume, example
 from torch import Tensor
 
 from emsim.utils.sparse_utils.batching import remove_batch_dim_and_concat
@@ -254,7 +254,9 @@ class TestAgainstReferenceUnit:
         ordered_inputs = ordered_autograd_inputs(inputs)
         batched_inputs = prep_batched_attention(inputs)
 
-        subset_output = traceable_subset_attention(*ordered_inputs, return_extended_outputs=True)
+        subset_output = traceable_subset_attention(
+            *ordered_inputs, return_extended_outputs=True
+        )
         batched_output = traceable_batched_attention(
             **batched_inputs, return_extended_outputs=True
         )
@@ -404,6 +406,26 @@ class TestAgainstReferenceHypothesis:
 @pytest.mark.cuda_if_available
 class TestGradientsHypothesis:
 
+    @example(
+        inputs_config={
+            "n_queries": 2,
+            "embed_dim": 6,
+            "n_heads": 3,
+            "n_keys_per_query": 1,
+            "num_sparse_values": 5,
+            "position_dim": 1,
+            "n_freq_groups": 1,
+            "unspecified_query_indices": None,
+            "unspecified_prob": 0.0,
+            "query_mask_rate": 1.0,
+            "dtype": torch.float32,
+            "use_biases": False,
+            "use_rope": "none",
+            "use_selection_fill": False,
+            "tensors_requiring_grads": ["query_tensor"],
+            "seed": 0,
+        },
+    )
     @settings(deadline=None)
     @given(
         inputs_config=exhaustive_attention_input_configs(

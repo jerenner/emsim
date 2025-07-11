@@ -27,6 +27,7 @@ def traceable_subset_attention(
     value_weight: Tensor,
     key_bias: Optional[Tensor] = None,
     value_bias: Optional[Tensor] = None,
+    query_mask: Optional[Tensor] = None,
     selection_fill: Optional[Tensor] = None,
     key_rope_encoding: Optional[Tensor] = None,
     key_positions: Optional[Tensor] = None,
@@ -52,7 +53,10 @@ def traceable_subset_attention(
 
     # Gather values using the same helper as the custom op
     selected = gather_mask_and_fill(
-        sparse_tensor_values, linear_index_tensor, is_specified_mask, fill=selection_fill,
+        sparse_tensor_values,
+        linear_index_tensor,
+        is_specified_mask,
+        fill=selection_fill,
     )
 
     if batch_kv_projection:
@@ -94,13 +98,18 @@ def traceable_subset_attention(
     # attn_scores: (n_queries, n_heads, n_keys_per_query)
 
     # Apply masking and softmax
-    if selection_fill is None:
-        assert is_specified_mask.shape == (n_queries, n_keys_per_query)
+    if query_mask is not None:
+        assert query_mask.shape == (n_queries,)
         attn_scores_masked = attn_scores.masked_fill(
-            ~is_specified_mask.unsqueeze(1), -torch.inf
+            query_mask[:, None, None], -torch.inf
         )
     else:
         attn_scores_masked = attn_scores
+    if selection_fill is None:
+        assert is_specified_mask.shape == (n_queries, n_keys_per_query)
+        attn_scores_masked = attn_scores_masked.masked_fill(
+            ~is_specified_mask.unsqueeze(1), -torch.inf
+        )
     attn_weights = attn_scores_masked.softmax(-1)
     attn_weights = attn_weights.nan_to_num(0.0)
 
@@ -144,6 +153,7 @@ def traceable_batched_attention(
     value_weight: Tensor,
     key_bias: Tensor,
     value_bias: Tensor,
+    query_mask: Optional[Tensor] = None,
     selection_fill: Optional[Tensor] = None,
     key_rope_encoding: Optional[Tensor] = None,
     key_positions: Optional[Tensor] = None,
@@ -164,7 +174,7 @@ def traceable_batched_attention(
     # (batch_size, seq_len, n_heads, head_dim)
     queries = query_tensor.reshape(batch_size, n_queries, n_heads, head_dim)
     keys = keys.reshape(batch_size, n_keys, n_heads, head_dim)
-    values = values.reshape(batch_size, n_keys, n_heads, head_dim)
+    values: Tensor = values.reshape(batch_size, n_keys, n_heads, head_dim)
 
     # Compute Rope if needed
     if key_positions is not None:
@@ -183,6 +193,9 @@ def traceable_batched_attention(
     queries = queries.transpose(1, 2)
     keys = keys.transpose(1, 2)
     values = values.transpose(1, 2)
+
+    if query_mask is not None:
+        attn_mask[query_mask] = True
 
     # (batch_size, n_queries, n_keys) -> (batch_size, 1, n_queries, n_keys)
     attn_mask = attn_mask.unsqueeze(1)
@@ -306,6 +319,13 @@ def prep_batched_attention(inputs: dict[str, Any]):
     key_weight, value_weight = inputs["key_weight"], inputs["value_weight"]
     key_bias, value_bias = inputs["key_bias"], inputs["value_bias"]
 
+    if inputs["query_mask"] is not None:
+        query_mask = deconcat_add_batch_dim(
+            inputs["query_mask"].unsqueeze(-1), batch_offsets
+        )[0].squeeze(-1)
+    else:
+        query_mask = None
+
     key_rope_encoding = inputs["key_rope_encoding"]
     key_positions = inputs["key_positions"]
     rope_freqs = inputs["rope_freqs"]
@@ -323,6 +343,7 @@ def prep_batched_attention(inputs: dict[str, Any]):
         "value_weight": value_weight,
         "key_bias": key_bias,
         "value_bias": value_bias,
+        "query_mask": query_mask,
         "key_rope_encoding": key_rope_encoding,
         "key_positions": key_positions,
         "rope_freqs": rope_freqs,

@@ -2,7 +2,8 @@ from typing import Any, Union
 
 import pytest
 import torch
-from hypothesis import given, settings
+from hypothesis import given, settings, assume
+from hypothesis import strategies as st
 from torch import Tensor
 
 from emsim.utils.sparse_utils.ops.subset_attn.autograd import (
@@ -126,6 +127,7 @@ class TestBasicForwardBackward:
         output = GatherAndSubsetAttentionFunction.apply(
             *ordered_autograd_inputs(inputs)
         )
+        assert isinstance(output, Tensor)
 
         # Backward pass
         loss = output.sum()
@@ -186,6 +188,7 @@ class TestBasicForwardBackward:
         output = GatherAndSubsetAttentionFunction.apply(
             *ordered_autograd_inputs(inputs)
         )
+        assert isinstance(output, Tensor)
 
         # Backward pass
         loss = output.sum()
@@ -230,6 +233,52 @@ class TestBasicForwardBackward:
         for tensor_name in tensors_requiring_grads:
             assert grad_not_none(inputs, tensor_name)
             assert grad_same_shape(inputs, tensor_name)
+
+
+@pytest.mark.cuda_if_available
+class TestQueryMask:
+    @given(
+        tensor_configs=simple_attention_input_configs(),
+        query_mask_prob=st.floats(0.0, 1.0),
+    )
+    @settings(max_examples=10, deadline=None)
+    def test_query_mask_basic(
+        self, device: str, tensor_configs: dict, query_mask_prob: float
+    ):
+        """Basic test of the query mask in isolation."""
+        inputs = attention_inputs(
+            **tensor_configs, device=device, query_mask_rate=query_mask_prob
+        )
+
+        query_mask = inputs["query_mask"]
+        if query_mask_prob > 0.0:
+            assert isinstance(query_mask, Tensor)
+        else:
+            assert query_mask is None
+            assume(False)
+
+        # Set query tensor to require grads
+        inputs["query_tensor"].requires_grad_(True)
+
+        output = GatherAndSubsetAttentionFunction.apply(
+            *ordered_autograd_inputs(inputs)
+        )
+        assert isinstance(output, Tensor)
+
+        # Test output properly masked (no other masking used)
+        assert (output[query_mask] == 0.0).all()
+        assert (output[~query_mask] != 0.0).all()
+
+        # Test gradients
+        loss = output.sum()
+        loss.backward()
+
+        assert inputs["query_tensor"].grad is not None
+        assert (inputs["query_tensor"].grad[query_mask] == 0.0).all()
+        assert (inputs["query_tensor"].grad[~query_mask] != 0.0).all()
+
+        # make sure counted examples aren't degenerate
+        assume(query_mask.sum() > 0)
 
 
 @pytest.mark.cuda_if_available

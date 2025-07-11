@@ -1,4 +1,4 @@
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, Optional
 
 import pytest
 import torch
@@ -30,7 +30,7 @@ DIFFERENTIABLE_TENSOR_NAMES = [
 ]
 
 
-def subset_key_rope_inputs(inputs: dict[str, Any]) -> dict[str, Tensor]:
+def subset_key_rope_inputs(inputs: dict[str, Any]) -> dict[str, Optional[Tensor]]:
     """Go from batched format of the per-key RoPE data (either the encoding vector
     or the positions used to compute the encoding vector) to subset format, by
     extracting the particular keys referred to by the index tensor.
@@ -60,6 +60,24 @@ def ordered_autograd_inputs(
 
     subsetted_key_tensors = subset_key_rope_inputs(inputs)
 
+    # if subsetted_key_tensors["key_rope_encoding"] is not None:
+    #     key_rope_encoding = subsetted_key_tensors["key_rope_encoding"]
+    #     key_rope_encoding = (
+    #         key_rope_encoding.detach()
+    #         .clone()
+    #         .requires_grad_(key_rope_encoding.requires_grad)
+    #     )
+    # else:
+    #     key_rope_encoding = None
+
+    # if subsetted_key_tensors["key_positions"] is not None:
+    #     key_positions = subsetted_key_tensors["key_positions"]
+    #     key_positions = (
+    #         key_positions.detach().clone().requires_grad_(key_positions.requires_grad)
+    #     )
+    # else:
+    #     key_positions = None
+
     return (
         inputs["query_tensor"],
         inputs["n_heads"],
@@ -70,6 +88,7 @@ def ordered_autograd_inputs(
         inputs["value_weight"],
         inputs["key_bias"],
         inputs["value_bias"],
+        inputs["query_mask"],
         inputs["selection_fill"],
         subsetted_key_tensors["key_rope_encoding"],
         subsetted_key_tensors["key_positions"],
@@ -134,7 +153,9 @@ def _draw_shared_attention_params(draw, min_requiring_grads: int = 0):
     use_selection_fill = draw(st.booleans())
 
     # Get valid tensor names for these parameters
-    available_tensors = filter_valid_tensor_names(use_rope, use_biases, use_selection_fill)
+    available_tensors = filter_valid_tensor_names(
+        use_rope, use_biases, use_selection_fill
+    )
 
     # Draw a non-empty subset of available tensors
     tensors_requiring_grads = draw(
@@ -223,6 +244,13 @@ def exhaustive_attention_input_configs(
                 )
             )
 
+    # Optional probability to no-op certain queries
+    use_query_mask = draw(st.booleans())
+    if use_query_mask:
+        query_mask_rate = draw(st.floats(0.0, 1.0))
+    else:
+        query_mask_rate = None
+
     # Sample dtype
     dtypes = [dtypes] if isinstance(dtypes, torch.dtype) else dtypes
     dtype = draw(st.sampled_from(dtypes))
@@ -237,6 +265,7 @@ def exhaustive_attention_input_configs(
         "n_freq_groups": n_freq_groups,
         "unspecified_query_indices": unspecified_query_indices,
         "unspecified_prob": unspecified_prob,
+        "query_mask_rate": query_mask_rate,
         "dtype": dtype,
         "use_biases": base_params["use_biases"],
         "use_rope": base_params["use_rope"],
@@ -244,7 +273,6 @@ def exhaustive_attention_input_configs(
         "tensors_requiring_grads": base_params["tensors_requiring_grads"],
         "seed": base_params["seed"],
     }
-
 
 
 @pytest.fixture

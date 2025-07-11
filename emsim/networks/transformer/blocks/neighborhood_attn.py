@@ -238,8 +238,17 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         key_index_tensor = query_spatial_positions.new_empty(
             n_queries, keys_per_query, self.position_dim + 2, dtype=torch.long
         )
-        # expand batch and level indices to broadcasted dims
+        # get batch indices
         key_batch_indices = batch_offsets_to_indices(query_batch_offsets)
+
+        # index into background_embedding ([bsz, n_levels, embed_dim]) to expanded
+        # tensor of same shape as key_index_tensor
+        if background_embedding is not None:
+            background_embedding = background_embedding[
+                key_batch_indices[:, None], nhood_level_indices
+            ]
+
+        # expand batch and level indices to broadcasted shape
         key_batch_indices = key_batch_indices[:, None].expand(-1, keys_per_query)
         key_level_indices = nhood_level_indices.unsqueeze(0).expand(n_queries, -1)
 

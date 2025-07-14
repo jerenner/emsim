@@ -97,7 +97,7 @@ def sparse_index_select(
     This function falls back to the built-in tensor.index_select(axis, index)
     when gradients are not required. Benchmarking seems to indicate the built-in
     version is generally faster and more memory efficient except for some specialized
-    situations on CUDA. You can always use the custom implemenation by setting this
+    situations on CUDA. You can always use the custom implementation by setting this
     function's input argument disable_builtin_fallback to True.
 
     Note that the built-in tensor.index_select will trigger mysterious errors

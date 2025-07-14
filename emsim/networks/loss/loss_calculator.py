@@ -150,7 +150,9 @@ class MaskDICELoss(LossComponent):
             seg_queries_b = torch.cat([inds[0], bg_index_b, extra_pos_logits])
 
             # predicted segmentation logits with [TP, bg, FP]
-            pred_logits_b: Tensor = sparse_index_select(pred, -1, seg_queries_b)
+            pred_logits_b: Tensor = sparse_index_select(
+                pred, -1, seg_queries_b, check_bounds=False
+            )
             pred_segmaps.append(pred_logits_b)
 
             # maybe reorder the segmentation map to [TP, bg]
@@ -158,7 +160,9 @@ class MaskDICELoss(LossComponent):
             seg_objs_b = torch.cat([inds[1], true_bg_index_b.unsqueeze(-1)])
 
             # true segmentation map with [TP, bg]
-            true_map_b: Tensor = sparse_index_select(tgt, -1, seg_objs_b)
+            true_map_b: Tensor = sparse_index_select(
+                tgt, -1, seg_objs_b, check_bounds=False
+            )
 
             # remove background pixels for which no prediction was made so they are
             # not counted in the loss
@@ -175,12 +179,11 @@ class MaskDICELoss(LossComponent):
             true_inds_flat: Tensor = flatten_nd_indices(true_map_b.indices(), shape)[
                 0
             ].squeeze(0)
-            keep = (
+            keep = torch.logical_and(
                 torch.isin(
                     true_inds_flat, pred_bg_pixels_flat, assume_unique=True, invert=True
-                )
-                & true_map_b.indices()[-1]
-                == true_bg_index_b
+                ),
+                true_map_b.indices()[-1] == true_bg_index_b,
             ).logical_not()
             true_map_b = torch.sparse_coo_tensor(
                 true_map_b.indices()[:, keep],
@@ -226,26 +229,51 @@ class MaskDICELoss(LossComponent):
             n_obj: int = dn_info_dict["n_objects_per_image"][b]
 
             pos_inds = torch.arange(n_obj, device=device) * 2
-            inds_with_bg = torch.cat(
-                [pos_inds, pos_inds.max(0, keepdim=True).values + 2]
-            )
+            bg_index = pos_inds.max() + 2
+            inds_with_bg = torch.cat([pos_inds, bg_index[None]])
 
-            pos_maps: Tensor = sparse_index_select(pred, -1, inds_with_bg)
-            pos_maps: Tensor = sparse_flatten(pos_maps, -2, -1)
-            pred_segmaps.append(pos_maps)
+            pos_maps: Tensor = sparse_index_select(
+                pred, -1, inds_with_bg, check_bounds=False
+            )
+            pos_maps_flat: Tensor = sparse_flatten(pos_maps, -2, -1)
+            pred_segmaps.append(pos_maps_flat)
 
             true_inds_with_bg = torch.arange(
                 (n_obj + 1) * n_dn_groups, device=device
             ) % (n_obj + 1)
             assert torch.equal(
-                true_inds_with_bg.view(n_dn_groups, -1)[:, :-1].flatten(),
-                inds[1]
+                true_inds_with_bg.view(n_dn_groups, -1)[:, :-1].flatten(), inds[1]
             )
 
-            true_selected: Tensor = sparse_index_select(tgt, -1, true_inds_with_bg)
+            true_selected: Tensor = sparse_index_select(
+                tgt, -1, true_inds_with_bg, check_bounds=False
+            )
 
-            ## TODO filter out unpredicted pixels like in the main queries so the
+            ## filter out unpredicted pixels like in the main queries so the
             # loss has a minimum at 0
+            shape = torch.tensor(true_selected.shape, device=device)
+            pred_indices_per_dn_group = pos_maps.indices()[:-1].clone()
+            flat_bg_indices = torch.arange(n_dn_groups, device=device) * (n_obj * 2) + 1
+            pred_indices_per_dn_group[-1] = flat_bg_indices[
+                pred_indices_per_dn_group[-1]
+            ]
+            pred_bg_inds_flat: Tensor = flatten_nd_indices(
+                pred_indices_per_dn_group, shape
+            )[0].squeeze(0)
+            true_inds_flat: Tensor = flatten_nd_indices(true_selected.indices(), shape)[
+                0
+            ].squeeze(0)
+            keep = torch.logical_and(
+                torch.isin(
+                    true_inds_flat, pred_bg_inds_flat, assume_unique=True, invert=True
+                ),
+                torch.isin(true_selected.indices()[-1], flat_bg_indices),
+            ).logical_not()
+            true_selected = torch.sparse_coo_tensor(
+                true_selected.indices()[:, keep],
+                true_selected.values()[keep],
+                true_selected.shape,
+            )
 
             true_segmaps.append(true_selected)
 

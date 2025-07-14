@@ -16,7 +16,7 @@ class DenoisingGenerator(nn.Module):
         super().__init__()
         self.config = config
         self.embed_dim = config.embed_dim
-        self.max_denoising_group_size = config.max_electrons_per_image
+        self.max_denoising_groups = config.max_denoising_groups
         self.max_total_denoising_queries = config.max_total_denoising_queries
         self.position_noise_std = config.position_noise_std
         self.negative_noise_mult_range = config.negative_noise_mult_range
@@ -53,8 +53,12 @@ class DenoisingGenerator(nn.Module):
             needed_queries <= n_dn_embeddings
         ), f"Not enough denoising queries ({n_dn_embeddings}, need {needed_queries})"
 
-        n_denoising_groups = max(
-            int(self.max_total_denoising_queries // n_total_objects // 2), 1
+        n_denoising_groups = min(
+            max(
+                int(self.max_total_denoising_queries // n_total_objects // 2),
+                1,
+            ),
+            self.max_denoising_groups,
         )
 
         true_positions_split = split_batch_concatted_tensor(

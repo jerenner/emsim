@@ -155,7 +155,7 @@ class EMModel(nn.Module):
         }
         denoising_output.update(
             {
-                "dn_batch_mask_dict": dn_info_dict,
+                "dn_info_dict": dn_info_dict,
                 "denoising_matched_indices": dn_info_dict[
                     "denoising_matched_indices"
                 ],

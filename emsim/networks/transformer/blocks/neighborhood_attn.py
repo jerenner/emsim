@@ -129,6 +129,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
         level_spatial_shapes: Tensor,
         background_embedding: Optional[Tensor] = None,
         query_level_indices: Optional[Tensor] = None,
+        query_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """Forward pass of sparse neighborhood attention.
 
@@ -165,6 +166,12 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
                 encoder, where queries are tokens at various levels, but may be
                 unspecified in the decoder, where queries are the object queries that
                 are given as being at the full-scale level.
+            query_mask (Optional[Tensor]): Optional boolean tensor of shape [n_queries]
+                that indicates queries that should not participate in the operation.
+                Specifically, if present, positions where this tensor is True will have
+                the corresponding query masked out from all keys in the attention
+                operation, meaning the query vectors will be unmodified by the
+                attention+residual operation.
 
         Returns:
             Tensor: Output embeddings after neighborhood attention,
@@ -274,6 +281,7 @@ class SparseNeighborhoodAttentionBlock(nn.Module):
             self.n_heads,
             key_positions=key_positions,
             rope_freqs=key_rope_freqs,
+            query_mask=query_mask,
             background_embedding=background_embedding,
         )
 

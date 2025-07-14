@@ -125,10 +125,11 @@ def sparse_flatten(tensor: Tensor, start_axis: int, end_axis: int) -> Tensor:
     tensor = tensor.coalesce()
 
     new_indices, new_shape, _ = flatten_sparse_indices(tensor, start_axis, end_axis)
-    new_shape: list[int] = new_shape.tolist()
+    assert isinstance(new_shape, Tensor)
+    new_shape_list: list[int] = new_shape.tolist()
     return torch.sparse_coo_tensor(
         new_indices,
         tensor.values(),
-        new_shape,
+        new_shape_list,
         is_coalesced=tensor.is_coalesced(),  # indices still unique and in correct order
     )

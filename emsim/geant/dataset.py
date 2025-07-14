@@ -355,11 +355,10 @@ class GeantElectronDataset(IterableDataset):
             #     batch["local_trajectories_pixels"] = local_trajectories_pixels
 
             # per-electron segmentation mask
-            segmentation_mask, background = make_soft_segmentation_mask(
-                stacked_sparse_arrays
+            segmentation_mask = make_soft_segmentation_mask(
+                stacked_sparse_arrays, batch["image"]
             )
             batch["segmentation_mask"] = segmentation_mask
-            batch["segmentation_background"] = background
 
             # multiscale incidence count maps
             incidence_points_rc = incidence_points_xy[..., ::-1]
@@ -438,15 +437,25 @@ def normalize_boxes(boxes: list[BoundingBox], image_width: int, image_height: in
     return boxes_xyxy
 
 
-def make_soft_segmentation_mask(stacked_sparse_arrays: sparse.SparseArray):
-    sparse_sum = stacked_sparse_arrays.sum(-1, keepdims=True)
+def make_soft_segmentation_mask(stacked_sparse_arrays: sparse.COO, image: np.ndarray):
+    noiseless_sum: np.ndarray = stacked_sparse_arrays.sum(-1, keepdims=True).todense()
+    noiseless_nonzero = noiseless_sum.nonzero()
 
-    background = ~sparse_sum.astype(bool)
-    denom = sparse_sum + background
+    image = image.squeeze(0)[..., None]  # (1, H, W) -> (H, W, 1)
+    # clip pixel energies at pixels with electron energy to min at true energy
+    image[noiseless_nonzero] = image[noiseless_nonzero].clip(
+        min=noiseless_sum[noiseless_nonzero]
+    )
 
-    sparse_soft_segmap = stacked_sparse_arrays / denom
+    background_energy = image - noiseless_sum
 
-    return sparse_soft_segmap, background
+    stacked_with_background = sparse.concat(
+        [stacked_sparse_arrays, sparse.COO.from_numpy(background_energy)], -1
+    )
+
+    sparse_soft_segmap = stacked_with_background / image
+
+    return sparse_soft_segmap
 
 
 def incident_pixel_map(incidence_points: np.ndarray, grid: GeantGridsize) -> sparse.COO:

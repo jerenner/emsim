@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Union
+from typing import Union, Optional
 
 import torch
 from torch import Tensor, nn
@@ -7,7 +7,7 @@ from torchmetrics import Metric, MetricCollection
 
 from emsim.utils.sparse_utils.batching.batch_utils import split_batch_concatted_tensor
 from emsim.utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
-from emsim.utils.sparse_utils.shape_ops import sparse_resize
+from emsim.utils.sparse_utils.shape_ops import sparse_resize, sparse_flatten
 
 
 class Mode(Enum):
@@ -51,10 +51,49 @@ def _restack_sparse_segmaps(segmaps: list[Tensor], max_elecs: int):
 
 
 @torch.jit.script
+def index_predicted_maps_denoising(
+    pred_logits: Tensor,
+    dn_info_dict: dict[str, Union[Tensor, list[Tensor], int, list[int]]],
+    matched_indices_b: Tensor,
+    batch_index: int,
+) -> Tensor:
+    """Index into the sparse segmentation map tensor, accounting for the extra
+    denoising group dimension.
+    """
+    # get the number of objects in this image, with a lot of type annotations to
+    # make torchscript happy
+    n_obj_per_image = dn_info_dict["n_objects_per_image"]
+    assert isinstance(n_obj_per_image, list)
+    assert torch.jit.isinstance(n_obj_per_image, list[int])
+    n_obj = n_obj_per_image[batch_index]
+    assert isinstance(n_obj, int)
+
+    n_dn_groups = pred_logits.shape[-2]
+    padded_dn_group_size = pred_logits.shape[-1]
+
+    # flatten out the [dn group, query] indices to 1D
+    pred_with_dn_group_flattened: Tensor = sparse_flatten(pred_logits, -2, -1)
+    assert pred_with_dn_group_flattened.ndim == 3
+
+    # account for background query in flattened dim
+    groups_arange = torch.repeat_interleave(
+        torch.arange(n_dn_groups, device=pred_logits.device), n_obj
+    )
+    rel_inds = matched_indices_b[0] - groups_arange * (n_obj * 2)
+    inds = rel_inds + groups_arange * padded_dn_group_size
+
+    out = sparse_index_select(pred_with_dn_group_flattened, -1, inds)
+    return out
+
+
+@torch.jit.script
 def sort_predicted_true_maps(
     predicted_segmentation_logits: Tensor,
     true_segmentation_map: Tensor,
     matched_indices: list[Tensor],
+    dn_info_dict: Optional[
+        dict[str, Union[Tensor, list[Tensor], int, list[int]]]
+    ] = None,
 ) -> tuple[Tensor, Tensor]:
     assert predicted_segmentation_logits.is_sparse
     assert true_segmentation_map.is_sparse
@@ -62,13 +101,21 @@ def sort_predicted_true_maps(
     reordered_predicted = []
     reordered_true = []
     max_elecs = max([indices.shape[1] for indices in matched_indices])
-    for predicted_map, true_map, indices in zip(
-        predicted_segmentation_logits.unbind(0),
-        true_segmentation_map.unbind(0),
-        matched_indices,
+    for b, (predicted_map, true_map, indices) in enumerate(
+        zip(
+            predicted_segmentation_logits.unbind(0),
+            true_segmentation_map.unbind(0),
+            matched_indices,
+        )
     ):
-
-        reordered_predicted.append(sparse_index_select(predicted_map, 2, indices[0]))
+        if dn_info_dict is None:
+            reordered_predicted.append(
+                sparse_index_select(predicted_map, 2, indices[0])
+            )
+        else:
+            reordered_predicted.append(
+                index_predicted_maps_denoising(predicted_map, dn_info_dict, indices, b)
+            )
         reordered_true.append(sparse_index_select(true_map, 2, indices[1]))
 
     reordered_predicted = _restack_sparse_segmaps(

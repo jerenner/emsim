@@ -23,6 +23,8 @@ layer_filter_ratio: [1.0, 0.8, 0.6, 0.6, 0.4, 0.2]
 # Number of object queries
 query_embeddings: 500
 
+use_background_embedding: true
+
 mask_main_queries_from_denoising: ${model.denoising.mask_main_queries_from_denoising}
 
 encoder:
@@ -35,6 +37,8 @@ encoder:
   use_neighborhood_attn: true
 
   use_rope: true
+
+  use_background_embedding: ${model.transformer.use_background_embedding}
 
 decoder:
   n_layers: 6
@@ -70,7 +74,7 @@ decoder:
 
   segmentation_head:
     # Inherited values
-    d_model: ${model.transformer.d_model}
+    embed_dim: ${model.transformer.d_model}
     n_heads: ${model.transformer.n_heads}
     dim_feedforward: ${model.transformer.dim_feedforward}
     dropout: ${model.transformer.dropout}
@@ -90,3 +94,15 @@ rope:
   share_heads: false
   freq_group_pattern: PARTITION  # SINGLE, PARTITION, CLOSURE
   enforce_freq_groups_equal: true
+
+background_transformer:
+  embed_dim: ${model.transformer.d_model}
+  n_heads: ${model.transformer.n_heads}
+  dim_feedforward: ${model.transformer.dim_feedforward}
+  dropout: ${model.transformer.dropout}
+  activation_fn: ${model.transformer.activation_fn}
+  attn_proj_bias: ${model.transformer.attn_proj_bias}
+  norm_first: ${model.transformer.norm_first}
+  
+  rope_base_theta: ${model.transformer.rope.level_base_theta}
+  rope_share_heads: ${model.transformer.rope.share_heads}

@@ -16,6 +16,9 @@ class DenoisingConfig:
     # determines how much room for duplicate denoising groups
     max_total_denoising_queries: int = 1200
 
+    # cap on number of denoising groups
+    max_denoising_groups: int = 100
+
     # noise statistics
     position_noise_std: float = 5.0
 

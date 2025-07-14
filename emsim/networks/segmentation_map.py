@@ -147,10 +147,12 @@ class SegmentationMapLayer(nn.Module):
         stacked_feature_map: Tensor,
         level_spatial_shapes: Tensor,
         background_embedding: Optional[Tensor] = None,
-        background_queries: Optional[Tensor] = None,
+        is_background_mask: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
-        dn_info_dict: Optional[dict[str, Tensor]] = None,
-    ) -> tuple[Tensor, Optional[Tensor]]:
+        dn_info_dict: Optional[
+            dict[str, Union[Tensor, list[Tensor], int, list[int]]]
+        ] = None,
+    ) -> Tensor:
         max_level_index = level_spatial_shapes.argmax(dim=0)
         max_level_index = torch.unique(max_level_index)
         assert len(max_level_index) == 1
@@ -163,19 +165,8 @@ class SegmentationMapLayer(nn.Module):
             level_spatial_shapes,
             background_embedding=background_embedding,
             query_level_indices=query_level_indices,
+            query_mask=is_background_mask,
         )
-
-        if background_queries is not None:
-            stacked = stack_bg_onto_queries(
-                queries,
-                query_positions,
-                query_batch_offsets,
-                background_queries,
-                attn_mask,
-                dn_info_dict,
-            )
-            queries, query_positions, query_batch_offsets, attn_mask = stacked
-            query_level_indices = max_level_index.expand(query_positions.shape[0])
 
         queries = self.self_attn(
             queries,
@@ -185,15 +176,10 @@ class SegmentationMapLayer(nn.Module):
             batch_offsets=query_batch_offsets,
             attn_mask=attn_mask,
         )
+
         queries = self.ffn(queries)
 
-        # unstack background queries if needed
-        if background_queries is not None:
-            queries, background_queries = unstack_bg_from_queries(
-                queries, query_batch_offsets, dn_info_dict
-            )
-
-        return queries, background_queries
+        return queries
 
     def reset_parameters(self):
         self.nhood_attn.reset_parameters()
@@ -207,8 +193,10 @@ def stack_bg_onto_queries(
     query_batch_offsets: Tensor,
     background_queries: Tensor,  # [batch_size x (1 or n_dn_groups+1) x embed_dim]
     attn_mask: Optional[Tensor] = None,
-    dn_info_dict: Optional[dict] = None,
-) -> tuple[Tensor, Tensor, Tensor, Optional[Tensor]]:
+    dn_info_dict: Optional[
+        dict[str, Union[Tensor, list[Tensor], list[int], int]]
+    ] = None,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Optional[Tensor]]:
     """Augment the object query tensor with background queries for processing by the
     layers in the segmentation head.
 
@@ -253,6 +241,8 @@ def stack_bg_onto_queries(
             in the same order as queries_with_bg and background queries given all-0
             positions.
         new_offsets (Tensor): `query_batch_offsets` for the new enlarged tensors.
+        is_background (Tensor): Boolean tensor of size [queries_with_bg.shape[0]] that
+            is True at positions where the output tensor are the background queries.
         new_attn_mask (Tensor): Expanded denoising training attention mask, of shape
             [batch_size, new_max_queries, new_max_queries], where new_max_queries is
             larger than the input max_queries size to account for the main queries and
@@ -275,24 +265,40 @@ def stack_bg_onto_queries(
     if dn_info_dict is None:  # not denoising
         assert attn_mask is None  # assume attn_mask only for masking dn groups
         # stack background query onto object queries
-        queries_with_bg = torch.cat(
-            [x for pair in zip(queries_split, bg_split) for x in pair]
-        )
-        pos_with_bg = torch.cat([x for pos in pos_split for x in (pos, zero_pos)])
+        queries_with_bg_list: list[Tensor] = []
+        pos_with_bg_list: list[Tensor] = []
+        is_background_list: list[Tensor] = []
+        for q, p, bg in zip(queries_split, pos_split, bg_split):
+            queries_with_bg_list.extend([q, bg])
+            pos_with_bg_list.extend([p, zero_pos])
+            is_background_list.extend(
+                [
+                    torch.zeros(q.size(0), dtype=torch.bool, device=q.device),
+                    torch.ones(bg.size(0), dtype=torch.bool, device=bg.device),
+                ]
+            )
+        queries_with_bg = torch.cat(queries_with_bg_list)
+        pos_with_bg = torch.cat(pos_with_bg_list)
+        is_background = torch.cat(is_background_list)
 
         new_offsets = query_batch_offsets + torch.arange(
             len(query_batch_offsets), device=query_batch_offsets.device
         )
 
-        return queries_with_bg, pos_with_bg, new_offsets, None
+        return queries_with_bg, pos_with_bg, new_offsets, is_background, None
 
     ### with denoising groups ###
 
     # need to account for denoising by adding bg query to every dn group
     # and updating attn_mask
-    n_obj_per_image: list[int] = dn_info_dict["n_objects_per_image"]
-    n_dn_groups: int = dn_info_dict["n_denoising_groups"]
-    n_main_q_per_image: list[int] = dn_info_dict["n_main_queries_per_image"]
+    n_obj_per_image = dn_info_dict["n_objects_per_image"]
+    assert isinstance(n_obj_per_image, list)
+    assert torch.jit.isinstance(n_obj_per_image, list[int])
+    n_dn_groups = dn_info_dict["n_denoising_groups"]
+    assert isinstance(n_dn_groups, int)
+    n_main_q_per_image = dn_info_dict["n_main_queries_per_image"]
+    assert isinstance(n_main_q_per_image, list)
+    assert torch.jit.isinstance(n_main_q_per_image, list[int])
     old_lens = [
         main + obj * n_dn_groups * 2
         for main, obj in zip(n_main_q_per_image, n_obj_per_image)
@@ -300,13 +306,16 @@ def stack_bg_onto_queries(
 
     queries_with_bg_list: list[Tensor] = []
     pos_with_bg_list: list[Tensor] = []
+    is_background_list: list[Tensor] = []
     new_lens: list[int] = []
 
     for b, (queries_b, pos_b, bg_b) in enumerate(
         zip(queries_split, pos_split, bg_split)
     ):
         n_q_main_b = n_main_q_per_image[b]
+        assert isinstance(n_q_main_b, int)
         dn_group_size_b = n_obj_per_image[b] * 2  # (pos + neg)
+        assert isinstance(dn_group_size_b, int)
         q_main, q_dn = queries_b.tensor_split([n_q_main_b])
         p_main, p_dn = pos_b.tensor_split([n_q_main_b])
         bg_main, bg_dn = bg_b.tensor_split([1])
@@ -315,17 +324,27 @@ def stack_bg_onto_queries(
         queries_with_bg_list.extend([q_main, bg_main])
         pos_with_bg_list.extend([p_main, zero_pos])
 
+        is_background_list.extend(
+            [
+                torch.zeros(q_main.size(0), dtype=torch.bool, device=q_main.device),
+                torch.ones(bg_main.size(0), dtype=torch.bool, device=bg_main.device),
+            ]
+        )
+
         # Add background query to each denoising group
         q_dn_groups = q_dn.split(dn_group_size_b)
         p_dn_groups = p_dn.split(dn_group_size_b)
         bg_dn_groups = bg_dn.split(1)
         assert len(q_dn_groups) == len(p_dn_groups) == len(bg_dn_groups) == n_dn_groups
-        queries_with_bg_list.extend(
-            list(chain.from_iterable(zip(q_dn_groups, bg_dn_groups)))
-        )
-        pos_with_bg_list.extend(
-            list(chain.from_iterable(zip(p_dn_groups, repeat(zero_pos))))
-        )
+        for q, p, bg in zip(q_dn_groups, p_dn_groups, bg_dn_groups):
+            queries_with_bg_list.extend([q, bg])
+            pos_with_bg_list.extend([p, zero_pos])
+            is_background_list.extend(
+                [
+                    torch.zeros(q.size(0), dtype=torch.bool, device=q.device),
+                    torch.ones(bg.size(0), dtype=torch.bool, device=bg.device),
+                ]
+            )
 
         new_len_b = n_q_main_b + 1 + n_dn_groups * (dn_group_size_b + 1)
         new_lens.append(new_len_b)
@@ -333,12 +352,15 @@ def stack_bg_onto_queries(
     # concatted queries and positions with background queries interleaved
     queries_with_bg = torch.cat(queries_with_bg_list)
     pos_with_bg = torch.cat(pos_with_bg_list)
+    is_background = torch.cat(is_background_list)
     # new batch offsets
-    new_offsets = torch.zeros_like(query_batch_offsets)
-    new_offsets[1:] = new_offsets.new_tensor(new_lens).cumsum(0)
+    new_offsets = seq_lengths_to_batch_offsets(
+        torch.tensor(new_lens, device=query_batch_offsets.device)
+    )
+    assert isinstance(new_offsets, Tensor)
 
     if attn_mask is None:
-        return queries_with_bg, pos_with_bg, new_offsets, None
+        return queries_with_bg, pos_with_bg, new_offsets, is_background, None
 
     # stacked query and position tensors complete, now need to build new attn mask
     max_new_q = max(new_lens)
@@ -386,7 +408,7 @@ def stack_bg_onto_queries(
 
         assert torch.equal(new_mask_b, new_attn_mask[b])
 
-    return queries_with_bg, pos_with_bg, new_offsets, new_attn_mask
+    return queries_with_bg, pos_with_bg, new_offsets, is_background, new_attn_mask
 
 
 def unstack_bg_from_queries(
@@ -522,20 +544,46 @@ class PatchedSegmentationMapPredictor(nn.Module):
                 # make separate bg query for main queries and each dn group
                 n_dn_groups: int = dn_info_dict["n_denoising_groups"]
                 background_query = background_query.expand(-1, n_dn_groups + 1, -1)
+            else:
+                n_dn_groups = 0
+            (
+                queries,
+                query_positions_stacked,
+                query_batch_offsets_stacked,
+                is_background_mask,
+                attn_mask,
+            ) = stack_bg_onto_queries(
+                queries,
+                query_positions,
+                query_batch_offsets,
+                background_query,
+                attn_mask,
+                dn_info_dict,
+            )
+        else:
+            query_batch_offsets_stacked = query_batch_offsets
+            query_positions_stacked = query_positions
+            is_background_mask = None
 
         # Run the queries through the transformer layers
         for layer in self.layers:
-            queries, background_query = layer(
+            queries = layer(
                 queries,
-                query_batch_offsets,
-                query_positions,
+                query_batch_offsets_stacked,
+                query_positions_stacked,
                 stacked_feature_map,
                 level_spatial_shapes,
                 background_embedding,
-                background_queries=background_query,
+                is_background_mask=is_background_mask,
                 attn_mask=attn_mask,
                 dn_info_dict=dn_info_dict,
             )
+
+        if is_background_mask is not None:
+            background_query = queries[is_background_mask].view(
+                batch_size, n_dn_groups + 1, queries.shape[-1]
+            )
+            queries = queries[~is_background_mask]
 
         ##### build output segmentation tensors #####
         # 1. find feature level corresponding to full-scale pixels

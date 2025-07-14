@@ -7,10 +7,17 @@ from torch import Tensor, nn
 from torchvision.ops.boxes import generalized_box_iou
 
 from ...config.criterion import CriterionConfig
-from ...utils.sparse_utils.batching import batch_offsets_to_indices
+from ...utils.sparse_utils.batching import (
+    batch_offsets_to_indices,
+    split_batch_concatted_tensor,
+)
 from ...utils.sparse_utils.indexing.indexing import union_sparse_indices
+from ...utils.sparse_utils.indexing.script_funcs import flatten_nd_indices
+from ...utils.sparse_utils.shape_ops import sparse_flatten
+from ...utils.sparse_utils.indexing.unique import unique_rows
+from ...utils.sparse_utils.indexing.sparse_index_select import sparse_index_select
 from .salience_criterion import ElectronSalienceCriterion
-from .utils import sort_predicted_true_maps, sort_tensor
+from .utils import sort_predicted_true_maps, sort_tensor, _restack_sparse_segmaps
 
 
 class LossComponent(nn.Module):
@@ -83,23 +90,173 @@ class MaskBCELoss(LossComponent):
 
 class MaskDICELoss(LossComponent):
     def forward(
-        self, sorted_predicted_logits: Tensor, sorted_true_mask: Tensor
+        self,
+        predicted_dict: dict[str, Any],
+        target_dict: dict[str, Any],
+        matched_indices: list[Tensor],
     ) -> Tensor:
-        assert sorted_predicted_logits.shape == sorted_true_mask.shape
+        pred_seg_logits: Tensor = predicted_dict["pred_segmentation_logits"]
+        true_seg: Tensor = target_dict["segmentation_mask"]
 
-        predicted_segmentation: Tensor = torch.sparse.softmax(
-            sorted_predicted_logits, -1
-        )
+        if pred_seg_logits.ndim == true_seg.ndim:
+            # main queries (not denoising)
+            predicted_segmentation, true_segmap = self.dice_inputs_main(
+                predicted_dict, target_dict, matched_indices
+            )
+        else:
+            assert pred_seg_logits.ndim == true_seg.ndim + 1
+            # denoising
+            predicted_segmentation, true_segmap = self.dice_inputs_denoising(
+                predicted_dict, target_dict, matched_indices
+            )
 
         losses = []
-        num = 2 * predicted_segmentation * sorted_true_mask
-        den = predicted_segmentation + sorted_true_mask
+        num = 2 * predicted_segmentation * true_segmap
+        den = predicted_segmentation + true_segmap
         for num_i, den_i in zip(num, den):
             num_sum = num_i.coalesce().values().sum()
             den_sum = den_i.coalesce().values().sum()
             losses.append(1 - (num_sum + 1) / (den_sum + 1))
         loss = torch.stack(losses).mean()
         return loss
+
+    def dice_inputs_main(
+        self,
+        predicted_dict: dict[str, Any],
+        target_dict: dict[str, Any],
+        matched_indices: list[Tensor],
+    ) -> tuple[Tensor, Tensor]:
+        pred_seg_logits: Tensor = predicted_dict["pred_segmentation_logits"]
+        true_seg: Tensor = target_dict["segmentation_mask"]
+
+        split_query_logits: list[Tensor] = split_batch_concatted_tensor(
+            predicted_dict["pred_logits"], predicted_dict["query_batch_offsets"]
+        )
+        pred_segmaps = []
+        true_segmaps = []
+        for b, (q_logits, pred, tgt, inds) in enumerate(
+            zip(
+                split_query_logits,
+                pred_seg_logits.unbind(0),
+                true_seg.unbind(0),
+                matched_indices,
+            )
+        ):
+            # get the subset of queries corresponding to matched queries, additional
+            # false positives, and the background
+            pos_logit_subset = (q_logits.squeeze(-1) > 0).nonzero().squeeze(-1)
+            extra_pos_logits = pos_logit_subset[~torch.isin(pos_logit_subset, inds[0])]
+            bg_index_b = inds[0].new_tensor([q_logits.shape[0]])
+            seg_queries_b = torch.cat([inds[0], bg_index_b, extra_pos_logits])
+
+            # predicted segmentation logits with [TP, bg, FP]
+            pred_logits_b: Tensor = sparse_index_select(pred, -1, seg_queries_b)
+            pred_segmaps.append(pred_logits_b)
+
+            # maybe reorder the segmentation map to [TP, bg]
+            true_bg_index_b: Tensor = target_dict["batch_size"][b]
+            seg_objs_b = torch.cat([inds[1], true_bg_index_b.unsqueeze(-1)])
+
+            # true segmentation map with [TP, bg]
+            true_map_b: Tensor = sparse_index_select(tgt, -1, seg_objs_b)
+
+            # remove background pixels for which no prediction was made so they are
+            # not counted in the loss
+            shape = torch.tensor(true_map_b.shape, device=true_map_b.device)
+            pred_bg_pixels_flat: Tensor = flatten_nd_indices(
+                torch.cat(
+                    [
+                        pred_logits_b.indices()[:-1],
+                        true_bg_index_b.expand(1, pred_logits_b._nnz()),
+                    ]
+                ),
+                shape,
+            )[0].squeeze(0)
+            true_inds_flat: Tensor = flatten_nd_indices(true_map_b.indices(), shape)[
+                0
+            ].squeeze(0)
+            keep = (
+                torch.isin(
+                    true_inds_flat, pred_bg_pixels_flat, assume_unique=True, invert=True
+                )
+                & true_map_b.indices()[-1]
+                == true_bg_index_b
+            ).logical_not()
+            true_map_b = torch.sparse_coo_tensor(
+                true_map_b.indices()[:, keep],
+                true_map_b.values()[keep],
+                true_map_b.shape,
+            )
+
+            true_segmaps.append(true_map_b)
+
+        max_obj = max(
+            [pred.shape[-1] for pred in pred_segmaps]
+            + [true.shape[-1] for true in true_segmaps]
+        )
+
+        pred_seg_logits = _restack_sparse_segmaps(pred_segmaps, max_obj)
+        true_segmap = _restack_sparse_segmaps(true_segmaps, max_obj)
+
+        predicted_segmentation: Tensor = torch.sparse.softmax(pred_seg_logits, -1)
+
+        return predicted_segmentation, true_segmap
+
+    def dice_inputs_denoising(
+        self,
+        predicted_dict: dict[str, Any],
+        target_dict: dict[str, Any],
+        matched_indices: list[Tensor],
+    ) -> tuple[Tensor, Tensor]:
+        pred_seg_logits: Tensor = predicted_dict["pred_segmentation_logits"]
+        true_seg: Tensor = target_dict["segmentation_mask"]
+        dn_info_dict = predicted_dict["dn_info_dict"]
+        device = pred_seg_logits.device
+
+        pred_segmentation: Tensor = torch.sparse.softmax(pred_seg_logits, -1)
+
+        pred_segmaps = []
+        true_segmaps = []
+
+        n_dn_groups = pred_seg_logits.shape[-2]
+
+        for b, (pred, tgt, inds) in enumerate(
+            zip(pred_segmentation.unbind(0), true_seg.unbind(0), matched_indices)
+        ):
+            n_obj: int = dn_info_dict["n_objects_per_image"][b]
+
+            pos_inds = torch.arange(n_obj, device=device) * 2
+            inds_with_bg = torch.cat(
+                [pos_inds, pos_inds.max(0, keepdim=True).values + 2]
+            )
+
+            pos_maps: Tensor = sparse_index_select(pred, -1, inds_with_bg)
+            pos_maps: Tensor = sparse_flatten(pos_maps, -2, -1)
+            pred_segmaps.append(pos_maps)
+
+            true_inds_with_bg = torch.arange(
+                (n_obj + 1) * n_dn_groups, device=device
+            ) % (n_obj + 1)
+            assert torch.equal(
+                true_inds_with_bg.view(n_dn_groups, -1)[:, :-1].flatten(),
+                inds[1]
+            )
+
+            true_selected: Tensor = sparse_index_select(tgt, -1, true_inds_with_bg)
+
+            ## TODO filter out unpredicted pixels like in the main queries so the
+            # loss has a minimum at 0
+
+            true_segmaps.append(true_selected)
+
+        max_obj = max(
+            [pred.shape[-1] for pred in pred_segmaps]
+            + [true.shape[-1] for true in true_segmaps]
+        )
+        predicted_segmentation = _restack_sparse_segmaps(pred_segmaps, max_obj)
+        true_segmentation = _restack_sparse_segmaps(true_segmaps, max_obj)
+
+        return predicted_segmentation, true_segmentation
 
 
 class DistanceNLLLoss(LossComponent):
@@ -255,6 +412,11 @@ class LossCalculator(nn.Module):
             predicted_dict["pred_segmentation_logits"],
             target_dict["segmentation_mask"],
             matched_indices,
+            (
+                predicted_dict["dn_info_dict"]
+                if "dn_info_dict" in predicted_dict
+                else None
+            ),
         )
         unioned_predicted, unioned_true = self._get_unioned_masks(
             sorted_predicted_map, sorted_true_map
@@ -263,7 +425,7 @@ class LossCalculator(nn.Module):
             unioned_predicted, unioned_true
         )
         loss_dict["loss_mask_dice"] = self.losses["mask_dice"](
-            sorted_predicted_map, sorted_true_map
+            predicted_dict, target_dict, matched_indices
         )
         # Save unioned masks for later metric calculation
         extras_dict["unioned_predicted_mask"] = unioned_predicted.detach()

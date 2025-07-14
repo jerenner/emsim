@@ -7,7 +7,10 @@ from torch import Tensor, nn
 from torchvision.ops.boxes import generalized_box_iou
 
 from emsim.config.criterion import MatcherConfig
-from emsim.utils.sparse_utils.batching.batch_utils import split_batch_concatted_tensor
+from emsim.utils.sparse_utils.batching.batch_utils import (
+    split_batch_concatted_tensor,
+    batch_offsets_to_seq_lengths,
+)
 from emsim.utils.sparse_utils.shape_ops import (
     sparse_flatten_hw,
 )
@@ -31,14 +34,7 @@ class HungarianMatcher(nn.Module):
     def forward(
         self, predicted_dict: dict[str, Tensor], target_dict: dict[str, Tensor]
     ) -> list[Tensor]:
-        n_queries = torch.cat(
-            [
-                predicted_dict["query_batch_offsets"],
-                predicted_dict["query_batch_offsets"].new_tensor(
-                    [predicted_dict["pred_logits"].shape[-2]]
-                ),
-            ]
-        ).diff()
+        n_queries = batch_offsets_to_seq_lengths(predicted_dict["query_batch_offsets"])
         n_electrons = target_dict["batch_size"]
         image_sizes_xy = target_dict["image_size_pixels_rc"].flip(-1)
         segmap = target_dict["segmentation_mask"].to(
@@ -203,9 +199,9 @@ def get_bce_cost(
         #     - torch.sparse.mm(neg.T, targ).to_dense()
         # )
         pixels_with_predictions = pos.sum(1).to_dense().nonzero().squeeze(1)
-        pos_select = pos.index_select(0, pixels_with_predictions).to_dense()
-        neg_select = neg.index_select(0, pixels_with_predictions).to_dense()
-        targ_select = targ.index_select(0, pixels_with_predictions).to_dense()
+        pos_select = pos.index_select(0, pixels_with_predictions).to_dense()[:, :q]
+        neg_select = neg.index_select(0, pixels_with_predictions).to_dense()[:, :q]
+        targ_select = targ.index_select(0, pixels_with_predictions).to_dense()[:, :e]
         pos_loss = torch.mm(pos_select.T, targ_select)
         neg_loss = torch.sum(neg_select, (0,)).unsqueeze(-1) - torch.mm(
             neg_select.T, targ_select
@@ -213,7 +209,7 @@ def get_bce_cost(
 
         nnz = max(targ._nnz(), 1)
         loss = (pos_loss + neg_loss) / nnz
-        out.append(loss[:q, :e])
+        out.append(loss)
 
     return out
 
@@ -239,15 +235,15 @@ def get_dice_cost(
         #     true, (0,)
         # ).to_dense().unsqueeze(0)
         pixels_with_predictions = pred.sum(1).to_dense().nonzero().squeeze(1)
-        pred_select = pred.index_select(0, pixels_with_predictions).to_dense()
-        true_select = true.index_select(0, pixels_with_predictions).to_dense()
+        pred_select = pred.index_select(0, pixels_with_predictions).to_dense()[:, :q]
+        true_select = true.index_select(0, pixels_with_predictions).to_dense()[:, :e]
         num = 2 * torch.mm(pred_select.T, true_select)
         den = pred_select.sum(0).unsqueeze(-1) + torch.sparse.sum(
             true, (0,)
-        ).to_dense().unsqueeze(0)
+        ).to_dense()[:e].unsqueeze(0)
 
         loss = 1 - ((num + 1) / (den + 1))
-        out.append(loss[:q, :e])
+        out.append(loss)
 
     return out
 

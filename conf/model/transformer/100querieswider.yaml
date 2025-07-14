@@ -1,0 +1,3 @@
+query_embeddings: 100
+d_model: 512
+dim_feedforward: 2048

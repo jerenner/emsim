@@ -514,7 +514,7 @@ class LossCalculator(nn.Module):
         matched_indices: list[Tensor],
     ) -> dict[str, Tensor]:
         position_data = {}
-        device = predicted_dict["pred_positions"]
+        device = predicted_dict["pred_positions"].device
 
         # position centers
         position_data["pred_positions"] = sort_tensor(

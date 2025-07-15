@@ -31,7 +31,7 @@ class LossComponent(nn.Module):
         return self.weight * loss_value
 
     def weighted_loss(self, *args, **kwargs) -> Tensor:
-        return self.weight_loss(self(*args, **kwargs))
+        return self.apply_weight(self(*args, **kwargs))
 
 
 class ClassificationLoss(LossComponent):

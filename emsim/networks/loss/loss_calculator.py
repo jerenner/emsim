@@ -514,11 +514,11 @@ class LossCalculator(nn.Module):
         matched_indices: list[Tensor],
     ) -> dict[str, Tensor]:
         position_data = {}
-        device = predicted_dict["pred_positions"].device
+        pred = predicted_dict["pred_positions"]
 
         # position centers
         position_data["pred_positions"] = sort_tensor(
-            predicted_dict["pred_positions"],
+            pred,
             predicted_dict["query_batch_offsets"],
             [inds[0] for inds in matched_indices],
         )
@@ -532,20 +532,20 @@ class LossCalculator(nn.Module):
 
         # true positions
         position_data["true_positions"] = sort_tensor(
-            target_dict["incidence_points_pixels_rc"].to(device),
+            target_dict["incidence_points_pixels_rc"].to(pred),
             target_dict["electron_batch_offsets"],
             [inds[1] for inds in matched_indices],
         )
 
         # center of mass estimates
         position_data["centroid_positions"] = sort_tensor(
-            target_dict["centers_of_mass_rc"].to(device),
+            target_dict["centers_of_mass_rc"].to(pred),
             target_dict["electron_batch_offsets"],
             [inds[1] for inds in matched_indices],
         )
 
         # image geometry
-        image_size = target_dict["image_size_pixels_rc"].to(device)
+        image_size = target_dict["image_size_pixels_rc"].to(pred)
         position_data["image_size_pixels_rc"] = image_size
 
         return position_data
